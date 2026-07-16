@@ -51,6 +51,120 @@ DEFAULT_ENV = {
     "consumption_index": 1.0,
 }
 
+AGENT_PROFILE_SQL = """
+CREATE TABLE IF NOT EXISTS agent_profiles (
+    resident_id INTEGER PRIMARY KEY,
+    gender TEXT NOT NULL,
+    avatar_style TEXT NOT NULL,
+    energy INTEGER NOT NULL DEFAULT 80,
+    mood TEXT NOT NULL DEFAULT '平稳',
+    current_task TEXT NOT NULL DEFAULT '适应校园生活',
+    schedule TEXT NOT NULL DEFAULT '[]',
+    perception TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY (resident_id) REFERENCES residents(id) ON DELETE CASCADE
+);
+"""
+
+
+def ensure_agent_profile_table(conn):
+    conn.executescript(AGENT_PROFILE_SQL)
+
+
+def load_json_text(text, fallback):
+    if not text:
+        return fallback
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return fallback
+
+
+def get_agent_module_state(conn, resident_id):
+    ensure_agent_profile_table(conn)
+    resident = conn.execute("SELECT * FROM residents WHERE id = ?", (resident_id,)).fetchone()
+    if not resident:
+        return None
+
+    profile = conn.execute(
+        "SELECT * FROM agent_profiles WHERE resident_id = ?",
+        (resident_id,),
+    ).fetchone()
+    inventory_rows = conn.execute(
+        "SELECT item_name, quantity FROM inventory WHERE resident_id = ? ORDER BY item_name",
+        (resident_id,),
+    ).fetchall()
+    relationship_rows = conn.execute(
+        """
+        SELECT relationships.to_resident_id, residents.name, residents.role,
+               relationships.score, relationships.notes
+        FROM relationships
+        JOIN residents ON residents.id = relationships.to_resident_id
+        WHERE relationships.from_resident_id = ?
+        ORDER BY relationships.score DESC
+        LIMIT 10
+        """,
+        (resident_id,),
+    ).fetchall()
+    memory_rows = conn.execute(
+        """
+        SELECT day, content, importance, created_at
+        FROM memories
+        WHERE resident_id = ?
+        ORDER BY id DESC
+        LIMIT 8
+        """,
+        (resident_id,),
+    ).fetchall()
+
+    profile_data = dict(profile) if profile else {}
+    schedule = load_json_text(profile_data.get("schedule"), [])
+    perception = load_json_text(profile_data.get("perception"), {})
+
+    return {
+        "id": resident["id"],
+        "name": resident["name"],
+        "gender": profile_data.get("gender", "未设置"),
+        "avatar_style": profile_data.get("avatar_style", "简单卡通校园人物"),
+        "modules": {
+            "Physical": {
+                "description": "我是谁、我在哪",
+                "position": resident["location"],
+                "role": resident["role"],
+                "energy": profile_data.get("energy", 80),
+                "money": resident["money"],
+                "mood": profile_data.get("mood", "平稳"),
+                "inventory": rows_to_dicts(inventory_rows),
+            },
+            "Mental": {
+                "description": "我想干什么",
+                "goal": resident["goal"],
+                "personality": resident["personality"],
+                "task": profile_data.get("current_task", "适应校园生活"),
+            },
+            "Social": {
+                "description": "我认识谁",
+                "relationships": rows_to_dicts(relationship_rows),
+            },
+            "Memory": {
+                "description": "我经历过什么",
+                "memories": rows_to_dicts(memory_rows),
+            },
+            "Schedule": {
+                "description": "我现在该干什么",
+                "schedule": schedule,
+            },
+            "Perception": {
+                "description": "我现在看见什么",
+                "perception": perception,
+            },
+        },
+    }
+
+
+def get_all_agent_module_states(conn):
+    rows = conn.execute("SELECT id FROM residents ORDER BY id").fetchall()
+    return [get_agent_module_state(conn, row["id"]) for row in rows]
+
 
 class MoveRequest(BaseModel):
     resident_id: int
@@ -193,6 +307,7 @@ def decide_agent_action(conn, resident_id):
     day = get_current_day(conn)
     env = get_campus_environment(conn, day)
     context = get_recent_context(conn, resident_id)
+    module_state = get_agent_module_state(conn, resident_id)
     other_agents = conn.execute(
         "SELECT id, name, role, location FROM residents WHERE id != ? ORDER BY id",
         (resident_id,),
@@ -206,6 +321,7 @@ def decide_agent_action(conn, resident_id):
 当前 Agent：{json.dumps(dict(resident), ensure_ascii=False)}
 其他 Agent：{json.dumps(rows_to_dicts(other_agents), ensure_ascii=False)}
 近期记忆和事件：{json.dumps(context, ensure_ascii=False)}
+Agent 六模块状态：{json.dumps(module_state, ensure_ascii=False)}
 
 请只返回严格 JSON，不要解释，不要 Markdown。
 可选 action 只能是：move、chat、buy_sell、submit_policy、observe。
@@ -397,6 +513,7 @@ def get_state():
             "agents": rows_to_dicts(residents),
             "residents": rows_to_dicts(residents),
             "events": rows_to_dicts(events),
+            "agent_modules": get_all_agent_module_states(conn),
         }
 
 
@@ -411,6 +528,21 @@ def get_agents():
 def get_residents():
     return get_agents()
 
+
+
+@app.get("/api/agents/modules")
+def get_agents_modules():
+    with get_connection() as conn:
+        return get_all_agent_module_states(conn)
+
+
+@app.get("/api/agents/{resident_id}/modules")
+def get_agent_modules(resident_id: int):
+    with get_connection() as conn:
+        state = get_agent_module_state(conn, resident_id)
+        if not state:
+            raise HTTPException(status_code=404, detail="Agent 不存在")
+        return state
 
 @app.get("/api/inventory")
 def get_inventory():
@@ -587,6 +719,7 @@ def newspaper_today():
             "title": f"校园封闭世界日报 第 {day} 天",
             "environment": env,
             "events": rows_to_dicts(events),
+            "agent_modules": get_all_agent_module_states(conn),
         }
 
 
@@ -645,3 +778,4 @@ def simulate_ai_day():
             "environment": env,
             "actions": results,
         }
+
