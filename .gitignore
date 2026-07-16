@@ -1,0 +1,35 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+virtual_chengdu/
+
+# Local config and secrets
+.env
+.env.*
+!.env.example
+
+# Databases and generated data
+data/
+*.db
+*.sqlite
+*.sqlite3
+data/*.db
+data/*.sqlite*
+
+# IDE and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Backups
+backup_*/
+backup_campus_*/
+
