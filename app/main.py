@@ -166,6 +166,69 @@ def get_all_agent_module_states(conn):
     return [get_agent_module_state(conn, row["id"]) for row in rows]
 
 
+def clamp(value, low=0, high=100):
+    return max(low, min(high, int(value)))
+
+
+def choose_mood(energy, action, success=True):
+    if not success:
+        return "受挫"
+    if energy <= 25:
+        return "疲惫"
+    if action == "chat":
+        return "放松"
+    if action == "buy_sell":
+        return "满足"
+    if action == "submit_policy":
+        return "认真"
+    if action == "move":
+        return "行动中"
+    return "观察中"
+
+
+def update_agent_profile_after_action(conn, resident_id, action, reason, success=True):
+    ensure_agent_profile_table(conn)
+    profile = conn.execute(
+        "SELECT energy FROM agent_profiles WHERE resident_id = ?",
+        (resident_id,),
+    ).fetchone()
+    if not profile:
+        return
+
+    energy_delta = {
+        "move": -8,
+        "chat": -3,
+        "buy_sell": -5,
+        "submit_policy": -6,
+        "observe": -2,
+    }.get(action, -2)
+    if not success:
+        energy_delta -= 3
+
+    new_energy = clamp(int(profile["energy"]) + energy_delta)
+    new_mood = choose_mood(new_energy, action, success)
+    task_label = {
+        "move": "前往新地点并观察周围变化",
+        "chat": "完成一次校园交流",
+        "buy_sell": "完成一次校园消费或交易",
+        "submit_policy": "提出校园治理建议",
+        "observe": "观察校园环境并记录线索",
+    }.get(action, "根据当前状态继续行动")
+    perception = {
+        "last_action": action,
+        "last_reason": reason,
+        "status": "成功" if success else "失败后转为观察",
+    }
+    conn.execute(
+        """
+        UPDATE agent_profiles
+        SET energy = ?, mood = ?, current_task = ?, perception = ?
+        WHERE resident_id = ?
+        """,
+        (new_energy, new_mood, task_label, json.dumps(perception, ensure_ascii=False), resident_id),
+    )
+
+
 class MoveRequest(BaseModel):
     resident_id: int
     destination: str
@@ -408,8 +471,13 @@ def execute_decision(conn, resident_id, decision):
         text = f"{resident['name']} 原计划执行 {action}，但失败：{exc}。改为观察校园。"
         add_event(conn, day, "agent_observe", text)
         add_memory(conn, resident_id, day, text, importance=1)
+        update_agent_profile_after_action(conn, resident_id, "observe", reason, success=False)
         conn.commit()
         result = {"message": "行动失败，已转为观察", "description": text, "error": str(exc)}
+
+    if "error" not in result:
+        update_agent_profile_after_action(conn, resident_id, action, reason, success=True)
+        conn.commit()
 
     return {
         "resident_id": resident_id,
@@ -778,4 +846,6 @@ def simulate_ai_day():
             "environment": env,
             "actions": results,
         }
+
+
 
