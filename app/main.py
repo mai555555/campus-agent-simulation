@@ -1,13 +1,17 @@
-﻿import json
+import json
+from pathlib import Path
 import random
 import re
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.db import get_connection
 from services.llm_service import ask_llm
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 from tools.city_tools import (
     VALID_LOCATIONS,
     add_event,
@@ -20,6 +24,7 @@ from tools.city_tools import (
 )
 
 app = FastAPI(title="校园封闭世界 AI-Agent 沙盘系统", version="0.2.0")
+app.mount("/avatars", StaticFiles(directory=str(PROJECT_ROOT / "frontend" / "assets" / "avatars")), name="avatars")
 
 CAMPUS_STATE_SQL = """
 CREATE TABLE IF NOT EXISTS campus_state (
@@ -56,6 +61,7 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
     resident_id INTEGER PRIMARY KEY,
     gender TEXT NOT NULL,
     avatar_style TEXT NOT NULL,
+    avatar_image TEXT NOT NULL DEFAULT '',
     energy INTEGER NOT NULL DEFAULT 80,
     mood TEXT NOT NULL DEFAULT '平稳',
     current_task TEXT NOT NULL DEFAULT '适应校园生活',
@@ -68,6 +74,9 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
 
 def ensure_agent_profile_table(conn):
     conn.executescript(AGENT_PROFILE_SQL)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(agent_profiles)").fetchall()}
+    if "avatar_image" not in columns:
+        conn.execute("ALTER TABLE agent_profiles ADD COLUMN avatar_image TEXT NOT NULL DEFAULT ''")
 
 
 def load_json_text(text, fallback):
@@ -125,6 +134,7 @@ def get_agent_module_state(conn, resident_id):
         "name": resident["name"],
         "gender": profile_data.get("gender", "未设置"),
         "avatar_style": profile_data.get("avatar_style", "简单卡通校园人物"),
+        "avatar_image": profile_data.get("avatar_image", ""),
         "modules": {
             "Physical": {
                 "description": "我是谁、我在哪",
@@ -846,6 +856,7 @@ def simulate_ai_day():
             "environment": env,
             "actions": results,
         }
+
 
 
 

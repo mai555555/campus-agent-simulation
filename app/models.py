@@ -1,4 +1,4 @@
-﻿SCHEMA_SQL = """
+SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS residents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
     resident_id INTEGER PRIMARY KEY,
     gender TEXT NOT NULL,
     avatar_style TEXT NOT NULL,
+    avatar_image TEXT NOT NULL DEFAULT '',
     energy INTEGER NOT NULL DEFAULT 80,
     mood TEXT NOT NULL DEFAULT '平稳',
     current_task TEXT NOT NULL DEFAULT '适应校园生活',
@@ -85,3 +86,4 @@ CREATE TABLE IF NOT EXISTS simulation_state (
     value TEXT NOT NULL
 );
 """
+
