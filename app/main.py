@@ -38,7 +38,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.mount("/avatars", StaticFiles(directory=str(PROJECT_ROOT / "frontend" / "assets" / "avatars")), name="avatars")
-THREE_MODULE_DIR = PROJECT_ROOT / "app-d50d88awkoap" / "node_modules" / ".pnpm" / "three@0.180.0" / "node_modules" / "three"
+THREE_MODULE_DIR = PROJECT_ROOT / "frontend" / "vendor" / "three"
 app.mount("/three", StaticFiles(directory=str(THREE_MODULE_DIR)), name="three")
 
 CAMPUS_STATE_SQL = """

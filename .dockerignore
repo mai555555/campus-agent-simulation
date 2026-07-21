@@ -1,0 +1,11 @@
+.git
+.idea
+__pycache__
+*.pyc
+.env
+.env.txt
+virtual_chengdu
+app-d50d88awkoap
+*.zip
+data
+backup_*
