@@ -37,13 +37,54 @@ def add_event(conn, day, event_type, description):
     )
 
 
-def add_memory(conn, resident_id, day, content, importance=1):
+MEMORY_COLUMN_TYPES = {
+    "memory_type": "TEXT NOT NULL DEFAULT 'episodic'",
+    "tags": "TEXT NOT NULL DEFAULT ''",
+    "source": "TEXT NOT NULL DEFAULT 'action'",
+    "last_accessed_at": "TEXT NOT NULL DEFAULT ''",
+    "access_count": "INTEGER NOT NULL DEFAULT 0",
+}
+
+
+def ensure_memory_columns(conn):
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(memories)").fetchall()}
+    for column, column_type in MEMORY_COLUMN_TYPES.items():
+        if column not in columns:
+            conn.execute(f"ALTER TABLE memories ADD COLUMN {column} {column_type}")
+
+
+def infer_memory_metadata(content, memory_type=None, tags=None, source=None):
+    text = str(content or "")
+    if not memory_type:
+        if "日记" in text:
+            memory_type = "episodic"
+        elif "外部消息" in text or "资讯" in text:
+            memory_type = "working"
+        elif any(word in text for word in ("信任", "合作", "竞争", "承诺")):
+            memory_type = "relationship"
+        else:
+            memory_type = "episodic"
+    if not source:
+        source = "diary" if "日记" in text else "action"
+    if tags is None:
+        tags = []
+        for keyword in ("聊天", "交易", "合作", "竞争", "图书馆", "教学楼", "食堂", "宿舍区", "操场", "商业街", "校务处", "外部资讯"):
+            if keyword in text:
+                tags.append(keyword)
+    if isinstance(tags, (list, tuple, set)):
+        tags = ",".join(sorted(set(str(tag) for tag in tags if tag)))
+    return memory_type, str(tags or ""), source
+
+
+def add_memory(conn, resident_id, day, content, importance=1, memory_type=None, tags=None, source=None):
+    ensure_memory_columns(conn)
+    memory_type, tags, source = infer_memory_metadata(content, memory_type, tags, source)
     conn.execute(
         """
-        INSERT INTO memories (resident_id, day, content, importance)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO memories (resident_id, day, content, importance, memory_type, tags, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (resident_id, day, content, importance),
+        (resident_id, day, content, importance, memory_type, tags, source),
     )
 
 
@@ -101,7 +142,7 @@ def move_resident(conn, resident_id, destination):
     )
     description = f"{resident['name']} 从 {resident['location']} 移动到 {destination}。"
     add_event(conn, day, "agent_move", description)
-    add_memory(conn, resident_id, day, description, importance=2)
+    add_memory(conn, resident_id, day, description, importance=2, memory_type="episodic", tags=["移动", resident["location"], destination], source="move")
     conn.commit()
     return {"message": "移动成功", "description": description}
 
@@ -115,8 +156,8 @@ def chat_between(conn, speaker_id, listener_id, message):
     day = get_current_day(conn)
     description = f"{speaker['name']} 对 {listener['name']} 说：{message}"
     add_event(conn, day, "agent_chat", description)
-    add_memory(conn, speaker_id, day, description, importance=2)
-    add_memory(conn, listener_id, day, description, importance=2)
+    add_memory(conn, speaker_id, day, description, importance=3, memory_type="episodic", tags=["聊天", speaker["name"], listener["name"], speaker["location"]], source="chat")
+    add_memory(conn, listener_id, day, description, importance=3, memory_type="episodic", tags=["聊天", speaker["name"], listener["name"], listener["location"]], source="chat")
     change_relationship(conn, speaker_id, listener_id, 2, "校园交流增加熟悉度")
     change_relationship(conn, listener_id, speaker_id, 1, "收到对方交流")
     conn.commit()
@@ -153,7 +194,7 @@ def buy_sell(conn, buyer_id, seller_id, item_name, quantity, unit_price):
     )
     description = f"{buyer['name']} 向 {seller['name']} 购买 {quantity} 份 {item_name}，总价 {total_price} 校园币。"
     add_event(conn, day, "trade", description)
-    add_memory(conn, buyer_id, day, description, importance=2)
-    add_memory(conn, seller_id, day, description, importance=2)
+    add_memory(conn, buyer_id, day, description, importance=3, memory_type="episodic", tags=["交易", buyer["name"], seller["name"], item_name], source="buy_sell")
+    add_memory(conn, seller_id, day, description, importance=3, memory_type="episodic", tags=["交易", buyer["name"], seller["name"], item_name], source="buy_sell")
     conn.commit()
     return {"message": "交易成功", "description": description}
