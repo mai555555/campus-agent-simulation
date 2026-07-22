@@ -1051,6 +1051,46 @@ def derive_environment_from_real_time(values, now=None):
     return values
 
 
+def fetch_met_no_weather(latitude=CHENGDU_LATITUDE, longitude=CHENGDU_LONGITUDE):
+    response = requests.get(
+        "https://api.met.no/weatherapi/locationforecast/2.0/compact",
+        params={"lat": latitude, "lon": longitude},
+        headers={"User-Agent": "campus-agent-simulation/1.0 github.com/mai555555/campus-agent-simulation"},
+        timeout=12,
+    )
+    response.raise_for_status()
+    series = response.json()["properties"]["timeseries"][0]
+    details = series["data"]["instant"]["details"]
+    next_hour = series["data"].get("next_1_hours", {})
+    symbol = str(next_hour.get("summary", {}).get("symbol_code", "clearsky"))
+    rainfall = max(0, min(100, int(round(float(next_hour.get("details", {}).get("precipitation_amount", 0) or 0) * 20))))
+    temperature = int(round(float(details.get("air_temperature", 24))))
+
+    if "thunder" in symbol:
+        weather = "雷雨"
+    elif "snow" in symbol:
+        weather = "小雪"
+    elif "rain" in symbol or "sleet" in symbol:
+        weather = "小雨"
+    elif "fog" in symbol:
+        weather = "雾"
+    elif "cloudy" in symbol:
+        weather = "多云"
+    else:
+        weather = "晴"
+    if temperature >= 32 and weather in {"晴", "多云"}:
+        weather = "闷热"
+
+    return {
+        "weather": weather,
+        "temperature": temperature,
+        "rainfall": rainfall,
+        "weather_source": "met-no",
+        "weather_observed_at": str(series.get("time", "")),
+        "raw": {"symbol_code": symbol, "wind_speed_10m": details.get("wind_speed"), "precipitation": rainfall / 20},
+    }
+
+
 def fetch_real_weather(latitude=CHENGDU_LATITUDE, longitude=CHENGDU_LONGITUDE):
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
@@ -1078,7 +1118,8 @@ def fetch_real_weather(latitude=CHENGDU_LATITUDE, longitude=CHENGDU_LONGITUDE):
             logger.warning("Real weather request failed on attempt %s: %s", attempt + 1, exc)
 
     if data is None:
-        raise RuntimeError("Open-Meteo real weather request failed") from last_error
+        logger.warning("Open-Meteo unavailable, trying Met.no fallback: %s", last_error)
+        return fetch_met_no_weather(latitude, longitude)
     current = data.get("current", {})
     weather_code = int(current.get("weather_code", 0))
     precipitation = float(current.get("precipitation", 0) or 0)
