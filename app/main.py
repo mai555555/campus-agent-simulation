@@ -4,6 +4,7 @@ from datetime import datetime, timezone, timedelta
 import random
 import re
 import requests
+import logging
 from xml.etree import ElementTree
 from typing import Optional
 
@@ -16,6 +17,7 @@ from pydantic import BaseModel, Field
 from app.db import get_connection
 from services.llm_service import ask_llm
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+logger = logging.getLogger(__name__)
 
 from tools.city_tools import (
     VALID_LOCATIONS,
@@ -1058,9 +1060,25 @@ def fetch_real_weather(latitude=CHENGDU_LATITUDE, longitude=CHENGDU_LONGITUDE):
         "timezone": "Asia/Shanghai",
         "forecast_days": 1,
     }
-    response = requests.get(url, params=params, timeout=20)
-    response.raise_for_status()
-    data = response.json()
+    last_error = None
+    data = None
+    for attempt in range(2):
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                headers={"User-Agent": "campus-agent-simulation/1.0"},
+                timeout=12,
+            )
+            response.raise_for_status()
+            data = response.json()
+            break
+        except requests.RequestException as exc:
+            last_error = exc
+            logger.warning("Real weather request failed on attempt %s: %s", attempt + 1, exc)
+
+    if data is None:
+        raise RuntimeError("Open-Meteo real weather request failed") from last_error
     current = data.get("current", {})
     weather_code = int(current.get("weather_code", 0))
     precipitation = float(current.get("precipitation", 0) or 0)
@@ -2379,7 +2397,8 @@ def auto_update_environment(conn, day):
     try:
         real_weather = fetch_real_weather()
         values.update({key: real_weather[key] for key in ["weather", "temperature", "rainfall", "weather_source", "weather_observed_at"]})
-    except Exception:
+    except Exception as exc:
+        logger.warning("Falling back to simulated weather: %s", exc)
         values["weather_source"] = "simulation"
         values["weather_observed_at"] = ""
     values = derive_environment_from_weather(values)
