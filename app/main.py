@@ -3271,7 +3271,16 @@ def ai_newspaper_today():
     return {"day": data["title"], "newspaper": ask_llm(prompt), "source": data}
 
 
-EXTERNAL_RSS_URL = "https://news.google.com/rss/search?q=(AI%20OR%20%E5%A4%A7%E5%AD%A6%20OR%20%E6%95%99%E8%82%B2%20OR%20%E5%B0%B1%E4%B8%9A)&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+EXTERNAL_RSS_SOURCES = [
+    (
+        "Google News RSS",
+        "https://news.google.com/rss/search?q=(AI%20OR%20%E5%A4%A7%E5%AD%A6%20OR%20%E6%95%99%E8%82%B2%20OR%20%E5%B0%B1%E4%B8%9A)&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+    ),
+    (
+        "Bing News RSS",
+        "https://www.bing.com/news/search?q=(AI%20OR%20university%20OR%20education%20OR%20employment)&format=rss&setlang=zh-CN&cc=CN",
+    ),
+]
 
 
 def classify_external_information(text):
@@ -3286,28 +3295,41 @@ def classify_external_information(text):
 
 
 def fetch_external_information(limit=5):
-    """Fetch only from the fixed public RSS source; Agents never receive arbitrary URLs."""
-    response = requests.get(EXTERNAL_RSS_URL, timeout=12, headers={"User-Agent": "CampusAgentSimulation/1.0"})
-    response.raise_for_status()
-    root = ElementTree.fromstring(response.content)
-    items = []
-    for node in root.findall("./channel/item")[:limit]:
-        title = (node.findtext("title") or "").strip()
-        summary = re.sub(r"<[^>]+>", "", node.findtext("description") or "").strip()
-        link = (node.findtext("link") or "").strip()
-        published_at = (node.findtext("pubDate") or "").strip()
-        if title:
-            items.append(
-                {
-                    "title": title[:180],
-                    "summary": (summary or title)[:400],
-                    "source_name": "Google News RSS",
-                    "source_url": link,
-                    "published_at": published_at,
-                    "category": classify_external_information(f"{title} {summary}"),
-                }
+    """Read fixed public RSS sources; Agents never receive arbitrary URLs."""
+    errors = []
+    for source_name, source_url in EXTERNAL_RSS_SOURCES:
+        try:
+            response = requests.get(
+                source_url,
+                timeout=12,
+                headers={"User-Agent": "CampusAgentSimulation/1.0 (+campus simulation)"},
             )
-    return items
+            response.raise_for_status()
+            root = ElementTree.fromstring(response.content)
+            items = []
+            for node in root.findall("./channel/item")[:limit]:
+                title = (node.findtext("title") or "").strip()
+                summary = re.sub(r"<[^>]+>", "", node.findtext("description") or "").strip()
+                link = (node.findtext("link") or "").strip()
+                published_at = (node.findtext("pubDate") or "").strip()
+                if title:
+                    items.append(
+                        {
+                            "title": title[:180],
+                            "summary": (summary or title)[:400],
+                            "source_name": source_name,
+                            "source_url": link,
+                            "published_at": published_at,
+                            "category": classify_external_information(f"{title} {summary}"),
+                        }
+                    )
+            if items:
+                return items
+            errors.append(f"{source_name}: no RSS items")
+        except Exception as exc:
+            logger.warning("External information source failed: %s", source_name, exc_info=True)
+            errors.append(f"{source_name}: {type(exc).__name__}")
+    raise RuntimeError("; ".join(errors))
 
 
 def deliver_external_information(
