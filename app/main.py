@@ -3592,7 +3592,16 @@ def simulate_ai_day():
             except Exception as exc:
                 logger.exception("Agent %s failed during day %s", agent["id"], new_day)
                 fallback_agents.append(agent["id"])
-                perception = perceive_environment(conn, agent["id"])
+                # A failed PostgreSQL statement invalidates the transaction.
+                # Start a clean transaction and record a minimal fallback instead
+                # of running the full action pipeline a second time.
+                conn.rollback()
+                resident = get_resident(conn, agent["id"])
+                try:
+                    perception = perceive_environment(conn, agent["id"])
+                except Exception:
+                    conn.rollback()
+                    perception = {}
                 decision_data = {
                     "decision": {
                         "action": "observe",
@@ -3600,10 +3609,30 @@ def simulate_ai_day():
                         "tool_input": {"focus": "校园环境"},
                     }
                 }
-                execution = execute_decision(conn, agent["id"], decision_data["decision"])
-                feedback = apply_environment_feedback(conn, agent["id"], execution["action"], execution["result"])
+                name = resident["name"] if resident else f"Agent {agent['id']}"
+                description = f"{name} 当日行动出现异常，改为观察校园环境。"
+                execution = {
+                    "resident_id": agent["id"],
+                    "action": "observe",
+                    "reason": decision_data["decision"]["reason"],
+                    "result": {"message": "降级观察完成", "description": description, "error": str(exc)},
+                    "success": False,
+                }
+                try:
+                    add_event(conn, new_day, "agent_fallback_observe", description)
+                    add_memory(conn, agent["id"], new_day, description, importance=1, source="fallback")
+                    conn.commit()
+                except Exception:
+                    logger.exception("Fallback record failed for Agent %s", agent["id"])
+                    conn.rollback()
+                feedback = {}
 
-            record_simulation_log(conn, agent["id"], perception, decision_data, execution, feedback)
+            try:
+                record_simulation_log(conn, agent["id"], perception, decision_data, execution, feedback)
+                conn.commit()
+            except Exception:
+                logger.exception("Simulation log failed for Agent %s", agent["id"])
+                conn.rollback()
             results.append(
                 {
                     "resident_id": agent["id"],
@@ -3613,9 +3642,22 @@ def simulate_ai_day():
                     "environment_feedback": feedback,
                 }
             )
-        group_updates = advance_group_goals(conn, new_day, [item["execution"] for item in results])
-        daily_diaries = write_agent_daily_diaries(conn, new_day, results)
-        published_news = publish_agent_news(conn, new_day, results)
+        try:
+            group_updates = advance_group_goals(conn, new_day, [item["execution"] for item in results])
+            conn.commit()
+        except Exception:
+            logger.exception("Group goal update failed for day %s", new_day)
+            conn.rollback()
+            group_updates = []
+        try:
+            daily_diaries = write_agent_daily_diaries(conn, new_day, results)
+            published_news = publish_agent_news(conn, new_day, results)
+            conn.commit()
+        except Exception:
+            logger.exception("Daily publishing failed for day %s", new_day)
+            conn.rollback()
+            daily_diaries = []
+            published_news = []
         add_event(conn, new_day, "daily_reflect", f"第 {new_day} 天校园自动模拟完成，共产生 {len(results)} 个行动。")
         conn.commit()
         return {
