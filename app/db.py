@@ -8,7 +8,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 DB_PATH = Path(os.getenv("DB_PATH", str(DATA_DIR / "city.db")))
 
 POSTGRES_ID_TABLES = {
-    "agent_information", "agent_learning", "agent_news_posts", "campus_events",
+    "agent_learning", "agent_news_posts", "campus_events",
     "city_events", "collaborations", "competitions", "external_information",
     "group_goals", "inventory", "long_term_goals", "memories", "policies",
     "residents", "simulation_action_logs", "transactions",
