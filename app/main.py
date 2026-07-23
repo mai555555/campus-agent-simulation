@@ -724,15 +724,16 @@ def get_agent_module_state(conn, resident_id):
         """,
         (resident_id,),
     ).fetchall()
+    current_day = get_current_day(conn)
     memory_rows = conn.execute(
         """
         SELECT day, content, importance, memory_type, tags, source, access_count, last_accessed_at, created_at
         FROM memories
-        WHERE resident_id = ?
+        WHERE resident_id = ? AND day <= ?
         ORDER BY id DESC
         LIMIT 8
         """,
-        (resident_id,),
+        (resident_id, current_day),
     ).fetchall()
 
     profile_data = dict(profile) if profile else {}
@@ -1956,11 +1957,11 @@ def retrieve_relevant_memories(conn, resident_id, query_terms=None, limit=6):
         SELECT id, day, content, importance, memory_type, tags, source,
                access_count, last_accessed_at, created_at
         FROM memories
-        WHERE resident_id = ?
+        WHERE resident_id = ? AND day <= ?
         ORDER BY id DESC
         LIMIT 120
         """,
-        (resident_id,),
+        (resident_id, current_day),
     ).fetchall()
     type_bonus = {"relationship": 18, "semantic": 15, "episodic": 9, "working": 5}
     ranked = []
@@ -1997,10 +1998,11 @@ def get_recent_context(conn, resident_id, limit=6, query_terms=None):
         """
         SELECT day, event_type, description, created_at
         FROM city_events
+        WHERE day <= ?
         ORDER BY id DESC
         LIMIT ?
         """,
-        (limit,),
+        (get_current_day(conn), limit),
     ).fetchall()
     return {
         "memories": rows_to_dicts(memories),
@@ -3565,11 +3567,27 @@ def simulate_ai_day():
         conn.commit()
         agents = conn.execute("SELECT id FROM residents ORDER BY id").fetchall()
         results = []
+        fallback_agents = []
         for agent in agents:
-            perception = perceive_environment(conn, agent["id"])
-            decision_data = decide_agent_action(conn, agent["id"])
-            execution = execute_decision(conn, agent["id"], decision_data["decision"])
-            feedback = apply_environment_feedback(conn, agent["id"], execution["action"], execution["result"])
+            try:
+                perception = perceive_environment(conn, agent["id"])
+                decision_data = decide_agent_action(conn, agent["id"])
+                execution = execute_decision(conn, agent["id"], decision_data["decision"])
+                feedback = apply_environment_feedback(conn, agent["id"], execution["action"], execution["result"])
+            except Exception as exc:
+                logger.exception("Agent %s failed during day %s", agent["id"], new_day)
+                fallback_agents.append(agent["id"])
+                perception = perceive_environment(conn, agent["id"])
+                decision_data = {
+                    "decision": {
+                        "action": "observe",
+                        "reason": f"当日行动异常，改为观察并保留状态：{type(exc).__name__}",
+                        "tool_input": {"focus": "校园环境"},
+                    }
+                }
+                execution = execute_decision(conn, agent["id"], decision_data["decision"])
+                feedback = apply_environment_feedback(conn, agent["id"], execution["action"], execution["result"])
+
             record_simulation_log(conn, agent["id"], perception, decision_data, execution, feedback)
             results.append(
                 {
@@ -3594,6 +3612,7 @@ def simulate_ai_day():
             "group_goal_updates": group_updates,
             "daily_diaries": len(daily_diaries),
             "published_news": published_news,
+            "fallback_agents": fallback_agents,
         }
 
 
