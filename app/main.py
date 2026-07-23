@@ -2317,6 +2317,9 @@ def execute_decision(conn, resident_id, decision):
         else:
             raise ValueError(f"不支持的自主行动：{action}")
     except Exception as exc:
+        # PostgreSQL marks the current transaction as unusable after a failed
+        # statement. Roll it back before recording this Agent's failed action.
+        conn.rollback()
         text = f"{resident['name']} 自主选择执行 {action}，但未能完成：{exc}。本轮不替 Agent 改选其他行为。"
         add_event(conn, day, "agent_action_failed", text)
         add_memory(conn, resident_id, day, text, importance=1)
@@ -2331,11 +2334,15 @@ def execute_decision(conn, resident_id, decision):
         action_cost = update_agent_profile_after_action(conn, resident_id, action, reason, success=True, cost=planned_cost, schedule_context=schedule_context, tool_input=tool_input)
     social_update = None
     if success and action == "chat":
-        target_id = int(tool_input.get("target_id"))
-        social_update = {
-            "speaker": evolve_relationship(conn, resident_id, target_id, "chat", "日常交流", 3, 2, -1),
-            "listener": evolve_relationship(conn, target_id, resident_id, "chat", "回应交流", 2, 2, -1),
-        }
+        try:
+            target_id = int(tool_input.get("target_id"))
+            social_update = {
+                "speaker": evolve_relationship(conn, resident_id, target_id, "chat", "日常交流", 3, 2, -1),
+                "listener": evolve_relationship(conn, target_id, resident_id, "chat", "回应交流", 2, 2, -1),
+            }
+        except Exception as exc:
+            conn.rollback()
+            social_update = {"error": str(exc)}
     goal_update = advance_personal_goal(conn, resident_id, learned_action, success)
     learning = record_learning(
         conn,
