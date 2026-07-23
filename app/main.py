@@ -590,10 +590,10 @@ def advance_personal_goal(conn, resident_id, action, success):
         """
         UPDATE long_term_goals
         SET progress = ?, status = ?, last_update_day = ?,
-            completed_at = CASE WHEN ? = 'completed' THEN CURRENT_TIMESTAMP ELSE completed_at END
+            completed_at = CASE WHEN ? = 'completed' THEN ? ELSE completed_at END
         WHERE id = ?
         """,
-        (progress, status, get_current_day(conn), status, goal["id"]),
+        (progress, status, get_current_day(conn), status, datetime.now(timezone.utc).isoformat(), goal["id"]),
     )
     if status == "completed":
         add_event(conn, get_current_day(conn), "goal_completed", f"Agent {resident_id} 完成长期目标《{goal['title']}》。")
