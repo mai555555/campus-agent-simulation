@@ -380,6 +380,10 @@ RELATIONSHIP_DYNAMIC_COLUMNS = {
     "conflict": "INTEGER NOT NULL DEFAULT 0",
 }
 
+LONG_TERM_GOAL_COLUMNS = {
+    "completed_at": "TEXT",
+}
+
 AGENT_INFORMATION_COLUMNS = {
     "credibility": "INTEGER NOT NULL DEFAULT 80",
     "distortion_note": "TEXT NOT NULL DEFAULT ''",
@@ -403,6 +407,10 @@ def ensure_social_system_tables(conn):
     for column, column_type in RELATIONSHIP_DYNAMIC_COLUMNS.items():
         if column not in relationship_columns:
             conn.execute(f"ALTER TABLE relationship_dynamics ADD COLUMN {column} {column_type}")
+    goal_columns = {row["name"] for row in conn.execute("PRAGMA table_info(long_term_goals)").fetchall()}
+    for column, column_type in LONG_TERM_GOAL_COLUMNS.items():
+        if column not in goal_columns:
+            conn.execute(f"ALTER TABLE long_term_goals ADD COLUMN {column} {column_type}")
     normalize_agent_hierarchy(conn)
     seed_long_term_goals(conn)
     seed_campus_organizations(conn)
