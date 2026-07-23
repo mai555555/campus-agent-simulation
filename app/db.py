@@ -47,6 +47,14 @@ def _postgres_sql(sql: str) -> str:
         statement = re.sub(r"INSERT\s+OR\s+IGNORE\s+INTO", "INSERT INTO", statement, flags=re.IGNORECASE)
         if "ON CONFLICT" not in statement.upper():
             statement = f"{statement.rstrip(';')} ON CONFLICT DO NOTHING"
+
+    # PostgreSQL requires the target table on the left side of this upsert.
+    statement = re.sub(
+        r"SET\s+quantity\s*=\s*quantity\s*\+\s*excluded\.quantity",
+        "SET quantity = inventory.quantity + excluded.quantity",
+        statement,
+        flags=re.IGNORECASE,
+    )
     return statement.replace("?", "%s")
 
 
