@@ -64,9 +64,10 @@ def _postgres_script(sql: str) -> list[str]:
 
 
 class PostgresCursor:
-    def __init__(self, cursor, lastrowid=None):
+    def __init__(self, cursor, lastrowid=None, rowcount=0):
         self._cursor = cursor
         self.lastrowid = lastrowid
+        self.rowcount = rowcount
 
     def fetchone(self):
         return self._cursor.fetchone()
@@ -100,8 +101,10 @@ class PostgresConnection:
             statement = f"{statement.rstrip(';')} RETURNING id"
 
         cursor = self._connection.execute(statement, execute_params)
-        lastrowid = cursor.fetchone()["id"] if needs_id and cursor.rowcount else None
-        return PostgresCursor(cursor, lastrowid)
+        rowcount = cursor.rowcount
+        inserted_row = cursor.fetchone() if needs_id and rowcount else None
+        lastrowid = inserted_row["id"] if inserted_row else None
+        return PostgresCursor(cursor, lastrowid, rowcount)
 
     def executescript(self, sql: str):
         for statement in _postgres_script(sql):
