@@ -125,6 +125,7 @@ docs/
 - [Supabase 复原数据库](docs/SUPABASE.md)
 - [团队 Git 管理流程](docs/GIT_WORKFLOW.md)
 - [模拟一天流程](docs/SIMULATE_DAY_FLOW.md)
+- [校园平行世界运行时设计](docs/WORLD_RUNTIME_DESIGN.md)
 
 ## 注意事项
 
