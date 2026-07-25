@@ -182,13 +182,14 @@ fallback_agents
 
 ## 实时进度呈现
 
-前端“模拟一天”按钮使用流式接口：
+前端“模拟一天”按钮使用后台任务进度接口：
 
 ```text
-POST /api/simulate/ai-day/stream
+POST /api/simulate/ai-day/progress
+GET /api/simulate/ai-day/progress/{job_id}?after=<event_index>
 ```
 
-该接口返回 `application/x-ndjson`，每一行都是一个 JSON 进度事件。前端通过 `fetch()` 的 `ReadableStream` 边读边追加到模拟弹窗中，因此用户可以看到日期推进、环境生成、每个 Agent 的感知/决策/行动、日志写入、日记生成和新闻发布进度。
+`POST` 会立即创建一个内存中的模拟任务并返回 `job_id`。后端在后台线程中执行完整的 `run_simulate_ai_day()`，每到一个阶段就向任务事件列表追加一条进度事件。前端每秒查询一次 `GET` 接口，只拉取 `after` 之后的新事件并追加到模拟弹窗中，因此用户可以看到日期推进、环境生成、每个 Agent 的感知/决策/行动、日志写入、日记生成和新闻发布进度。
 
 典型事件：
 
@@ -199,10 +200,11 @@ POST /api/simulate/ai-day/stream
 {"event":"complete","message":"校园一天模拟完成","day":15,"actions_count":20}
 ```
 
-旧接口仍保留：
+旧接口和流式接口仍保留：
 
 ```text
 POST /api/simulate/ai-day
+POST /api/simulate/ai-day/stream
 ```
 
-它一次性返回完整 JSON，适合脚本或 API 调用；流式接口适合前端展示长流程。
+`POST /api/simulate/ai-day` 一次性返回完整 JSON，适合脚本或 API 调用。`POST /api/simulate/ai-day/stream` 返回 NDJSON，适合支持响应流的客户端；前端默认使用轮询式进度接口，因为它不依赖浏览器、代理或部署平台是否缓冲流式响应。

@@ -5,8 +5,10 @@ import random
 import re
 import requests
 import logging
+import time
 from queue import Queue
-from threading import Thread
+from threading import Lock, Thread
+from uuid import uuid4
 from xml.etree import ElementTree
 from typing import Optional
 
@@ -44,6 +46,8 @@ app.add_middleware(
 app.mount("/avatars", StaticFiles(directory=str(PROJECT_ROOT / "frontend" / "assets" / "avatars")), name="avatars")
 THREE_MODULE_DIR = PROJECT_ROOT / "frontend" / "vendor" / "three"
 app.mount("/three", StaticFiles(directory=str(THREE_MODULE_DIR)), name="three")
+SIMULATION_JOBS = {}
+SIMULATION_JOBS_LOCK = Lock()
 
 from app.schema import (
     CAMPUS_STATE_SQL, SPACE_SYSTEM_SQL, DEFAULT_SPACES, DEFAULT_ENV, ENV_COLUMN_TYPES,
@@ -3374,6 +3378,107 @@ def run_simulate_ai_day(progress=None):
 @app.post("/api/simulate/ai-day")
 def simulate_ai_day():
     return run_simulate_ai_day()
+
+
+def prune_simulation_jobs(max_age_seconds=3600):
+    cutoff = time.time() - max_age_seconds
+    with SIMULATION_JOBS_LOCK:
+        stale_ids = [
+            job_id
+            for job_id, job in SIMULATION_JOBS.items()
+            if job.get("created_at", 0) < cutoff and job.get("status") != "running"
+        ]
+        for job_id in stale_ids:
+            SIMULATION_JOBS.pop(job_id, None)
+
+
+@app.post("/api/simulate/ai-day/progress")
+def start_simulate_ai_day_progress():
+    prune_simulation_jobs()
+    job_id = uuid4().hex
+    job = {
+        "id": job_id,
+        "status": "running",
+        "events": [
+            {
+                "event": "queued",
+                "message": "模拟任务已启动，正在连接校园世界。",
+            }
+        ],
+        "result": None,
+        "error": None,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+    with SIMULATION_JOBS_LOCK:
+        SIMULATION_JOBS[job_id] = job
+
+    def append_event(event):
+        with SIMULATION_JOBS_LOCK:
+            current = SIMULATION_JOBS.get(job_id)
+            if not current:
+                return
+            current["events"].append(event)
+            current["updated_at"] = time.time()
+
+    def worker():
+        try:
+            result = run_simulate_ai_day(append_event)
+            with SIMULATION_JOBS_LOCK:
+                current = SIMULATION_JOBS.get(job_id)
+                if current:
+                    current["status"] = "complete"
+                    current["result"] = {
+                        "message": result["message"],
+                        "day": result["day"],
+                        "actions_count": len(result["actions"]),
+                        "daily_diaries": result["daily_diaries"],
+                        "published_news_count": len(result["published_news"]),
+                        "fallback_agents": result["fallback_agents"],
+                    }
+                    current["events"].append(
+                        {
+                            "event": "complete",
+                            "message": result["message"],
+                            **current["result"],
+                        }
+                    )
+                    current["updated_at"] = time.time()
+        except Exception as exc:
+            logger.exception("Progress simulation failed")
+            with SIMULATION_JOBS_LOCK:
+                current = SIMULATION_JOBS.get(job_id)
+                if current:
+                    current["status"] = "error"
+                    current["error"] = {"message": str(exc), "type": type(exc).__name__}
+                    current["events"].append(
+                        {
+                            "event": "error",
+                            "message": str(exc),
+                            "error": type(exc).__name__,
+                        }
+                    )
+                    current["updated_at"] = time.time()
+
+    Thread(target=worker, daemon=True).start()
+    return {"job_id": job_id, "status": "running", "events": job["events"]}
+
+
+@app.get("/api/simulate/ai-day/progress/{job_id}")
+def get_simulate_ai_day_progress(job_id: str, after: int = 0):
+    with SIMULATION_JOBS_LOCK:
+        job = SIMULATION_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="模拟任务不存在或已过期")
+        events = list(job["events"])
+        return {
+            "job_id": job_id,
+            "status": job["status"],
+            "events": events[after:],
+            "next_index": len(events),
+            "result": job["result"],
+            "error": job["error"],
+        }
 
 
 @app.post("/api/simulate/ai-day/stream")
