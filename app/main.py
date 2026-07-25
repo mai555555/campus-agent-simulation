@@ -2816,19 +2816,32 @@ def publish_agent_news(conn, day, results):
             continue
 
         action_summary = summarize_action_for_news(item.get("execution", {}))
-        prompt = (
-            f"你是校园里的{resident['role']}“{resident['name']}”。你刚在{resident['location']}完成了：{action_summary}。"
-            "请自己判断这件事是否值得向全校发布一条新鲜事；若值得，用第一人称写一条40到80字的校园投稿。"
-            "只输出投稿正文，不要标题、JSON、代码、行动日志或解释。"
-        )
+        prompt = f"""
+你是《校园世界时报》的校园记者。根据以下事实写一则 90 到 140 字的中文校园快讯：
+消息来源：{resident['name']}（{resident['role']}）
+地点：{resident['location']}
+事实：{action_summary}
+
+使用第三人称和客观新闻口吻，交代人物、地点、事件及其对校园师生的影响。
+不要写个人感想、日记、号召口号、标题、JSON、Markdown 或解释，只输出新闻正文。
+"""
         try:
             content = ask_llm(prompt).strip()
         except Exception:
-            content = f"我今天在{resident['location']}完成了一次新的校园行动，也留意到这里正在发生变化。"
+            content = f"{resident['role']}{resident['name']}当天在{resident['location']}完成了一项校园行动。相关变化将为师生后续学习和生活提供参考。"
 
         if not content or content.startswith(("{", "[")):
-            content = f"我今天在{resident['location']}完成了一次新的校园行动，也留意到这里正在发生变化。"
-        headline = f"{resident['name']}的校园来信"
+            content = f"{resident['role']}{resident['name']}当天在{resident['location']}完成了一项校园行动。相关变化将为师生后续学习和生活提供参考。"
+        if any(word in content for word in ("维修", "检修", "施工")):
+            headline = f"{resident['location']}启动设施维护"
+        elif any(word in content for word in ("食堂", "套餐", "供餐", "补货")):
+            headline = "校园餐饮服务推出新安排"
+        elif any(word in content for word in ("实验", "项目", "科研", "代码")):
+            headline = "校园教学科研项目取得新进展"
+        elif any(word in content for word in ("考试", "复习", "压力")):
+            headline = "考试周校园保障措施持续推进"
+        else:
+            headline = f"{resident['location']}发布最新校园动态"
         conn.execute(
             """
             INSERT OR IGNORE INTO agent_news_posts (day, resident_id, headline, content)
