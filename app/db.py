@@ -129,7 +129,13 @@ def get_connection():
             from psycopg.rows import dict_row
         except ImportError as exc:
             raise RuntimeError("PostgreSQL support requires psycopg[binary].") from exc
-        return PostgresConnection(psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row))
+        return PostgresConnection(
+            psycopg.connect(
+                os.environ["DATABASE_URL"],
+                row_factory=dict_row,
+                prepare_threshold=None,
+            )
+        )
 
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
