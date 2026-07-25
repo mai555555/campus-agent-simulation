@@ -2,9 +2,11 @@
 import sqlite3
 import os
 import re
+from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
+load_dotenv(PROJECT_ROOT / ".env")
 DB_PATH = Path(os.getenv("DB_PATH", str(DATA_DIR / "city.db")))
 
 POSTGRES_ID_TABLES = {
@@ -127,7 +129,13 @@ def get_connection():
             from psycopg.rows import dict_row
         except ImportError as exc:
             raise RuntimeError("PostgreSQL support requires psycopg[binary].") from exc
-        return PostgresConnection(psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row))
+        return PostgresConnection(
+            psycopg.connect(
+                os.environ["DATABASE_URL"],
+                row_factory=dict_row,
+                prepare_threshold=None,
+            )
+        )
 
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
