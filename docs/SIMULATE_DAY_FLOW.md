@@ -179,3 +179,30 @@ fallback_agents
 - `/api/external-information`
 
 这些接口负责刷新校园地图、Agent 列表、环境面板、外部资讯和校园日报。
+
+## 实时进度呈现
+
+前端“模拟一天”按钮使用流式接口：
+
+```text
+POST /api/simulate/ai-day/stream
+```
+
+该接口返回 `application/x-ndjson`，每一行都是一个 JSON 进度事件。前端通过 `fetch()` 的 `ReadableStream` 边读边追加到模拟弹窗中，因此用户可以看到日期推进、环境生成、每个 Agent 的感知/决策/行动、日志写入、日记生成和新闻发布进度。
+
+典型事件：
+
+```json
+{"event":"day_advance","message":"模拟日从第 14 天推进到第 15 天。","day":15}
+{"event":"agent_deciding","message":"林小夏（大一学生）正在检索记忆并生成自主决策。","agent_index":1,"total_agents":20}
+{"event":"agent_logged","message":"林小夏（大一学生） 的决策日志已写入。","action":"chat","success":true}
+{"event":"complete","message":"校园一天模拟完成","day":15,"actions_count":20}
+```
+
+旧接口仍保留：
+
+```text
+POST /api/simulate/ai-day
+```
+
+它一次性返回完整 JSON，适合脚本或 API 调用；流式接口适合前端展示长流程。

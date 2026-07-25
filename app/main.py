@@ -5,12 +5,14 @@ import random
 import re
 import requests
 import logging
+from queue import Queue
+from threading import Thread
 from xml.etree import ElementTree
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -3242,29 +3244,46 @@ def simulate_lifecycle_round():
         }
 
 
-@app.post("/api/simulate/ai-day")
-def simulate_ai_day():
+def run_simulate_ai_day(progress=None):
+    def report(event, message, **data):
+        if progress:
+            progress({"event": event, "message": message, **data})
+
     with get_connection() as conn:
         old_day = get_current_day(conn)
         new_day = old_day + 1
+        report("day_advance", f"模拟日从第 {old_day} 天推进到第 {new_day} 天。", old_day=old_day, day=new_day)
         conn.execute("UPDATE simulation_state SET value = ? WHERE key = 'current_day'", (str(new_day),))
         conn.commit()
+        report("environment_start", "正在生成校园环境并同步真实时间/天气。", day=new_day)
         env = auto_update_environment(conn, new_day)
+        report("environment_done", f"第 {new_day} 天环境已生成：{env.get('weather')}，校园情绪 {env.get('campus_mood')}。", day=new_day)
+        report("agent_recovery", "正在恢复全部 Agent 精力并重置每日时间预算。", day=new_day)
         recover_agents_for_new_day(conn, new_day)
+        report("information_spread", "正在沿关系网络传播外部资讯。", day=new_day)
         spread_count = spread_external_information(conn)
         conn.commit()
-        agents = conn.execute("SELECT id FROM residents ORDER BY id").fetchall()
+        agents = conn.execute("SELECT id, name, role FROM residents ORDER BY id").fetchall()
+        total_agents = len(agents)
+        report("agents_start", f"开始遍历 {total_agents} 个 Agent。", day=new_day, total_agents=total_agents)
         results = []
         fallback_agents = []
-        for agent in agents:
+        for index, agent in enumerate(agents, start=1):
+            resident_label = f"{agent['name']}（{agent['role']}）"
             try:
+                report("agent_perceiving", f"{resident_label} 正在感知校园环境。", day=new_day, resident_id=agent["id"], agent_name=agent["name"], agent_index=index, total_agents=total_agents)
                 perception = perceive_environment(conn, agent["id"])
+                report("agent_deciding", f"{resident_label} 正在检索记忆并生成自主决策。", day=new_day, resident_id=agent["id"], agent_name=agent["name"], agent_index=index, total_agents=total_agents)
                 decision_data = decide_agent_action(conn, agent["id"])
+                action = decision_data.get("decision", {}).get("action", "observe")
+                report("agent_acting", f"{resident_label} 决定执行 {action}。", day=new_day, resident_id=agent["id"], agent_name=agent["name"], agent_index=index, total_agents=total_agents, action=action)
                 execution = execute_decision(conn, agent["id"], decision_data["decision"])
+                report("agent_feedback", f"{resident_label} 的行动已完成，正在反馈到校园环境。", day=new_day, resident_id=agent["id"], agent_name=agent["name"], agent_index=index, total_agents=total_agents, action=execution["action"], success=execution.get("success", False))
                 feedback = apply_environment_feedback(conn, agent["id"], execution["action"], execution["result"])
             except Exception as exc:
                 logger.exception("Agent %s failed during day %s", agent["id"], new_day)
                 fallback_agents.append(agent["id"])
+                report("agent_fallback", f"{resident_label} 行动管线异常，降级为观察。", day=new_day, resident_id=agent["id"], agent_name=agent["name"], agent_index=index, total_agents=total_agents, error=type(exc).__name__)
                 # A failed PostgreSQL statement invalidates the transaction.
                 # Start a clean transaction and record a minimal fallback instead
                 # of running the full action pipeline a second time.
@@ -3303,9 +3322,11 @@ def simulate_ai_day():
             try:
                 record_simulation_log(conn, agent["id"], perception, decision_data, execution, feedback)
                 conn.commit()
+                report("agent_logged", f"{resident_label} 的决策日志已写入。", day=new_day, resident_id=agent["id"], agent_name=agent["name"], agent_index=index, total_agents=total_agents, action=execution["action"], success=execution.get("success", False))
             except Exception:
                 logger.exception("Simulation log failed for Agent %s", agent["id"])
                 conn.rollback()
+                report("agent_log_failed", f"{resident_label} 的决策日志写入失败，已继续处理后续 Agent。", day=new_day, resident_id=agent["id"], agent_name=agent["name"], agent_index=index, total_agents=total_agents)
             results.append(
                 {
                     "resident_id": agent["id"],
@@ -3316,6 +3337,7 @@ def simulate_ai_day():
                 }
             )
         try:
+            report("group_goals", "正在推进群体目标并调整关系紧张度。", day=new_day)
             group_updates = advance_group_goals(conn, new_day, [item["execution"] for item in results])
             conn.commit()
         except Exception:
@@ -3323,7 +3345,9 @@ def simulate_ai_day():
             conn.rollback()
             group_updates = []
         try:
+            report("daily_diaries", "正在为全部 Agent 生成第一人称日记。", day=new_day)
             daily_diaries = write_agent_daily_diaries(conn, new_day, results)
+            report("campus_news", "正在从当天行动中抽取最多 4 条生成校园新闻。", day=new_day, daily_diaries=len(daily_diaries))
             published_news = publish_agent_news(conn, new_day, results)
             conn.commit()
         except Exception:
@@ -3333,6 +3357,7 @@ def simulate_ai_day():
             published_news = []
         add_event(conn, new_day, "daily_reflect", f"第 {new_day} 天校园自动模拟完成，共产生 {len(results)} 个行动。")
         conn.commit()
+        report("finished", f"第 {new_day} 天模拟完成，共处理 {len(results)} 个 Agent。", day=new_day, actions_count=len(results), fallback_agents=fallback_agents)
         return {
             "message": "校园一天模拟完成",
             "day": new_day,
@@ -3346,4 +3371,45 @@ def simulate_ai_day():
         }
 
 
+@app.post("/api/simulate/ai-day")
+def simulate_ai_day():
+    return run_simulate_ai_day()
 
+
+@app.post("/api/simulate/ai-day/stream")
+def simulate_ai_day_stream():
+    events = Queue()
+
+    def progress(event):
+        events.put(event)
+
+    def worker():
+        try:
+            result = run_simulate_ai_day(progress)
+            events.put(
+                {
+                    "event": "complete",
+                    "message": result["message"],
+                    "day": result["day"],
+                    "actions_count": len(result["actions"]),
+                    "daily_diaries": result["daily_diaries"],
+                    "published_news_count": len(result["published_news"]),
+                    "fallback_agents": result["fallback_agents"],
+                }
+            )
+        except Exception as exc:
+            logger.exception("Streaming simulation failed")
+            events.put({"event": "error", "message": str(exc), "error": type(exc).__name__})
+        finally:
+            events.put(None)
+
+    Thread(target=worker, daemon=True).start()
+
+    def stream_events():
+        while True:
+            event = events.get()
+            if event is None:
+                break
+            yield json.dumps(event, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(stream_events(), media_type="application/x-ndjson; charset=utf-8")
