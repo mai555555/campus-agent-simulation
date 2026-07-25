@@ -3250,6 +3250,12 @@ def simulate_lifecycle_round():
 
 def run_simulate_ai_day(progress=None):
     def report(event, message, **data):
+        logger.info(
+            "[simulate-day] %s | %s | %s",
+            event,
+            message,
+            json.dumps(data, ensure_ascii=False, default=str),
+        )
         if progress:
             progress({"event": event, "message": message, **data})
 
@@ -3396,6 +3402,7 @@ def prune_simulation_jobs(max_age_seconds=3600):
 def start_simulate_ai_day_progress():
     prune_simulation_jobs()
     job_id = uuid4().hex
+    logger.info("[simulate-day:%s] progress job created", job_id)
     job = {
         "id": job_id,
         "status": "running",
@@ -3420,6 +3427,12 @@ def start_simulate_ai_day_progress():
                 return
             current["events"].append(event)
             current["updated_at"] = time.time()
+        logger.info(
+            "[simulate-day:%s] event queued | %s | %s",
+            job_id,
+            event.get("event"),
+            event.get("message"),
+        )
 
     def worker():
         try:
@@ -3444,6 +3457,7 @@ def start_simulate_ai_day_progress():
                         }
                     )
                     current["updated_at"] = time.time()
+            logger.info("[simulate-day:%s] progress job complete", job_id)
         except Exception as exc:
             logger.exception("Progress simulation failed")
             with SIMULATION_JOBS_LOCK:
@@ -3459,6 +3473,7 @@ def start_simulate_ai_day_progress():
                         }
                     )
                     current["updated_at"] = time.time()
+            logger.info("[simulate-day:%s] progress job failed | %s", job_id, type(exc).__name__)
 
     Thread(target=worker, daemon=True).start()
     return {"job_id": job_id, "status": "running", "events": job["events"]}
@@ -3471,6 +3486,13 @@ def get_simulate_ai_day_progress(job_id: str, after: int = 0):
         if not job:
             raise HTTPException(status_code=404, detail="模拟任务不存在或已过期")
         events = list(job["events"])
+        logger.info(
+            "[simulate-day:%s] progress polled | after=%s new=%s status=%s",
+            job_id,
+            after,
+            len(events[after:]),
+            job["status"],
+        )
         return {
             "job_id": job_id,
             "status": job["status"],
