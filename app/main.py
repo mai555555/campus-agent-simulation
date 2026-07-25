@@ -1604,7 +1604,7 @@ def get_campus_environment(conn, day=None):
         columns = ["day"] + list(DEFAULT_ENV.keys())
         placeholders = ", ".join(["?"] * len(columns))
         conn.execute(
-            f"INSERT INTO campus_state ({', '.join(columns)}) VALUES ({placeholders})",
+            f"INSERT INTO campus_state ({', '.join(columns)}) VALUES ({placeholders}) ON CONFLICT(day) DO NOTHING",
             [day] + [full_values[key] for key in DEFAULT_ENV.keys()],
         )
         conn.commit()
@@ -3331,7 +3331,6 @@ def simulate_ai_day():
             "published_news": published_news,
             "fallback_agents": fallback_agents,
         }
-
 
 
 

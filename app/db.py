@@ -2,9 +2,11 @@
 import sqlite3
 import os
 import re
+from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
+load_dotenv(PROJECT_ROOT / ".env")
 DB_PATH = Path(os.getenv("DB_PATH", str(DATA_DIR / "city.db")))
 
 POSTGRES_ID_TABLES = {
