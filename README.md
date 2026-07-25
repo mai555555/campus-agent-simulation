@@ -123,6 +123,7 @@ docs/
 - [API 速查](docs/API.md)
 - [运维与部署](docs/OPERATIONS.md)
 - [Supabase 复原数据库](docs/SUPABASE.md)
+- [团队 Git 管理流程](docs/GIT_WORKFLOW.md)
 
 ## 注意事项
 
