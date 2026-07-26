@@ -8,6 +8,7 @@
 LLM_API_KEY=你的API_KEY
 LLM_API_URL=https://api.tourmaster.ch/v1beta/models/gemini-3.1-flash-lite:generateContent
 DATABASE_URL=
+ADMIN_TOKEN=本地_admin_token
 ```
 
 变量说明：
@@ -18,6 +19,7 @@ DATABASE_URL=
 | `LLM_API_URL` | AI 决策必填 | LLM generateContent 风格接口 |
 | `DATABASE_URL` | 否 | 设置后使用 PostgreSQL；不设置则使用 SQLite |
 | `DB_PATH` | 否 | SQLite 文件路径，默认 `data/city.db` |
+| `ADMIN_TOKEN` | 推荐 | World Runtime admin 接口 Bearer token；未设置时本地开发会放行并写 warning |
 | `PORT` | 部署时常用 | Uvicorn 监听端口 |
 
 ## 初始化策略
@@ -44,6 +46,44 @@ uvicorn app.main:app --reload
 
 默认 SQLite 数据库会创建在 `data/city.db`。`data/` 目录不需要手动创建。
 
+## World Runtime v1
+
+World Runtime v1 让校园世界从“点击模拟一天”升级为后台 tick 驱动。普通用户默认只观察；admin 可以启动、暂停、手动推进 tick 和注入事件。
+
+常用接口：
+
+- `GET /api/world/runtime`：运行状态、世界时间、最新 tick、模型预算。
+- `GET /api/world/events?after_id=0&limit=20`：统一实时事件流。
+- `POST /api/world/observer-sessions`：记录观察者关注的 Agent 或地点。
+- `POST /api/admin/world/start`：启动后台运行。
+- `POST /api/admin/world/pause`：暂停后台运行。
+- `POST /api/admin/world/tick`：手动推进一个 tick。
+- `POST /api/admin/events/trigger`：注入 admin 世界事件。
+
+启动后台运行：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/admin/world/start \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+手动推进一个 tick：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/admin/world/tick \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+前端 admin 控件依赖浏览器本地 token：
+
+```js
+localStorage.setItem("ADMIN_TOKEN", "你的_ADMIN_TOKEN")
+```
+
+刷新页面后会显示启动、暂停、推进 tick 和旧“模拟一天”调试入口。
+
+v1 的 8 小时行动计划默认使用规则生成，写入 `agent_action_plans`，模型预算和 `model_call_logs` 已接好。后续可以把 planner 从 `rule-based-v1` 替换为批量 LLM planner。
+
 ## 重置本地世界
 
 确认需要丢弃当前模拟进度后运行：
@@ -65,6 +105,8 @@ DATABASE_URL=postgresql://user:password@host:5432/dbname
 ```
 
 如果使用 Supabase，可以直接执行 [`supabase_schema.sql`](supabase_schema.sql) 建表；完整流程见 [`SUPABASE.md`](SUPABASE.md)。
+
+已有 Supabase 项目升级到 World Runtime v1 时，重新执行最新的 [`supabase_schema.sql`](supabase_schema.sql) 即可。所有新增表都使用 `create table if not exists` 和 `create index if not exists`，不会清空已有数据。
 
 项目内的 PostgreSQL 兼容层会处理：
 
@@ -165,6 +207,16 @@ startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
 - `agent_news_posts`
 - `external_information`
 - `agent_information`
+
+World Runtime：
+
+- `world_runtime`
+- `world_ticks`
+- `world_event_stream`
+- `agent_action_plans`
+- `observer_sessions`
+- `participant_actions`
+- `model_call_logs`
 
 ## 常见问题
 

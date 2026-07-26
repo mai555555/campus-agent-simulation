@@ -16,11 +16,59 @@
 | Method | Path | 说明 |
 | --- | --- | --- |
 | GET | `/api/state` | 世界总快照：天数、环境、空间、Agent、事件、六模块状态 |
+| GET | `/api/world/runtime` | 世界运行器状态、世界时间、最新 tick、模型预算 |
+| GET | `/api/world/events?after_id=0&limit=50` | 统一实时事件流，支持按 id 增量读取 |
+| POST | `/api/world/observer-sessions` | 创建或更新观察者会话，记录关注 Agent/地点 |
 | GET | `/api/agents` | Agent 列表 |
 | GET | `/api/residents` | 同 `/api/agents` |
 | GET | `/api/agents/modules` | 所有 Agent 六模块状态 |
 | GET | `/api/agents/{resident_id}/modules` | 单个 Agent 六模块状态 |
 | GET | `/api/inventory` | 全部库存 |
+
+观察者会话示例：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/world/observer-sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"browser-observer","focused_resident_id":1}'
+```
+
+增量事件流示例：
+
+```bash
+curl 'http://127.0.0.1:8000/api/world/events?after_id=0&limit=20'
+```
+
+## World Runtime Admin
+
+Admin 接口使用 `.env` 中的 `ADMIN_TOKEN`。请求头格式：
+
+```text
+Authorization: Bearer 你的_ADMIN_TOKEN
+```
+
+| Method | Path | 说明 |
+| --- | --- | --- |
+| POST | `/api/admin/world/start` | 启动后台 world runner |
+| POST | `/api/admin/world/pause` | 暂停后台 world runner |
+| POST | `/api/admin/world/tick` | 手动推进一个 tick |
+| POST | `/api/admin/events/trigger` | 注入 admin 世界事件，可选影响校园空间 |
+
+手动 tick 示例：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/admin/world/tick \
+  -H 'Authorization: Bearer 你的_ADMIN_TOKEN'
+```
+
+注入事件示例：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/admin/events/trigger \
+  -H 'Authorization: Bearer 你的_ADMIN_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"临时社团展示","event_type":"大型活动","target_spaces":["操场"],"intensity":65}'
+```
 
 ## 校园环境与空间
 
@@ -96,9 +144,9 @@ curl -X POST http://127.0.0.1:8000/api/tools/buy-sell \
 | POST | `/api/agent/act-all` | 所有 Agent 轮流决策并执行 |
 | POST | `/api/simulate/lifecycle-step/{resident_id}` | 单个 Agent 完整生命周期 |
 | POST | `/api/simulate/lifecycle-round` | 所有 Agent 完整生命周期，不推进天数 |
-| POST | `/api/simulate/ai-day` | 推进到下一天，更新环境，所有 Agent 行动，发布日报 |
+| POST | `/api/simulate/ai-day` | 旧调试入口：推进到下一天，更新环境，所有 Agent 行动，发布日报 |
 
-最常用的是：
+新主体验使用 World Runtime。旧入口仍可用于调试：
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/simulate/ai-day
