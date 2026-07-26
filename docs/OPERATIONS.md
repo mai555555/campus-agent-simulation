@@ -82,7 +82,9 @@ localStorage.setItem("ADMIN_TOKEN", "你的_ADMIN_TOKEN")
 
 刷新页面后会显示启动、暂停、推进 tick 和旧“模拟一天”调试入口。
 
-v1 的 8 小时行动计划默认使用规则生成，写入 `agent_action_plans`，模型预算和 `model_call_logs` 已接好。后续可以把 planner 从 `rule-based-v1` 替换为批量 LLM planner。
+v1 的 8 小时行动计划优先使用 `llm-planner-v1`，写入 `agent_action_plans`，每次自动模型调用都会进入 `model_call_logs` 并消耗 `daily_auto_model_budget`。预算耗尽或模型失败时会自动降级为 `rule-based-v1`，世界运行不会被阻塞。
+
+真实天气和外部世界资讯由 world tick 每小时自动同步一次。天气会更新 `campus_state` 并写入 `real_weather_auto_sync` / `real_weather_auto_sync_failed` 事件；资讯会写入 `external_information`、`agent_information` 和 `external_information_auto_sync` / `external_information_auto_sync_failed` 事件。前端不再提供手动同步按钮。
 
 ## 重置本地世界
 

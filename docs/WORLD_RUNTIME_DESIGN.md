@@ -455,7 +455,7 @@ admin > participant > observer > automatic background
 别一次重构完。建议四步：
 
 1. **观察者/参与者/Admin 权限分层**
-   隐藏普通用户的强操作按钮，只保留观察入口；参与者开放有限互动；admin 才显示“模拟一天/同步天气/触发事件/运行控制”。
+   隐藏普通用户的强操作按钮，只保留观察入口；参与者开放有限互动；admin 才显示“模拟一天/触发事件/运行控制”。天气由 world tick 自动同步。
 
 2. **事件流**
    新增 `/api/world/events`，把 `city_events`、`simulation_action_logs`、`agent_news_posts` 整合成一个统一时间线。
@@ -486,7 +486,9 @@ admin > participant > observer > automatic background
 - 后端新增 `world_runtime`、`world_ticks`、`world_event_stream`、`agent_action_plans`、`observer_sessions`、`participant_actions`、`model_call_logs`。
 - 后台 world runner 在应用进程内运行，`status=running` 时按 tick 间隔推进世界。
 - 每个 tick 同步真实时间，确保当前 8 小时窗口计划存在，并处理少量 Agent。
-- 8 小时计划先使用 `rule-based-v1` 生成，避免自动高频模型调用。
+- 8 小时计划优先使用 `llm-planner-v1` 生成，并严格消耗 `daily_auto_model_budget`；预算耗尽或模型失败时自动降级到 `rule-based-v1`。
+- 真实天气和外部世界资讯由后台 tick 每小时自动检查一次，写入环境表、资讯表和 `world_event_stream`，不再依赖前端手动同步按钮。
+- 观察者关注 Agent 时可触发局部模型细节，写入 Agent 记忆和事件流；admin 注入事件时可触发一次事件影响反馈。
 - 普通用户进入页面会创建 observer session，关注 Agent 或地点会更新观察焦点。
 - 前端通过 `/api/world/runtime` 和 `/api/world/events` 展示运行状态和实时事件流。
 - Admin 控制使用 `ADMIN_TOKEN`，支持 start、pause、manual tick 和事件注入。
@@ -495,13 +497,12 @@ admin > participant > observer > automatic background
 v1 暂不做：
 
 - 完整参与者互动 UI。
-- 批量 LLM planner。
 - 多实例分布式锁、任务队列或独立 worker。
 - admin 登录系统。
 - 可视化速度倍率控制。
 
 后续优先级建议：
 
-1. 把 `rule-based-v1` planner 替换为“批量 LLM 生成多个 Agent 计划”，并严格走 `model_call_logs` 和每日预算。
+1. 将观察者和 admin 的模型调用预算从自动后台预算中拆出独立额度，便于成本分析。
 2. 增加参与者互动入口，把消息、公告、投票等写入 `participant_actions` 并由 tick 局部吸收。
 3. 如果 Render 后续使用多实例，迁移 world runner 到独立 worker、cron 或队列，避免多个进程同时 tick。
