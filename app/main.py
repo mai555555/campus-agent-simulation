@@ -52,6 +52,8 @@ SIMULATION_JOBS_LOCK = Lock()
 WORLD_RUNNER_LOCK = Lock()
 WORLD_RUNNER_THREAD = None
 WORLD_TICK_LOCK = Lock()
+WORLD_SCHEMA_LOCK = Lock()
+WORLD_SCHEMA_READY = False
 WORLD_TIMEZONE = "Asia/Shanghai"
 WORLD_TZ = timezone(timedelta(hours=8))
 WORLD_RUNTIME_ID = 1
@@ -1384,17 +1386,24 @@ def ensure_external_information_system(conn):
 
 
 def ensure_world_runtime_tables(conn):
-    conn.executescript(WORLD_RUNTIME_SQL)
-    now = datetime.now(WORLD_TZ).isoformat()
-    budget_date = now[:10]
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO world_runtime
-        (id, status, world_timezone, world_time, budget_date)
-        VALUES (?, 'paused', ?, ?, ?)
-        """,
-        (WORLD_RUNTIME_ID, WORLD_TIMEZONE, now, budget_date),
-    )
+    global WORLD_SCHEMA_READY
+    if WORLD_SCHEMA_READY:
+        return
+    with WORLD_SCHEMA_LOCK:
+        if WORLD_SCHEMA_READY:
+            return
+        conn.executescript(WORLD_RUNTIME_SQL)
+        now = datetime.now(WORLD_TZ).isoformat()
+        budget_date = now[:10]
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO world_runtime
+            (id, status, world_timezone, world_time, budget_date)
+            VALUES (?, 'paused', ?, ?, ?)
+            """,
+            (WORLD_RUNTIME_ID, WORLD_TIMEZONE, now, budget_date),
+        )
+        WORLD_SCHEMA_READY = True
 
 
 def get_world_now():
@@ -2551,6 +2560,9 @@ def world_runner_loop():
 @app.on_event("startup")
 def start_world_runner_thread():
     global WORLD_RUNNER_THREAD
+    with get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        conn.commit()
     with WORLD_RUNNER_LOCK:
         if WORLD_RUNNER_THREAD and WORLD_RUNNER_THREAD.is_alive():
             return
