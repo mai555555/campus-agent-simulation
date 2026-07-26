@@ -2666,6 +2666,26 @@ def home():
     return FileResponse(PROJECT_ROOT / "frontend" / "index.html")
 
 
+@app.get("/favicon.svg")
+def favicon_svg():
+    return FileResponse(PROJECT_ROOT / "frontend" / "assets" / "site" / "favicon.svg")
+
+
+@app.get("/favicon.ico")
+def favicon_ico():
+    return FileResponse(PROJECT_ROOT / "frontend" / "assets" / "site" / "favicon.ico")
+
+
+@app.get("/apple-touch-icon.png")
+def apple_touch_icon():
+    return FileResponse(PROJECT_ROOT / "frontend" / "assets" / "site" / "apple-touch-icon.png")
+
+
+@app.get("/share-image.png")
+def share_image():
+    return FileResponse(PROJECT_ROOT / "frontend" / "assets" / "site" / "share-image.png")
+
+
 @app.get("/api/ai/test")
 def ai_test():
     prompt = "请用一句话说明你已接入校园封闭世界 AI-Agent 系统。"
