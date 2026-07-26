@@ -3759,7 +3759,7 @@ def fetch_external_information(limit=5):
         try:
             response = requests.get(
                 source_url,
-                timeout=12,
+                timeout=5,
                 headers={"User-Agent": "CampusAgentSimulation/1.0 (+campus simulation)"},
             )
             response.raise_for_status()
