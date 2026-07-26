@@ -344,3 +344,114 @@ AGENT_INFORMATION_COLUMNS = {
     "distortion_note": "TEXT NOT NULL DEFAULT ''",
     "source_resident_id": "INTEGER",
 }
+
+WORLD_RUNTIME_SQL = """
+CREATE TABLE IF NOT EXISTS world_runtime (
+    id INTEGER PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'paused',
+    world_timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+    world_time TEXT NOT NULL DEFAULT '',
+    tick_interval_seconds INTEGER NOT NULL DEFAULT 60,
+    agents_per_tick INTEGER NOT NULL DEFAULT 3,
+    daily_auto_model_budget INTEGER NOT NULL DEFAULT 100,
+    auto_model_calls_used INTEGER NOT NULL DEFAULT 0,
+    budget_date TEXT NOT NULL DEFAULT '',
+    current_agent_cursor INTEGER NOT NULL DEFAULT 0,
+    last_tick_started_at TEXT NOT NULL DEFAULT '',
+    last_tick_completed_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS world_ticks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tick_index INTEGER NOT NULL,
+    world_time TEXT NOT NULL,
+    day INTEGER NOT NULL,
+    slot TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT 'background',
+    status TEXT NOT NULL DEFAULT 'running',
+    processed_agents INTEGER NOT NULL DEFAULT 0,
+    failed_agents INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS world_event_stream (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tick_id INTEGER,
+    day INTEGER NOT NULL,
+    slot TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    resident_id INTEGER,
+    location TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (resident_id) REFERENCES residents(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_action_plans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    resident_id INTEGER NOT NULL,
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    plan_json TEXT NOT NULL DEFAULT '{}',
+    model_name TEXT NOT NULL DEFAULT 'rule-based-v1',
+    prompt_version TEXT NOT NULL DEFAULT 'world-runtime-v1',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(resident_id, window_start),
+    FOREIGN KEY (resident_id) REFERENCES residents(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS observer_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL DEFAULT 'anonymous',
+    session_type TEXT NOT NULL DEFAULT 'observer',
+    focused_resident_id INTEGER,
+    focused_location TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (focused_resident_id) REFERENCES residents(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS participant_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL DEFAULT 'anonymous',
+    action_type TEXT NOT NULL,
+    target_type TEXT NOT NULL DEFAULT '',
+    target_id TEXT NOT NULL DEFAULT '',
+    payload TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'queued',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS model_call_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trigger_type TEXT NOT NULL,
+    resident_id INTEGER,
+    related_event_id INTEGER,
+    model_name TEXT NOT NULL DEFAULT '',
+    prompt_version TEXT NOT NULL DEFAULT '',
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    estimated_cost REAL NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'logged',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (resident_id) REFERENCES residents(id) ON DELETE SET NULL,
+    FOREIGN KEY (related_event_id) REFERENCES world_event_stream(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_world_ticks_started_at ON world_ticks(started_at);
+CREATE INDEX IF NOT EXISTS idx_world_event_stream_created_at ON world_event_stream(created_at);
+CREATE INDEX IF NOT EXISTS idx_world_event_stream_event_type ON world_event_stream(event_type);
+CREATE INDEX IF NOT EXISTS idx_world_event_stream_resident_id ON world_event_stream(resident_id);
+CREATE INDEX IF NOT EXISTS idx_world_event_stream_tick_id ON world_event_stream(tick_id);
+CREATE INDEX IF NOT EXISTS idx_agent_action_plans_window ON agent_action_plans(window_start, window_end);
+CREATE INDEX IF NOT EXISTS idx_observer_sessions_last_seen ON observer_sessions(last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_model_call_logs_trigger_date ON model_call_logs(trigger_type, created_at);
+"""

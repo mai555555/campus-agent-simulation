@@ -5,6 +5,7 @@ import random
 import re
 import requests
 import logging
+import os
 import time
 from queue import Queue
 from threading import Lock, Thread
@@ -12,7 +13,7 @@ from uuid import uuid4
 from xml.etree import ElementTree
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -48,12 +49,18 @@ THREE_MODULE_DIR = PROJECT_ROOT / "frontend" / "vendor" / "three"
 app.mount("/three", StaticFiles(directory=str(THREE_MODULE_DIR)), name="three")
 SIMULATION_JOBS = {}
 SIMULATION_JOBS_LOCK = Lock()
+WORLD_RUNNER_LOCK = Lock()
+WORLD_RUNNER_THREAD = None
+WORLD_TICK_LOCK = Lock()
+WORLD_TIMEZONE = "Asia/Shanghai"
+WORLD_TZ = timezone(timedelta(hours=8))
+WORLD_RUNTIME_ID = 1
 
 from app.schema import (
     CAMPUS_STATE_SQL, SPACE_SYSTEM_SQL, DEFAULT_SPACES, DEFAULT_ENV, ENV_COLUMN_TYPES,
     AGENT_NEWS_SQL, EXTERNAL_INFORMATION_SQL, AGENT_PROFILE_SQL, PROFILE_COLUMN_TYPES,
     SOCIAL_SYSTEM_SQL, BEHAVIOR_SYSTEM_SQL, RELATIONSHIP_DYNAMIC_COLUMNS,
-    LONG_TERM_GOAL_COLUMNS, AGENT_INFORMATION_COLUMNS
+    LONG_TERM_GOAL_COLUMNS, AGENT_INFORMATION_COLUMNS, WORLD_RUNTIME_SQL
 )
 
 
@@ -1316,6 +1323,25 @@ class SpaceStatusRequest(BaseModel):
     status: str
 
 
+class ObserverSessionRequest(BaseModel):
+    session_id: Optional[int] = None
+    user_id: str = "anonymous"
+    session_type: str = "observer"
+    focused_resident_id: Optional[int] = None
+    focused_location: str = ""
+
+
+class AdminWorldEventRequest(BaseModel):
+    title: str
+    content: str = ""
+    event_type: str = "admin_event"
+    resident_id: Optional[int] = None
+    location: str = ""
+    target_spaces: list[str] = Field(default_factory=list)
+    intensity: int = Field(default=50, ge=1, le=100)
+    payload: dict = Field(default_factory=dict)
+
+
 def row_to_dict(row):
     return dict(row) if row else None
 
@@ -1355,6 +1381,230 @@ def ensure_external_information_system(conn):
     for column, column_type in AGENT_INFORMATION_COLUMNS.items():
         if column not in columns:
             conn.execute(f"ALTER TABLE agent_information ADD COLUMN {column} {column_type}")
+
+
+def ensure_world_runtime_tables(conn):
+    conn.executescript(WORLD_RUNTIME_SQL)
+    now = datetime.now(WORLD_TZ).isoformat()
+    budget_date = now[:10]
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO world_runtime
+        (id, status, world_timezone, world_time, budget_date)
+        VALUES (?, 'paused', ?, ?, ?)
+        """,
+        (WORLD_RUNTIME_ID, WORLD_TIMEZONE, now, budget_date),
+    )
+
+
+def get_world_now():
+    return datetime.now(WORLD_TZ)
+
+
+def world_slot_from_hour(hour):
+    if 0 <= hour < 8:
+        return "00:00-08:00"
+    if 8 <= hour < 16:
+        return "08:00-16:00"
+    return "16:00-24:00"
+
+
+def get_world_plan_window(world_time):
+    start_hour = (world_time.hour // 8) * 8
+    window_start = world_time.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+    window_end = window_start + timedelta(hours=8)
+    return window_start, window_end
+
+
+def get_world_runtime(conn):
+    ensure_world_runtime_tables(conn)
+    now = get_world_now()
+    budget_date = now.strftime("%Y-%m-%d")
+    row = conn.execute("SELECT * FROM world_runtime WHERE id = ?", (WORLD_RUNTIME_ID,)).fetchone()
+    if row and row["budget_date"] != budget_date:
+        conn.execute(
+            """
+            UPDATE world_runtime
+            SET auto_model_calls_used = 0, budget_date = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (budget_date, WORLD_RUNTIME_ID),
+        )
+    conn.execute(
+        "UPDATE world_runtime SET world_time = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (now.isoformat(), WORLD_RUNTIME_ID),
+    )
+    conn.commit()
+    return dict(conn.execute("SELECT * FROM world_runtime WHERE id = ?", (WORLD_RUNTIME_ID,)).fetchone())
+
+
+def update_world_runtime_status(conn, status):
+    ensure_world_runtime_tables(conn)
+    now = get_world_now().isoformat()
+    conn.execute(
+        """
+        UPDATE world_runtime
+        SET status = ?, world_time = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (status, now, WORLD_RUNTIME_ID),
+    )
+    conn.commit()
+    return get_world_runtime(conn)
+
+
+def append_world_event(conn, event_type, title, content, tick_id=None, resident_id=None, location="", payload=None, day=None, slot=None):
+    ensure_world_runtime_tables(conn)
+    now = get_world_now()
+    day = day or get_current_day(conn)
+    slot = slot or world_slot_from_hour(now.hour)
+    cursor = conn.execute(
+        """
+        INSERT INTO world_event_stream
+        (tick_id, day, slot, event_type, resident_id, location, title, content, payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            tick_id,
+            day,
+            slot,
+            event_type,
+            resident_id,
+            location or "",
+            title,
+            content,
+            json.dumps(payload or {}, ensure_ascii=False),
+        ),
+    )
+    event_id = cursor.lastrowid
+    return dict(conn.execute("SELECT * FROM world_event_stream WHERE id = ?", (event_id,)).fetchone())
+
+
+def get_recent_observer_focus(conn, minutes=10):
+    ensure_world_runtime_tables(conn)
+    cutoff = (get_world_now() - timedelta(minutes=minutes)).isoformat()
+    rows = conn.execute(
+        """
+        SELECT focused_resident_id, focused_location
+        FROM observer_sessions
+        WHERE last_seen_at >= ?
+        ORDER BY last_seen_at DESC
+        LIMIT 12
+        """,
+        (cutoff,),
+    ).fetchall()
+    focused_agents = [int(row["focused_resident_id"]) for row in rows if row["focused_resident_id"]]
+    focused_locations = [row["focused_location"] for row in rows if row["focused_location"]]
+    return focused_agents, focused_locations
+
+
+def log_model_call(conn, trigger_type, status="logged", resident_id=None, related_event_id=None, model_name="", prompt_version="world-runtime-v1", input_tokens=0, output_tokens=0, estimated_cost=0):
+    ensure_world_runtime_tables(conn)
+    cursor = conn.execute(
+        """
+        INSERT INTO model_call_logs
+        (trigger_type, resident_id, related_event_id, model_name, prompt_version, input_tokens, output_tokens, estimated_cost, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (trigger_type, resident_id, related_event_id, model_name, prompt_version, input_tokens, output_tokens, estimated_cost, status),
+    )
+    return cursor.lastrowid
+
+
+def consume_auto_model_budget(conn, trigger_type, resident_id=None):
+    runtime = get_world_runtime(conn)
+    used = int(runtime["auto_model_calls_used"])
+    budget = int(runtime["daily_auto_model_budget"])
+    if used >= budget:
+        log_model_call(conn, trigger_type, status="budget_exhausted", resident_id=resident_id)
+        return False
+    conn.execute(
+        """
+        UPDATE world_runtime
+        SET auto_model_calls_used = auto_model_calls_used + 1, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (WORLD_RUNTIME_ID,),
+    )
+    log_model_call(conn, trigger_type, status="reserved", resident_id=resident_id)
+    return True
+
+
+def build_rule_based_plan(resident, window_start, window_end):
+    role = str(resident["role"])
+    morning = window_start.hour == 0
+    daytime = window_start.hour == 8
+    if "老师" in role:
+        locations = ["教学楼", "图书馆", "校务处"] if daytime else ["图书馆", "宿舍区", "教学楼"]
+        intent = "平衡教学、指导学生和校园服务"
+    elif "商" in role or "老板" in role:
+        locations = ["商业街", "食堂", "校务处"] if daytime else ["商业街", "宿舍区", "食堂"]
+        intent = "维持校园服务供给并寻找需求变化"
+    elif "后勤" in role or "管理" in role:
+        locations = ["校务处", "食堂", "图书馆"] if daytime else ["宿舍区", "校务处", "食堂"]
+        intent = "维护空间秩序和资源稳定"
+    elif morning:
+        locations = ["宿舍区", "食堂", "教学楼"]
+        intent = "恢复精力并准备当天学习生活"
+    elif daytime:
+        locations = ["教学楼", "食堂", "图书馆"]
+        intent = "推进课程学习并保持必要社交"
+    else:
+        locations = ["食堂", "操场", "宿舍区"]
+        intent = "整理一天收获并进行轻量社交"
+    steps = []
+    for index, location in enumerate(locations):
+        step_time = window_start + timedelta(minutes=45 + index * 135)
+        if step_time >= window_end:
+            step_time = window_end - timedelta(minutes=30)
+        steps.append(
+            {
+                "time": step_time.strftime("%H:%M"),
+                "action": "move" if index != 1 else "observe",
+                "location": location,
+                "goal": f"{resident['name']}围绕「{resident['goal']}」调整当前节奏",
+            }
+        )
+    return {
+        "resident_id": resident["id"],
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
+        "intent": intent,
+        "steps": steps,
+        "flexibility": 0.35,
+        "source": "rule-based-v1",
+    }
+
+
+def ensure_current_action_plans(conn, world_time):
+    ensure_world_runtime_tables(conn)
+    window_start, window_end = get_world_plan_window(world_time)
+    residents = conn.execute("SELECT id, name, role, goal, location FROM residents ORDER BY id").fetchall()
+    created = 0
+    for resident in residents:
+        existing = conn.execute(
+            """
+            SELECT id FROM agent_action_plans
+            WHERE resident_id = ? AND window_start = ? AND status = 'active'
+            """,
+            (resident["id"], window_start.isoformat()),
+        ).fetchone()
+        if existing:
+            continue
+        plan = build_rule_based_plan(resident, window_start, window_end)
+        conn.execute(
+            """
+            INSERT INTO agent_action_plans
+            (resident_id, window_start, window_end, plan_json, model_name, prompt_version, status)
+            VALUES (?, ?, ?, ?, 'rule-based-v1', 'world-runtime-v1', 'active')
+            ON CONFLICT(resident_id, window_start)
+            DO UPDATE SET plan_json = excluded.plan_json, window_end = excluded.window_end,
+                          status = 'active', updated_at = CURRENT_TIMESTAMP
+            """,
+            (resident["id"], window_start.isoformat(), window_end.isoformat(), json.dumps(plan, ensure_ascii=False)),
+        )
+        created += 1
+    return {"window_start": window_start.isoformat(), "window_end": window_end.isoformat(), "created": created}
 
 
 def get_environment_hour(env):
@@ -2042,6 +2292,272 @@ def execute_decision(conn, resident_id, decision):
     }
 
 
+def get_current_agent_plan(conn, resident_id, world_time):
+    window_start, _ = get_world_plan_window(world_time)
+    row = conn.execute(
+        """
+        SELECT * FROM agent_action_plans
+        WHERE resident_id = ? AND window_start = ? AND status = 'active'
+        """,
+        (resident_id, window_start.isoformat()),
+    ).fetchone()
+    if not row:
+        return None
+    return load_json_text(row["plan_json"], {})
+
+
+def choose_plan_step(plan, world_time):
+    steps = plan.get("steps") or []
+    if not steps:
+        return {"action": "observe", "location": "校园", "goal": plan.get("intent", "观察校园环境")}
+    current_hm = world_time.strftime("%H:%M")
+    due_steps = [step for step in steps if str(step.get("time", "00:00")) <= current_hm]
+    return due_steps[-1] if due_steps else steps[0]
+
+
+def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observed=False):
+    plan = get_current_agent_plan(conn, agent["id"], world_time) or {}
+    step = choose_plan_step(plan, world_time)
+    action = str(step.get("action") or "observe")
+    destination = str(step.get("location") or agent["location"])
+    goal = str(step.get("goal") or plan.get("intent") or "观察校园环境")
+    title = f"{agent['name']}正在{destination}行动"
+
+    try:
+        if action == "move" and destination in VALID_LOCATIONS and destination != agent["location"]:
+            result = move_resident(conn, agent["id"], destination)
+            content = result["description"]
+        else:
+            focus = destination if destination in VALID_LOCATIONS else "校园状态"
+            content = f"{agent['name']} 在{agent['location']}观察{focus}，目标：{goal}。"
+            add_event(conn, day, "world_agent_observe", content)
+            add_memory(conn, agent["id"], day, content, importance=2 if observed else 1, source="world_tick")
+        perception = {"world_time": world_time.isoformat(), "slot": slot, "observed": observed, "plan_step": step}
+        execution = {"action": action, "result": {"description": content}, "success": True, "plan_step": step}
+        record_simulation_log(conn, agent["id"], perception, {"decision": {"action": action, "reason": goal, "tool_input": {"destination": destination}}, "memory_context": {"memories": []}}, execution, {})
+        conn.execute(
+            """
+            UPDATE agent_profiles
+            SET current_task = ?, perception = ?
+            WHERE resident_id = ?
+            """,
+            (goal[:120], json.dumps(perception, ensure_ascii=False), agent["id"]),
+        )
+        event = append_world_event(
+            conn,
+            "agent_tick",
+            title,
+            content,
+            tick_id=tick_id,
+            resident_id=agent["id"],
+            location=destination if destination in VALID_LOCATIONS else agent["location"],
+            payload={"action": action, "goal": goal, "observed": observed, "plan_step": step},
+            day=day,
+            slot=slot,
+        )
+        if observed:
+            log_model_call(conn, "observer", status="rule_based_detail", resident_id=agent["id"], related_event_id=event["id"])
+        conn.commit()
+        return {"resident_id": agent["id"], "success": True, "event": event}
+    except Exception as exc:
+        conn.rollback()
+        error_content = f"{agent['name']} 的 world tick 行动失败，已保留状态：{type(exc).__name__}。"
+        event = append_world_event(
+            conn,
+            "agent_tick_failed",
+            "Agent tick 失败",
+            error_content,
+            tick_id=tick_id,
+            resident_id=agent["id"],
+            location=agent["location"],
+            payload={"error": str(exc), "action": action, "goal": goal},
+            day=day,
+            slot=slot,
+        )
+        conn.commit()
+        return {"resident_id": agent["id"], "success": False, "event": event, "error": str(exc)}
+
+
+def select_world_tick_agents(conn, runtime):
+    agents = [dict(row) for row in conn.execute("SELECT id, name, role, goal, location FROM residents ORDER BY id").fetchall()]
+    if not agents:
+        return [], int(runtime.get("current_agent_cursor", 0) or 0), set()
+    focused_agent_ids, _ = get_recent_observer_focus(conn)
+    focused_set = set(focused_agent_ids)
+    agent_by_id = {agent["id"]: agent for agent in agents}
+    selected = [agent_by_id[agent_id] for agent_id in focused_agent_ids if agent_id in agent_by_id]
+    per_tick = max(1, int(runtime.get("agents_per_tick", 3) or 3))
+    cursor = int(runtime.get("current_agent_cursor", 0) or 0) % len(agents)
+    next_cursor = cursor
+    while len(selected) < per_tick and len(selected) < len(agents):
+        candidate = agents[next_cursor % len(agents)]
+        if candidate["id"] not in {item["id"] for item in selected}:
+            selected.append(candidate)
+        next_cursor += 1
+    return selected[:per_tick], next_cursor % len(agents), focused_set
+
+
+def sync_world_time_environment(conn, world_time):
+    day = get_current_day(conn)
+    values = dict(get_campus_environment(conn, day))
+    values = derive_environment_from_real_time(values, world_time)
+    save_environment_values(conn, day, values)
+    return get_campus_environment(conn, day)
+
+
+def advance_world_tick(reason="background"):
+    if not WORLD_TICK_LOCK.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="世界 tick 正在执行中")
+    try:
+        with get_connection() as conn:
+            runtime = get_world_runtime(conn)
+            world_time = get_world_now()
+            day = get_current_day(conn)
+            slot = world_slot_from_hour(world_time.hour)
+            ensure_result = ensure_current_action_plans(conn, world_time)
+            env = sync_world_time_environment(conn, world_time)
+            tick_index_row = conn.execute("SELECT COALESCE(MAX(tick_index), 0) AS value FROM world_ticks").fetchone()
+            tick_index = int(tick_index_row["value"]) + 1
+            tick_cursor = conn.execute(
+                """
+                INSERT INTO world_ticks (tick_index, world_time, day, slot, reason, status)
+                VALUES (?, ?, ?, ?, ?, 'running')
+                """,
+                (tick_index, world_time.isoformat(), day, slot, reason),
+            )
+            tick_id = tick_cursor.lastrowid
+            conn.execute(
+                """
+                UPDATE world_runtime
+                SET last_tick_started_at = ?, world_time = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (world_time.isoformat(), world_time.isoformat(), WORLD_RUNTIME_ID),
+            )
+            start_event = append_world_event(
+                conn,
+                "world_tick_started",
+                "世界 tick 开始",
+                f"{slot} tick 开始，世界正在按真实时间推进。",
+                tick_id=tick_id,
+                payload={"reason": reason, "plans_created": ensure_result["created"], "weather": env.get("weather")},
+                day=day,
+                slot=slot,
+            )
+            conn.commit()
+            selected_agents, next_cursor, focused_set = select_world_tick_agents(conn, runtime)
+            results = []
+            failed = 0
+            for agent in selected_agents:
+                item = process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observed=agent["id"] in focused_set)
+                results.append(item)
+                if not item["success"]:
+                    failed += 1
+            completed_at = get_world_now().isoformat()
+            conn.execute(
+                """
+                UPDATE world_ticks
+                SET status = ?, processed_agents = ?, failed_agents = ?, completed_at = ?
+                WHERE id = ?
+                """,
+                ("failed" if failed else "complete", len(results), failed, completed_at, tick_id),
+            )
+            conn.execute(
+                """
+                UPDATE world_runtime
+                SET current_agent_cursor = ?, last_tick_completed_at = ?, world_time = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (next_cursor, completed_at, completed_at, WORLD_RUNTIME_ID),
+            )
+            finish_event = append_world_event(
+                conn,
+                "world_tick_complete",
+                "世界 tick 完成",
+                f"本次 tick 处理 {len(results)} 位 Agent，失败 {failed} 位。",
+                tick_id=tick_id,
+                payload={"started_event_id": start_event["id"], "processed_agents": len(results), "failed_agents": failed},
+                day=day,
+                slot=slot,
+            )
+            conn.commit()
+            return {
+                "tick_id": tick_id,
+                "tick_index": tick_index,
+                "world_time": completed_at,
+                "day": day,
+                "slot": slot,
+                "reason": reason,
+                "processed_agents": len(results),
+                "failed_agents": failed,
+                "events": [start_event, finish_event],
+                "results": results,
+            }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("World tick failed")
+        with get_connection() as conn:
+            try:
+                append_world_event(
+                    conn,
+                    "world_tick_failed",
+                    "世界 tick 失败",
+                    f"后台世界推进失败：{type(exc).__name__}",
+                    payload={"error": str(exc), "reason": reason},
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+        raise
+    finally:
+        WORLD_TICK_LOCK.release()
+
+
+def parse_runtime_time(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=WORLD_TZ)
+    return parsed
+
+
+def world_tick_due(runtime):
+    if runtime.get("status") != "running":
+        return False
+    interval = max(10, int(runtime.get("tick_interval_seconds", 60) or 60))
+    last = parse_runtime_time(runtime.get("last_tick_started_at") or runtime.get("last_tick_completed_at"))
+    if not last:
+        return True
+    return (get_world_now() - last).total_seconds() >= interval
+
+
+def world_runner_loop():
+    while True:
+        try:
+            with get_connection() as conn:
+                runtime = get_world_runtime(conn)
+            if world_tick_due(runtime):
+                advance_world_tick(reason="background")
+        except Exception as exc:
+            logger.warning("World runner loop skipped one cycle: %s", exc)
+        time.sleep(5)
+
+
+@app.on_event("startup")
+def start_world_runner_thread():
+    global WORLD_RUNNER_THREAD
+    with WORLD_RUNNER_LOCK:
+        if WORLD_RUNNER_THREAD and WORLD_RUNNER_THREAD.is_alive():
+            return
+        WORLD_RUNNER_THREAD = Thread(target=world_runner_loop, daemon=True)
+        WORLD_RUNNER_THREAD.start()
+
+
 def auto_update_environment(conn, day):
     previous = get_campus_environment(conn, day)
     weather = random.choice(["晴", "多云", "小雨", "闷热", "大风"])
@@ -2142,6 +2658,175 @@ def home():
 def ai_test():
     prompt = "请用一句话说明你已接入校园封闭世界 AI-Agent 系统。"
     return {"message": "AI API 调用成功", "result": ask_llm(prompt)}
+
+
+def require_admin_token(authorization: Optional[str]):
+    expected = os.getenv("ADMIN_TOKEN", "").strip()
+    if not expected:
+        logger.warning("ADMIN_TOKEN is not configured; admin world endpoint is open for local development.")
+        return
+    if authorization != f"Bearer {expected}":
+        raise HTTPException(status_code=403, detail="Admin token 无效或缺失")
+
+
+def decode_world_event(row):
+    event = dict(row)
+    event["payload"] = load_json_text(event.get("payload"), {})
+    return event
+
+
+def runtime_response(conn):
+    runtime = get_world_runtime(conn)
+    latest_tick = conn.execute("SELECT * FROM world_ticks ORDER BY id DESC LIMIT 1").fetchone()
+    latest_event = conn.execute("SELECT id FROM world_event_stream ORDER BY id DESC LIMIT 1").fetchone()
+    runtime["latest_tick"] = dict(latest_tick) if latest_tick else None
+    runtime["latest_event_id"] = latest_event["id"] if latest_event else 0
+    runtime["budget"] = {
+        "date": runtime["budget_date"],
+        "auto_model_calls_used": runtime["auto_model_calls_used"],
+        "daily_auto_model_budget": runtime["daily_auto_model_budget"],
+        "remaining_auto_model_calls": max(0, int(runtime["daily_auto_model_budget"]) - int(runtime["auto_model_calls_used"])),
+    }
+    return runtime
+
+
+@app.get("/api/world/runtime")
+def get_world_runtime_api():
+    with get_connection() as conn:
+        return runtime_response(conn)
+
+
+@app.get("/api/world/events")
+def get_world_events(after_id: int = 0, limit: int = 50):
+    limit = max(1, min(limit, 200))
+    with get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        rows = conn.execute(
+            """
+            SELECT * FROM world_event_stream
+            WHERE id > ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (after_id, limit),
+        ).fetchall()
+        events = [decode_world_event(row) for row in rows]
+        return {
+            "events": events,
+            "next_after_id": events[-1]["id"] if events else after_id,
+        }
+
+
+@app.post("/api/world/observer-sessions")
+def upsert_observer_session(payload: ObserverSessionRequest):
+    if payload.session_type not in {"observer", "participant", "admin"}:
+        raise HTTPException(status_code=400, detail="session_type 只支持 observer/participant/admin")
+    if payload.focused_location and payload.focused_location not in VALID_LOCATIONS:
+        raise HTTPException(status_code=400, detail="关注地点不存在")
+    with get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        if payload.focused_resident_id and not get_resident(conn, payload.focused_resident_id):
+            raise HTTPException(status_code=404, detail="关注 Agent 不存在")
+        now = get_world_now().isoformat()
+        if payload.session_id:
+            existing = conn.execute("SELECT * FROM observer_sessions WHERE id = ?", (payload.session_id,)).fetchone()
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE observer_sessions
+                    SET user_id = ?, session_type = ?, focused_resident_id = ?,
+                        focused_location = ?, last_seen_at = ?
+                    WHERE id = ?
+                    """,
+                    (payload.user_id, payload.session_type, payload.focused_resident_id, payload.focused_location, now, payload.session_id),
+                )
+                session_id = payload.session_id
+            else:
+                session_id = None
+        else:
+            session_id = None
+        if not session_id:
+            cursor = conn.execute(
+                """
+                INSERT INTO observer_sessions
+                (user_id, session_type, focused_resident_id, focused_location, started_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (payload.user_id, payload.session_type, payload.focused_resident_id, payload.focused_location, now, now),
+            )
+            session_id = cursor.lastrowid
+        focus_label = payload.focused_location or (f"Agent {payload.focused_resident_id}" if payload.focused_resident_id else "校园全局")
+        event = append_world_event(
+            conn,
+            "observer_session",
+            "观察者进入世界",
+            f"{payload.user_id} 正在观察{focus_label}。",
+            resident_id=payload.focused_resident_id,
+            location=payload.focused_location,
+            payload={"session_id": session_id, "session_type": payload.session_type},
+        )
+        log_model_call(conn, "observer", status="session_recorded", resident_id=payload.focused_resident_id, related_event_id=event["id"])
+        conn.commit()
+        row = conn.execute("SELECT * FROM observer_sessions WHERE id = ?", (session_id,)).fetchone()
+        return {"session": dict(row), "event": event}
+
+
+@app.post("/api/admin/world/start")
+def start_world_runtime(authorization: Optional[str] = Header(default=None)):
+    require_admin_token(authorization)
+    with get_connection() as conn:
+        runtime = update_world_runtime_status(conn, "running")
+        append_world_event(conn, "admin_world_start", "世界运行已启动", "admin 启动了校园平行世界后台运行。")
+        conn.commit()
+        return {"message": "世界运行已启动", "runtime": runtime}
+
+
+@app.post("/api/admin/world/pause")
+def pause_world_runtime(authorization: Optional[str] = Header(default=None)):
+    require_admin_token(authorization)
+    with get_connection() as conn:
+        runtime = update_world_runtime_status(conn, "paused")
+        append_world_event(conn, "admin_world_pause", "世界运行已暂停", "admin 暂停了校园平行世界后台运行。")
+        conn.commit()
+        return {"message": "世界运行已暂停", "runtime": runtime}
+
+
+@app.post("/api/admin/world/tick")
+def run_world_tick_once(authorization: Optional[str] = Header(default=None)):
+    require_admin_token(authorization)
+    return {"message": "世界 tick 已完成", "tick": advance_world_tick(reason="admin")}
+
+
+@app.post("/api/admin/events/trigger")
+def trigger_admin_world_event(payload: AdminWorldEventRequest, authorization: Optional[str] = Header(default=None)):
+    require_admin_token(authorization)
+    invalid_spaces = set(payload.target_spaces) - set(VALID_LOCATIONS)
+    if invalid_spaces:
+        raise HTTPException(status_code=400, detail=f"不存在的空间：{sorted(invalid_spaces)}")
+    if payload.location and payload.location not in VALID_LOCATIONS:
+        raise HTTPException(status_code=400, detail="事件地点不存在")
+    with get_connection() as conn:
+        day = get_current_day(conn)
+        if payload.resident_id and not get_resident(conn, payload.resident_id):
+            raise HTTPException(status_code=404, detail="目标 Agent 不存在")
+        campus_event = None
+        if payload.target_spaces:
+            campus_event = create_campus_event(conn, day, payload.title, payload.event_type, payload.intensity, payload.target_spaces)
+        content = payload.content or f"admin 触发事件：{payload.title}"
+        event = append_world_event(
+            conn,
+            payload.event_type,
+            payload.title,
+            content,
+            resident_id=payload.resident_id,
+            location=payload.location,
+            payload={**payload.payload, "campus_event": campus_event},
+            day=day,
+        )
+        log_model_call(conn, "admin", status="event_recorded", resident_id=payload.resident_id, related_event_id=event["id"])
+        add_event(conn, day, "admin_world_event", content)
+        conn.commit()
+        return {"message": "admin 事件已写入世界", "event": event, "campus_event": campus_event}
 
 
 @app.get("/api/state")

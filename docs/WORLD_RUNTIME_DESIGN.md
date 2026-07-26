@@ -478,3 +478,30 @@ admin > participant > observer > automatic background
 
 接着再拆 tick。  
 这一步是架构升级，应该单独 PR、单独测试，别和 UI 混在一起。
+
+## v1 实施边界
+
+当前 v1 已按“观察型运行时”落地：
+
+- 后端新增 `world_runtime`、`world_ticks`、`world_event_stream`、`agent_action_plans`、`observer_sessions`、`participant_actions`、`model_call_logs`。
+- 后台 world runner 在应用进程内运行，`status=running` 时按 tick 间隔推进世界。
+- 每个 tick 同步真实时间，确保当前 8 小时窗口计划存在，并处理少量 Agent。
+- 8 小时计划先使用 `rule-based-v1` 生成，避免自动高频模型调用。
+- 普通用户进入页面会创建 observer session，关注 Agent 或地点会更新观察焦点。
+- 前端通过 `/api/world/runtime` 和 `/api/world/events` 展示运行状态和实时事件流。
+- Admin 控制使用 `ADMIN_TOKEN`，支持 start、pause、manual tick 和事件注入。
+- 旧 `/api/simulate/ai-day` 保留为 admin/debug 入口，不再作为主体验。
+
+v1 暂不做：
+
+- 完整参与者互动 UI。
+- 批量 LLM planner。
+- 多实例分布式锁、任务队列或独立 worker。
+- admin 登录系统。
+- 可视化速度倍率控制。
+
+后续优先级建议：
+
+1. 把 `rule-based-v1` planner 替换为“批量 LLM 生成多个 Agent 计划”，并严格走 `model_call_logs` 和每日预算。
+2. 增加参与者互动入口，把消息、公告、投票等写入 `participant_actions` 并由 tick 局部吸收。
+3. 如果 Render 后续使用多实例，迁移 world runner 到独立 worker、cron 或队列，避免多个进程同时 tick。
