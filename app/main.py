@@ -2862,6 +2862,51 @@ def get_state():
         }
 
 
+@app.get("/api/world/observer-state")
+def get_world_observer_state():
+    with get_connection() as conn:
+        day = get_current_day(conn)
+        runtime = get_world_runtime(conn)
+        residents = conn.execute(
+            "SELECT id, name, role, location FROM residents ORDER BY id"
+        ).fetchall()
+        events = conn.execute(
+            """
+            SELECT * FROM world_event_stream
+            ORDER BY id DESC
+            LIMIT 20
+            """
+        ).fetchall()
+        latest_tick = conn.execute(
+            "SELECT * FROM world_ticks ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        budget = {
+            "date": runtime["budget_date"],
+            "auto_model_calls_used": runtime["auto_model_calls_used"],
+            "daily_auto_model_budget": runtime["daily_auto_model_budget"],
+            "remaining_auto_model_calls": max(
+                0,
+                int(runtime["daily_auto_model_budget"])
+                - int(runtime["auto_model_calls_used"]),
+            ),
+        }
+        return {
+            "current_day": day,
+            "environment": get_campus_environment(conn, day),
+            "spaces": get_space_snapshot(conn, day),
+            "agents": rows_to_dicts(residents),
+            "events": list(reversed(rows_to_dicts(events))),
+            "runtime": {
+                "status": runtime["status"],
+                "world_time": runtime["world_time"],
+                "world_timezone": runtime["world_timezone"],
+                "tick_interval_seconds": runtime["tick_interval_seconds"],
+                "latest_tick": dict(latest_tick) if latest_tick else None,
+                "budget": budget,
+            },
+        }
+
+
 @app.get("/api/agents")
 def get_agents():
     with get_connection() as conn:
