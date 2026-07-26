@@ -77,7 +77,7 @@ curl -X POST http://127.0.0.1:8000/api/admin/events/trigger \
 | GET | `/api/campus/environment/today` | 今日校园环境 |
 | POST | `/api/campus/environment/set` | 手动更新今日环境字段 |
 | POST | `/api/campus/environment/sync-real-time` | 根据系统时间更新学期、时段和人流 |
-| POST | `/api/campus/environment/sync-real-weather` | 调用天气 API 并更新校园环境 |
+| POST | `/api/campus/environment/sync-real-weather` | 兼容/调试入口：立即调用天气 API 并更新校园环境。主流程由 world tick 每小时自动同步 |
 | GET | `/api/campus/spaces` | 校园空间快照 |
 | POST | `/api/campus/spaces/{location}/status` | 手动调整空间状态 |
 | POST | `/api/campus/events/trigger` | 触发校园事件 |

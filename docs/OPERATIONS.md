@@ -84,7 +84,7 @@ localStorage.setItem("ADMIN_TOKEN", "你的_ADMIN_TOKEN")
 
 v1 的 8 小时行动计划优先使用 `llm-planner-v1`，写入 `agent_action_plans`，每次自动模型调用都会进入 `model_call_logs` 并消耗 `daily_auto_model_budget`。预算耗尽或模型失败时会自动降级为 `rule-based-v1`，世界运行不会被阻塞。
 
-外部世界资讯由 world tick 每小时自动同步一次，写入 `external_information`、`agent_information` 和 `world_event_stream`。前端不再提供手动同步按钮；如果需要排查，可直接查看事件流中的 `external_information_auto_sync` 或 `external_information_auto_sync_failed`。
+真实天气和外部世界资讯由 world tick 每小时自动同步一次。天气会更新 `campus_state` 并写入 `real_weather_auto_sync` / `real_weather_auto_sync_failed` 事件；资讯会写入 `external_information`、`agent_information` 和 `external_information_auto_sync` / `external_information_auto_sync_failed` 事件。前端不再提供手动同步按钮。
 
 ## 重置本地世界
 

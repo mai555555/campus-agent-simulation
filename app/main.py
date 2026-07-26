@@ -58,6 +58,7 @@ WORLD_TIMEZONE = "Asia/Shanghai"
 WORLD_TZ = timezone(timedelta(hours=8))
 WORLD_RUNTIME_ID = 1
 WORLD_EXTERNAL_SYNC_INTERVAL_SECONDS = 3600
+WORLD_WEATHER_SYNC_INTERVAL_SECONDS = 3600
 
 from app.schema import (
     CAMPUS_STATE_SQL, SPACE_SYSTEM_SQL, DEFAULT_SPACES, DEFAULT_ENV, ENV_COLUMN_TYPES,
@@ -2586,6 +2587,75 @@ def sync_world_time_environment(conn, world_time):
     return get_campus_environment(conn, day)
 
 
+def sync_real_weather_into_world(conn, event_type="real_weather_manual_sync", tick_id=None, day=None, slot=None):
+    day = day or get_current_day(conn)
+    current_env = get_campus_environment(conn, day)
+    weather_data = fetch_real_weather()
+    values = dict(current_env)
+    values.update({key: weather_data[key] for key in ["weather", "temperature", "rainfall", "weather_source", "weather_observed_at"]})
+    values = derive_environment_from_weather(values)
+    values = derive_environment_from_real_time(values)
+    save_environment_values(conn, day, values)
+    content = f"接入真实天气：{values['weather']}，{values['temperature']}℃，降雨指数 {values['rainfall']}。"
+    add_event(conn, day, "real_weather_sync", content)
+    event = append_world_event(
+        conn,
+        event_type,
+        "真实天气自动同步" if event_type == "real_weather_auto_sync" else "真实天气同步",
+        content,
+        tick_id=tick_id,
+        payload={
+            "weather": values["weather"],
+            "temperature": values["temperature"],
+            "rainfall": values["rainfall"],
+            "weather_source": values.get("weather_source", ""),
+            "weather_observed_at": values.get("weather_observed_at", ""),
+        },
+        day=day,
+        slot=slot,
+    )
+    return {"environment": get_campus_environment(conn, day), "raw": weather_data.get("raw", {}), "event": event}
+
+
+def maybe_auto_sync_real_weather(conn, world_time, tick_id=None, day=None, slot=None):
+    ensure_world_runtime_tables(conn)
+    latest = conn.execute(
+        """
+        SELECT created_at FROM world_event_stream
+        WHERE event_type IN ('real_weather_auto_sync', 'real_weather_auto_sync_failed')
+        ORDER BY id DESC LIMIT 1
+        """
+    ).fetchone()
+    latest_at = parse_world_datetime(latest["created_at"]) if latest else None
+    if latest_at and (world_time - latest_at).total_seconds() < WORLD_WEATHER_SYNC_INTERVAL_SECONDS:
+        return {"skipped": True, "reason": "interval_not_elapsed", "last_synced_at": latest_at.isoformat()}
+    try:
+        result = sync_real_weather_into_world(conn, event_type="real_weather_auto_sync", tick_id=tick_id, day=day, slot=slot)
+        env = result["environment"]
+        return {
+            "skipped": False,
+            "weather": env.get("weather"),
+            "temperature": env.get("temperature"),
+            "rainfall": env.get("rainfall"),
+            "weather_source": env.get("weather_source"),
+            "weather_observed_at": env.get("weather_observed_at"),
+            "event_id": result["event"].get("id"),
+        }
+    except Exception as exc:
+        logger.warning("Auto real weather sync failed", exc_info=True)
+        event = append_world_event(
+            conn,
+            "real_weather_auto_sync_failed",
+            "真实天气自动同步失败",
+            f"真实天气源暂时不可用：{type(exc).__name__}",
+            tick_id=tick_id,
+            payload={"error": str(exc)[:240]},
+            day=day,
+            slot=slot,
+        )
+        return {"skipped": False, "failed": True, "error": str(exc), "event_id": event["id"]}
+
+
 def advance_world_tick(reason="background"):
     if not WORLD_TICK_LOCK.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="世界 tick 正在执行中")
@@ -2615,6 +2685,9 @@ def advance_world_tick(reason="background"):
                 """,
                 (world_time.isoformat(), world_time.isoformat(), WORLD_RUNTIME_ID),
             )
+            weather_sync = maybe_auto_sync_real_weather(conn, world_time, tick_id=tick_id, day=day, slot=slot)
+            if not weather_sync.get("skipped") and not weather_sync.get("failed"):
+                env = get_campus_environment(conn, day)
             external_sync = maybe_auto_sync_external_information(conn, world_time, tick_id=tick_id, day=day, slot=slot)
             start_event = append_world_event(
                 conn,
@@ -2628,6 +2701,7 @@ def advance_world_tick(reason="background"):
                     "llm_plans": ensure_result["llm_plans"],
                     "rule_based_plans": ensure_result["rule_based_plans"],
                     "weather": env.get("weather"),
+                    "weather_sync": weather_sync,
                     "external_sync": compact_external_sync_result(external_sync),
                 },
                 day=day,
@@ -3291,18 +3365,10 @@ def sync_real_time():
 @app.post("/api/campus/environment/sync-real-weather")
 def sync_real_weather():
     with get_connection() as conn:
-        day = get_current_day(conn)
-        current_env = get_campus_environment(conn, day)
-        weather_data = fetch_real_weather()
-        values = dict(current_env)
-        values.update({key: weather_data[key] for key in ["weather", "temperature", "rainfall", "weather_source", "weather_observed_at"]})
-        values = derive_environment_from_weather(values)
-        values = derive_environment_from_real_time(values)
-        save_environment_values(conn, day, values)
-        add_event(conn, day, "real_weather_sync", f"接入真实天气：{values['weather']}，{values['temperature']}℃，降雨指数 {values['rainfall']}。")
+        result = sync_real_weather_into_world(conn, event_type="real_weather_manual_sync")
         conn.commit()
-        env = get_campus_environment(conn, day)
-        env["real_weather_raw"] = weather_data["raw"]
+        env = result["environment"]
+        env["real_weather_raw"] = result["raw"]
         return env
 
 
