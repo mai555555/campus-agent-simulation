@@ -186,7 +186,7 @@ curl -X POST http://127.0.0.1:8000/api/simulate/ai-day
 | GET | `/api/newspaper/agent-posts` | Agent 自主投稿 |
 | GET | `/api/newspaper/ai-today` | 调用 LLM 生成校园日报 |
 | POST | `/api/agents/daily-diaries/backfill` | 为指定日期补写 Agent 日记 |
-| POST | `/api/external-information/sync` | 从固定 RSS 源同步外部资讯 |
+| POST | `/api/external-information/sync` | 兼容/调试入口：立即从固定 RSS 源同步外部资讯。主流程由 world tick 每小时自动同步 |
 | GET | `/api/external-information` | 查看已同步资讯 |
 
 ## 常见请求体

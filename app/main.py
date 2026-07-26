@@ -57,6 +57,7 @@ WORLD_SCHEMA_READY = False
 WORLD_TIMEZONE = "Asia/Shanghai"
 WORLD_TZ = timezone(timedelta(hours=8))
 WORLD_RUNTIME_ID = 1
+WORLD_EXTERNAL_SYNC_INTERVAL_SECONDS = 3600
 
 from app.schema import (
     CAMPUS_STATE_SQL, SPACE_SYSTEM_SQL, DEFAULT_SPACES, DEFAULT_ENV, ENV_COLUMN_TYPES,
@@ -1410,6 +1411,22 @@ def get_world_now():
     return datetime.now(WORLD_TZ)
 
 
+def parse_world_datetime(value):
+    if not value:
+        return None
+    text = str(value).strip().replace("Z", "+00:00")
+    candidates = [text, text.replace(" ", "T")]
+    for candidate in candidates:
+        try:
+            parsed = datetime.fromisoformat(candidate)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc if " " in text else WORLD_TZ)
+            return parsed.astimezone(WORLD_TZ)
+        except ValueError:
+            continue
+    return None
+
+
 def world_slot_from_hour(hour):
     if 0 <= hour < 8:
         return "00:00-08:00"
@@ -1585,11 +1602,92 @@ def build_rule_based_plan(resident, window_start, window_end):
     }
 
 
+def normalize_plan_step(step, window_start, index, fallback_location, fallback_goal):
+    step = step if isinstance(step, dict) else {}
+    action = str(step.get("action") or "observe").strip().lower()
+    if action not in {"move", "observe", "chat", "reflect"}:
+        action = "observe"
+    location = str(step.get("location") or fallback_location or "校园").strip()
+    if location not in VALID_LOCATIONS:
+        location = fallback_location if fallback_location in VALID_LOCATIONS else "校园"
+    goal = str(step.get("goal") or fallback_goal or "观察校园环境").strip()[:160]
+    time_text = str(step.get("time") or "").strip()
+    if not re.fullmatch(r"\d{2}:\d{2}", time_text):
+        step_time = window_start + timedelta(minutes=45 + index * 135)
+        time_text = step_time.strftime("%H:%M")
+    return {"time": time_text, "action": action, "location": location, "goal": goal}
+
+
+def build_llm_action_plan(conn, resident, window_start, window_end, world_time):
+    if not consume_auto_model_budget(conn, "planner", resident_id=resident["id"]):
+        return None
+    model_name = os.getenv("LLM_MODEL") or os.getenv("LLM_API_MODEL") or "configured-llm"
+    prompt = f"""
+你是一个校园平行世界的运行时 planner。请为 Agent 制定接下来 8 小时内的简短行动计划。
+
+世界时间：{world_time.strftime('%Y-%m-%d %H:%M')}
+计划窗口：{window_start.strftime('%H:%M')} 到 {window_end.strftime('%H:%M')}
+可选地点：{", ".join(VALID_LOCATIONS)}
+可选动作：move, observe, chat, reflect
+
+Agent:
+- id: {resident['id']}
+- name: {resident['name']}
+- role: {resident['role']}
+- current_location: {resident['location']}
+- long_goal: {resident['goal']}
+
+只返回 JSON，不要解释。格式：
+{{
+  "intent": "一句话说明这个 8 小时窗口的意图",
+  "steps": [
+    {{"time": "HH:MM", "action": "move", "location": "教学楼", "goal": "具体目标"}}
+  ],
+  "flexibility": 0.35
+}}
+steps 保持 3 条以内，时间必须落在计划窗口内。
+"""
+    try:
+        raw = ask_llm(prompt)
+        payload = extract_json(raw)
+        steps = [
+            normalize_plan_step(step, window_start, index, resident["location"], resident["goal"])
+            for index, step in enumerate((payload.get("steps") or [])[:3])
+        ]
+        if not steps:
+            raise ValueError("LLM plan has no steps")
+        plan = {
+            "resident_id": resident["id"],
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            "intent": str(payload.get("intent") or f"{resident['name']}按个人目标推进校园生活")[:180],
+            "steps": steps,
+            "flexibility": float(payload.get("flexibility") or 0.35),
+            "source": "llm-planner-v1",
+        }
+        log_model_call(
+            conn,
+            "planner",
+            status="success",
+            resident_id=resident["id"],
+            model_name=model_name,
+            input_tokens=max(1, len(prompt) // 4),
+            output_tokens=max(1, len(raw) // 4),
+        )
+        return plan
+    except Exception as exc:
+        logger.warning("LLM planner failed for resident %s", resident["id"], exc_info=True)
+        log_model_call(conn, "planner", status=f"failed:{type(exc).__name__}", resident_id=resident["id"], model_name=model_name)
+        return None
+
+
 def ensure_current_action_plans(conn, world_time):
     ensure_world_runtime_tables(conn)
     window_start, window_end = get_world_plan_window(world_time)
     residents = conn.execute("SELECT id, name, role, goal, location FROM residents ORDER BY id").fetchall()
     created = 0
+    llm_plans = 0
+    rule_based_plans = 0
     for resident in residents:
         existing = conn.execute(
             """
@@ -1600,7 +1698,14 @@ def ensure_current_action_plans(conn, world_time):
         ).fetchone()
         if existing:
             continue
-        plan = build_rule_based_plan(resident, window_start, window_end)
+        plan = build_llm_action_plan(conn, resident, window_start, window_end, world_time)
+        if plan:
+            model_name = os.getenv("LLM_MODEL") or os.getenv("LLM_API_MODEL") or "configured-llm"
+            llm_plans += 1
+        else:
+            plan = build_rule_based_plan(resident, window_start, window_end)
+            model_name = "rule-based-v1"
+            rule_based_plans += 1
         conn.execute(
             """
             INSERT INTO agent_action_plans
@@ -1612,8 +1717,22 @@ def ensure_current_action_plans(conn, world_time):
             """,
             (resident["id"], window_start.isoformat(), window_end.isoformat(), json.dumps(plan, ensure_ascii=False)),
         )
+        conn.execute(
+            """
+            UPDATE agent_action_plans
+            SET model_name = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE resident_id = ? AND window_start = ?
+            """,
+            (model_name, resident["id"], window_start.isoformat()),
+        )
         created += 1
-    return {"window_start": window_start.isoformat(), "window_end": window_end.isoformat(), "created": created}
+    return {
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
+        "created": created,
+        "llm_plans": llm_plans,
+        "rule_based_plans": rule_based_plans,
+    }
 
 
 def get_environment_hour(env):
@@ -2324,6 +2443,59 @@ def choose_plan_step(plan, world_time):
     return due_steps[-1] if due_steps else steps[0]
 
 
+def generate_observed_agent_detail(conn, agent, step, world_time, tick_id, base_event, day, slot):
+    if not consume_auto_model_budget(conn, "observer", resident_id=agent["id"]):
+        return None
+    model_name = os.getenv("LLM_MODEL") or os.getenv("LLM_API_MODEL") or "configured-llm"
+    prompt = f"""
+你是校园平行世界的局部观察镜头。用户正在观察这个 Agent，请生成一条短小、具体、可被记录的观察细节。
+
+世界时间：{world_time.strftime('%Y-%m-%d %H:%M')}
+Agent：{agent['name']}，{agent['role']}
+当前位置：{agent['location']}
+长期目标：{agent['goal']}
+当前计划步骤：{json.dumps(step, ensure_ascii=False)}
+
+要求：
+- 只写 1 句中文，80 字以内。
+- 用第三人称描述可观察行为或一瞬间的想法外显，不要写系统解释。
+- 不要编造超自然或大规模事件。
+"""
+    try:
+        raw = ask_llm(prompt)
+        detail = re.sub(r"\s+", " ", raw).strip().strip('"“”')[:160]
+        if not detail:
+            raise ValueError("empty observer detail")
+        add_memory(conn, agent["id"], day, detail, importance=3, source="observer_llm")
+        detail_event = append_world_event(
+            conn,
+            "observer_model_detail",
+            f"{agent['name']}的被观察细节",
+            detail,
+            tick_id=tick_id,
+            resident_id=agent["id"],
+            location=agent["location"],
+            payload={"base_event_id": base_event["id"], "plan_step": step, "trigger": "observer_focus"},
+            day=day,
+            slot=slot,
+        )
+        log_model_call(
+            conn,
+            "observer",
+            status="success",
+            resident_id=agent["id"],
+            related_event_id=detail_event["id"],
+            model_name=model_name,
+            input_tokens=max(1, len(prompt) // 4),
+            output_tokens=max(1, len(raw) // 4),
+        )
+        return detail_event
+    except Exception as exc:
+        logger.warning("Observer LLM detail failed for resident %s", agent["id"], exc_info=True)
+        log_model_call(conn, "observer", status=f"failed:{type(exc).__name__}", resident_id=agent["id"], related_event_id=base_event["id"], model_name=model_name)
+        return None
+
+
 def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observed=False):
     plan = get_current_agent_plan(conn, agent["id"], world_time) or {}
     step = choose_plan_step(plan, world_time)
@@ -2365,7 +2537,7 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
             slot=slot,
         )
         if observed:
-            log_model_call(conn, "observer", status="rule_based_detail", resident_id=agent["id"], related_event_id=event["id"])
+            generate_observed_agent_detail(conn, agent, step, world_time, tick_id, event, day, slot)
         conn.commit()
         return {"resident_id": agent["id"], "success": True, "event": event}
     except Exception as exc:
@@ -2443,13 +2615,21 @@ def advance_world_tick(reason="background"):
                 """,
                 (world_time.isoformat(), world_time.isoformat(), WORLD_RUNTIME_ID),
             )
+            external_sync = maybe_auto_sync_external_information(conn, world_time, tick_id=tick_id, day=day, slot=slot)
             start_event = append_world_event(
                 conn,
                 "world_tick_started",
                 "世界 tick 开始",
                 f"{slot} tick 开始，世界正在按真实时间推进。",
                 tick_id=tick_id,
-                payload={"reason": reason, "plans_created": ensure_result["created"], "weather": env.get("weather")},
+                payload={
+                    "reason": reason,
+                    "plans_created": ensure_result["created"],
+                    "llm_plans": ensure_result["llm_plans"],
+                    "rule_based_plans": ensure_result["rule_based_plans"],
+                    "weather": env.get("weather"),
+                    "external_sync": compact_external_sync_result(external_sync),
+                },
                 day=day,
                 slot=slot,
             )
@@ -2829,6 +3009,57 @@ def run_world_tick_once(authorization: Optional[str] = Header(default=None)):
     return {"message": "世界 tick 已完成", "tick": advance_world_tick(reason="admin")}
 
 
+def generate_admin_event_impact(conn, payload, base_event, day):
+    if not consume_auto_model_budget(conn, "admin", resident_id=payload.resident_id):
+        return None
+    model_name = os.getenv("LLM_MODEL") or os.getenv("LLM_API_MODEL") or "configured-llm"
+    target_text = "、".join(payload.target_spaces) or payload.location or "校园全局"
+    prompt = f"""
+你是校园平行世界的事件导演。admin 刚刚向世界注入一个事件，请生成一条短的运行反馈。
+
+事件标题：{payload.title}
+事件内容：{payload.content or '无补充内容'}
+事件类型：{payload.event_type}
+目标空间：{target_text}
+目标 Agent：{payload.resident_id or '无'}
+
+要求：
+- 只写 1 句中文，100 字以内。
+- 说明这个事件会如何被校园空间或 Agent 感知到。
+- 不要写技术字段，不要承诺尚未执行的长期结果。
+"""
+    try:
+        raw = ask_llm(prompt)
+        content = re.sub(r"\s+", " ", raw).strip().strip('"“”')[:180]
+        if not content:
+            raise ValueError("empty admin impact")
+        event = append_world_event(
+            conn,
+            "admin_model_impact",
+            "admin 事件影响已生成",
+            content,
+            resident_id=payload.resident_id,
+            location=payload.location,
+            payload={"base_event_id": base_event["id"], "target_spaces": payload.target_spaces},
+            day=day,
+        )
+        log_model_call(
+            conn,
+            "admin",
+            status="success",
+            resident_id=payload.resident_id,
+            related_event_id=event["id"],
+            model_name=model_name,
+            input_tokens=max(1, len(prompt) // 4),
+            output_tokens=max(1, len(raw) // 4),
+        )
+        return event
+    except Exception as exc:
+        logger.warning("Admin event impact LLM failed", exc_info=True)
+        log_model_call(conn, "admin", status=f"failed:{type(exc).__name__}", resident_id=payload.resident_id, related_event_id=base_event["id"], model_name=model_name)
+        return None
+
+
 @app.post("/api/admin/events/trigger")
 def trigger_admin_world_event(payload: AdminWorldEventRequest, authorization: Optional[str] = Header(default=None)):
     require_admin_token(authorization)
@@ -2856,9 +3087,10 @@ def trigger_admin_world_event(payload: AdminWorldEventRequest, authorization: Op
             day=day,
         )
         log_model_call(conn, "admin", status="event_recorded", resident_id=payload.resident_id, related_event_id=event["id"])
+        impact_event = generate_admin_event_impact(conn, payload, event, day)
         add_event(conn, day, "admin_world_event", content)
         conn.commit()
-        return {"message": "admin 事件已写入世界", "event": event, "campus_event": campus_event}
+        return {"message": "admin 事件已写入世界", "event": event, "impact_event": impact_event, "campus_event": campus_event}
 
 
 @app.get("/api/state")
@@ -3759,7 +3991,7 @@ def fetch_external_information(limit=5):
         try:
             response = requests.get(
                 source_url,
-                timeout=12,
+                timeout=5,
                 headers={"User-Agent": "CampusAgentSimulation/1.0 (+campus simulation)"},
             )
             response.raise_for_status()
@@ -3917,37 +4149,110 @@ def spread_external_information(conn, limit=12):
     return delivered
 
 
+def sync_external_information_into_world(conn, event_type="external_information_manual_sync", tick_id=None, day=None, slot=None):
+    ensure_external_information_system(conn)
+    ensure_world_runtime_tables(conn)
+    fetched = fetch_external_information()
+    created = []
+    recipient_ids = set()
+    for item in fetched:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO external_information
+            (title, summary, source_name, source_url, category, published_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (item["title"], item["summary"], item["source_name"], item["source_url"], item["category"], item["published_at"]),
+        )
+        row = conn.execute("SELECT * FROM external_information WHERE title = ?", (item["title"],)).fetchone()
+        if row:
+            information = dict(row)
+            newly_informed = seed_external_information_recipients(conn, information)
+            if newly_informed:
+                created.append(information)
+                recipient_ids.update(newly_informed)
+    if created:
+        content = f"校园接入 {len(created)} 条外部资讯，已有 {len(recipient_ids)} 位 Agent 先行获知。"
+        add_event(conn, day or get_current_day(conn), "external_information", content)
+    else:
+        content = f"外部资讯已检查，抓取 {len(fetched)} 条，暂无新的 Agent 接收记录。"
+    event = append_world_event(
+        conn,
+        event_type,
+        "外部世界自动同步" if event_type == "external_information_auto_sync" else "外部世界同步",
+        content,
+        tick_id=tick_id,
+        payload={"fetched": len(fetched), "new_information_count": len(created), "initial_recipients": len(recipient_ids)},
+        day=day,
+        slot=slot,
+    )
+    return {"fetched": len(fetched), "new_information": created, "initial_recipients": len(recipient_ids), "event": event}
+
+
+def maybe_auto_sync_external_information(conn, world_time, tick_id=None, day=None, slot=None):
+    ensure_world_runtime_tables(conn)
+    latest = conn.execute(
+        """
+        SELECT created_at FROM world_event_stream
+        WHERE event_type IN ('external_information_auto_sync', 'external_information_auto_sync_failed')
+        ORDER BY id DESC LIMIT 1
+        """
+    ).fetchone()
+    latest_at = parse_world_datetime(latest["created_at"]) if latest else None
+    if latest_at and (world_time - latest_at).total_seconds() < WORLD_EXTERNAL_SYNC_INTERVAL_SECONDS:
+        return {"skipped": True, "reason": "interval_not_elapsed", "last_synced_at": latest_at.isoformat()}
+    try:
+        result = sync_external_information_into_world(
+            conn,
+            event_type="external_information_auto_sync",
+            tick_id=tick_id,
+            day=day,
+            slot=slot,
+        )
+        result["skipped"] = False
+        return result
+    except Exception as exc:
+        logger.warning("Auto external information sync failed", exc_info=True)
+        event = append_world_event(
+            conn,
+            "external_information_auto_sync_failed",
+            "外部世界自动同步失败",
+            f"外部资讯源暂时不可用：{type(exc).__name__}",
+            tick_id=tick_id,
+            payload={"error": str(exc)},
+            day=day,
+            slot=slot,
+        )
+        return {"skipped": False, "failed": True, "error": str(exc), "event": event}
+
+
+def compact_external_sync_result(result):
+    compact = {
+        "skipped": bool(result.get("skipped")),
+        "failed": bool(result.get("failed")),
+        "reason": result.get("reason", ""),
+        "fetched": int(result.get("fetched") or 0),
+        "new_information_count": len(result.get("new_information") or []),
+        "initial_recipients": int(result.get("initial_recipients") or 0),
+        "last_synced_at": result.get("last_synced_at", ""),
+    }
+    if result.get("event"):
+        compact["event_id"] = result["event"].get("id")
+        compact["event_type"] = result["event"].get("event_type")
+    if result.get("error"):
+        compact["error"] = str(result["error"])[:240]
+    return compact
+
+
 @app.post("/api/external-information/sync")
 def sync_external_information():
     with get_connection() as conn:
-        ensure_external_information_system(conn)
         try:
-            fetched = fetch_external_information()
+            result = sync_external_information_into_world(conn, event_type="external_information_manual_sync")
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"外部资讯同步失败：{exc}")
-
-        created = []
-        recipient_ids = set()
-        for item in fetched:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO external_information
-                (title, summary, source_name, source_url, category, published_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (item["title"], item["summary"], item["source_name"], item["source_url"], item["category"], item["published_at"]),
-            )
-            row = conn.execute("SELECT * FROM external_information WHERE title = ?", (item["title"],)).fetchone()
-            if row:
-                information = dict(row)
-                newly_informed = seed_external_information_recipients(conn, information)
-                if newly_informed:
-                    created.append(information)
-                    recipient_ids.update(newly_informed)
-        if created:
-            add_event(conn, get_current_day(conn), "external_information", f"校园接入 {len(created)} 条外部资讯，已有 {len(recipient_ids)} 位 Agent 先行获知。")
         conn.commit()
-        return {"fetched": len(fetched), "new_information": created, "initial_recipients": len(recipient_ids)}
+        return result
 
 
 @app.get("/api/external-information")
