@@ -59,6 +59,7 @@ WORLD_TZ = timezone(timedelta(hours=8))
 WORLD_RUNTIME_ID = 1
 WORLD_EXTERNAL_SYNC_INTERVAL_SECONDS = 3600
 WORLD_WEATHER_SYNC_INTERVAL_SECONDS = 3600
+OBSERVER_MODEL_DETAIL_COOLDOWN_SECONDS = 300
 
 from app.schema import (
     CAMPUS_STATE_SQL, SPACE_SYSTEM_SQL, DEFAULT_SPACES, DEFAULT_ENV, ENV_COLUMN_TYPES,
@@ -2444,7 +2445,24 @@ def choose_plan_step(plan, world_time):
     return due_steps[-1] if due_steps else steps[0]
 
 
+def should_generate_observed_agent_detail(conn, resident_id, world_time):
+    row = conn.execute(
+        """
+        SELECT created_at FROM world_event_stream
+        WHERE event_type = 'observer_model_detail' AND resident_id = ?
+        ORDER BY id DESC LIMIT 1
+        """,
+        (resident_id,),
+    ).fetchone()
+    latest_at = parse_world_datetime(row["created_at"]) if row else None
+    if latest_at and (world_time - latest_at).total_seconds() < OBSERVER_MODEL_DETAIL_COOLDOWN_SECONDS:
+        return False
+    return True
+
+
 def generate_observed_agent_detail(conn, agent, step, world_time, tick_id, base_event, day, slot):
+    if not should_generate_observed_agent_detail(conn, agent["id"], world_time):
+        return None
     if not consume_auto_model_budget(conn, "observer", resident_id=agent["id"]):
         return None
     model_name = os.getenv("LLM_MODEL") or os.getenv("LLM_API_MODEL") or "configured-llm"

@@ -86,6 +86,8 @@ v1 的 8 小时行动计划优先使用 `llm-planner-v1`，写入 `agent_action_
 
 真实天气和外部世界资讯由 world tick 每小时自动同步一次。天气会更新 `campus_state` 并写入 `real_weather_auto_sync` / `real_weather_auto_sync_failed` 事件；资讯会写入 `external_information`、`agent_information` 和 `external_information_auto_sync` / `external_information_auto_sync_failed` 事件。前端不再提供手动同步按钮。
 
+观察者聚焦 Agent 时可能触发 `observer_model_detail`，但同一个 Agent 默认 5 分钟内最多触发一次观察者模型细节，避免单个观察者持续停留导致模型调用过密。前端会在 HUD、事件流和 Agent 气泡中标记“观察者触发”。
+
 ## 重置本地世界
 
 确认需要丢弃当前模拟进度后运行：
