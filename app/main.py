@@ -60,6 +60,7 @@ WORLD_TZ = timezone(timedelta(hours=8))
 WORLD_RUNTIME_ID = 1
 WORLD_EXTERNAL_SYNC_INTERVAL_SECONDS = 3600
 WORLD_WEATHER_SYNC_INTERVAL_SECONDS = 3600
+WORLD_CAMPUS_NEWS_WINDOW_SECONDS = 8 * 3600
 OBSERVER_MODEL_DETAIL_COOLDOWN_SECONDS = 300
 
 from app.schema import (
@@ -1447,6 +1448,13 @@ def world_slot_from_hour(hour):
     return "16:00-24:00"
 
 
+def previous_completed_world_window(world_time):
+    current_window_start, _ = get_world_plan_window(world_time)
+    window_start = current_window_start - timedelta(seconds=WORLD_CAMPUS_NEWS_WINDOW_SECONDS)
+    window_end = current_window_start
+    return window_start, window_end, world_slot_from_hour(window_start.hour)
+
+
 def get_world_plan_window(world_time):
     start_hour = (world_time.hour // 8) * 8
     window_start = world_time.replace(hour=start_hour, minute=0, second=0, microsecond=0)
@@ -2784,6 +2792,183 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
         return {"resident_id": agent["id"], "success": False, "event": event, "error": str(exc)}
 
 
+def maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=None, day=None):
+    """Publish campus news once for the latest completed 8-hour world window."""
+    ensure_agent_news_system(conn)
+    ensure_world_runtime_tables(conn)
+    day = day or get_current_day(conn)
+    window_start, window_end, source_slot = previous_completed_world_window(world_time)
+    source_window_key = f"{window_start.date().isoformat()} {source_slot}"
+    existing = conn.execute(
+        """
+        SELECT id FROM world_event_stream
+        WHERE event_type IN ('campus_news_published', 'campus_news_skipped')
+          AND payload LIKE ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (f'%"source_window_key": "{source_window_key}"%',),
+    ).fetchone()
+    if existing:
+        return {"skipped": True, "reason": "already_published", "source_window_key": source_window_key}
+
+    rows = conn.execute(
+        """
+        SELECT e.id, e.resident_id, e.location, e.title, e.content, e.payload, r.name, r.role
+        FROM world_event_stream e
+        JOIN residents r ON r.id = e.resident_id
+        WHERE e.day = ?
+          AND e.slot = ?
+          AND e.event_type = 'agent_tick'
+          AND e.resident_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM agent_news_posts p
+              WHERE p.day = ? AND p.resident_id = e.resident_id
+          )
+        ORDER BY e.id DESC
+        LIMIT 24
+        """,
+        (day, source_slot, day),
+    ).fetchall()
+
+    candidates = []
+    seen_residents = set()
+    for row in rows:
+        resident_id = int(row["resident_id"])
+        if resident_id in seen_residents:
+            continue
+        seen_residents.add(resident_id)
+        candidates.append(row)
+        if len(candidates) >= 3:
+            break
+
+    if not candidates:
+        event = append_world_event(
+            conn,
+            "campus_news_skipped",
+            "校园新闻本窗口未发布",
+            f"{source_slot} 暂无足够的新 Agent 行动素材，校园新闻保持等待。",
+            tick_id=tick_id,
+            payload={
+                "source_window_key": source_window_key,
+                "source_window_start": window_start.isoformat(),
+                "source_window_end": window_end.isoformat(),
+                "source_slot": source_slot,
+                "reason": "no_new_agent_material",
+            },
+            day=day,
+            slot=source_slot,
+        )
+        return {"skipped": True, "reason": "no_new_agent_material", "event_id": event["id"], "source_window_key": source_window_key}
+
+    model_name = os.getenv("LLM_MODEL") or os.getenv("LLM_API_MODEL") or "configured-llm"
+    published = []
+    failed = []
+    for row in candidates:
+        payload = load_json_text(row["payload"], {})
+        action = payload.get("action") or payload.get("runtime_decision", {}).get("action") or "observe"
+        goal = payload.get("goal") or payload.get("runtime_decision", {}).get("goal") or "推进校园生活"
+        source_text = f"{row['title']}：{row['content']}"
+        if not consume_auto_model_budget(conn, "campus_news", resident_id=row["resident_id"]):
+            failed.append({"resident_id": row["resident_id"], "reason": "budget_exhausted"})
+            continue
+        prompt = f"""
+你是《校园世界时报》的校园记者。请根据一个 Agent 在刚结束的 8 小时窗口中的真实行动，写一则 80 到 130 字的中文校园快讯。
+
+时间窗口：{source_slot}
+人物：{row['name']}（{row['role']}）
+地点：{row['location'] or '校园'}
+动作类型：{action}
+行动目标：{goal}
+事实材料：{source_text}
+
+要求：
+- 使用第三人称、客观新闻口吻。
+- 交代人物、地点、事件，以及这件事对校园运行的可观察影响。
+- 不要写标题、JSON、Markdown、口号或解释，只输出新闻正文。
+"""
+        try:
+            raw = ask_llm(prompt)
+            content = re.sub(r"\s+", " ", raw).strip().strip('"“”')
+            if not content or content.startswith(("{", "[")):
+                raise ValueError("invalid campus news content")
+            if "食堂" in content or row["location"] == "食堂":
+                headline = "校园餐饮服务出现新动态"
+            elif "图书馆" in content or row["location"] == "图书馆":
+                headline = "图书馆学习秩序持续更新"
+            elif "操场" in content or row["location"] == "操场":
+                headline = "操场活动带动校园交流"
+            elif "商业街" in content or row["location"] == "商业街":
+                headline = "商业街服务节奏发生变化"
+            elif "教学楼" in content or row["location"] == "教学楼":
+                headline = "教学楼学习活动继续推进"
+            else:
+                headline = f"{row['location'] or '校园'}发布最新校园动态"
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO agent_news_posts (day, resident_id, headline, content)
+                VALUES (?, ?, ?, ?)
+                """,
+                (day, row["resident_id"], headline, content[:300]),
+            )
+            if cursor.rowcount:
+                published.append({"resident_id": row["resident_id"], "headline": headline, "source_event_id": row["id"]})
+            log_model_call(
+                conn,
+                "campus_news",
+                status="success",
+                resident_id=row["resident_id"],
+                model_name=model_name,
+                prompt_version="campus-news-window-v1",
+                input_tokens=max(1, len(prompt) // 4),
+                output_tokens=max(1, len(raw) // 4),
+            )
+        except Exception as exc:
+            logger.warning("Campus news generation failed for resident %s", row["resident_id"], exc_info=True)
+            failed.append({"resident_id": row["resident_id"], "reason": type(exc).__name__})
+            log_model_call(
+                conn,
+                "campus_news",
+                status=f"failed:{type(exc).__name__}",
+                resident_id=row["resident_id"],
+                model_name=model_name,
+                prompt_version="campus-news-window-v1",
+            )
+
+    if published:
+        title = "校园新闻已自动发布"
+        content = f"{source_slot} 窗口生成 {len(published)} 条校园快讯，已同步到校园日报。"
+        event_type = "campus_news_published"
+    else:
+        title = "校园新闻生成未完成"
+        content = f"{source_slot} 窗口没有成功生成校园快讯，世界运行继续。"
+        event_type = "campus_news_skipped"
+    event = append_world_event(
+        conn,
+        event_type,
+        title,
+        content,
+        tick_id=tick_id,
+        payload={
+            "source_window_key": source_window_key,
+            "source_window_start": window_start.isoformat(),
+            "source_window_end": window_end.isoformat(),
+            "source_slot": source_slot,
+            "published": published,
+            "failed": failed,
+        },
+        day=day,
+        slot=source_slot,
+    )
+    return {
+        "skipped": not bool(published),
+        "published_count": len(published),
+        "failed_count": len(failed),
+        "event_id": event["id"],
+        "source_window_key": source_window_key,
+    }
+
+
 def select_world_tick_agents(conn, runtime):
     agents = [dict(row) for row in conn.execute("SELECT id, name, role, goal, location FROM residents ORDER BY id").fetchall()]
     if not agents:
@@ -2967,6 +3152,7 @@ def advance_world_tick(reason="background"):
                 day=day,
                 slot=slot,
             )
+            campus_news = maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=tick_id, day=day)
             conn.commit()
             return {
                 "tick_id": tick_id,
@@ -2978,6 +3164,7 @@ def advance_world_tick(reason="background"):
                 "processed_agents": len(results),
                 "failed_agents": failed,
                 "events": [start_event, finish_event],
+                "campus_news": campus_news,
                 "results": results,
             }
     except HTTPException:

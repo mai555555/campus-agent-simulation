@@ -86,6 +86,8 @@ v1 的 8 小时行动计划优先使用 `llm-planner-v1`，写入 `agent_action_
 
 真实天气和外部世界资讯由 world tick 每小时自动同步一次。天气会更新 `campus_state` 并写入 `real_weather_auto_sync` / `real_weather_auto_sync_failed` 事件；资讯会写入 `external_information`、`agent_information` 和 `external_information_auto_sync` / `external_information_auto_sync_failed` 事件。前端不再提供手动同步按钮。
 
+校园新闻由 world tick 在每个已完成的 8 小时窗口后自动尝试发布一次。系统从上一窗口的 `agent_tick` 事件里抽取当天还没有发布过校园新闻的 Agent，最多生成 3 条 `campus-news-window-v1` 快讯，写入 `agent_news_posts`，并在 `world_event_stream` 写入 `campus_news_published`。如果窗口内没有新素材或预算耗尽，会写入 `campus_news_skipped`，世界运行继续。
+
 观察者聚焦 Agent 时可能触发 `observer_model_detail`，但同一个 Agent 默认 5 分钟内最多触发一次观察者模型细节，避免单个观察者持续停留导致模型调用过密。前端会在 HUD、事件流和 Agent 气泡中标记“观察者触发”。
 
 高频 world tick 会继续写 `simulation_action_logs` 作为完整审计记录，但普通 `world_tick` 观察记忆会按同一 Agent、同一天、同一内容去重写入，避免个人经历被重复观察刷屏。
