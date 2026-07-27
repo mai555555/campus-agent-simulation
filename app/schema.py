@@ -353,7 +353,7 @@ CREATE TABLE IF NOT EXISTS world_runtime (
     world_time TEXT NOT NULL DEFAULT '',
     tick_interval_seconds INTEGER NOT NULL DEFAULT 60,
     agents_per_tick INTEGER NOT NULL DEFAULT 3,
-    daily_auto_model_budget INTEGER NOT NULL DEFAULT 100,
+    daily_auto_model_budget INTEGER NOT NULL DEFAULT 500,
     auto_model_calls_used INTEGER NOT NULL DEFAULT 0,
     budget_date TEXT NOT NULL DEFAULT '',
     current_agent_cursor INTEGER NOT NULL DEFAULT 0,

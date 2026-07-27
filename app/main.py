@@ -1408,6 +1408,14 @@ def ensure_world_runtime_tables(conn):
             """,
             (WORLD_RUNTIME_ID, WORLD_TIMEZONE, now, budget_date),
         )
+        conn.execute(
+            """
+            UPDATE world_runtime
+            SET daily_auto_model_budget = 500
+            WHERE id = ? AND daily_auto_model_budget < 500
+            """,
+            (WORLD_RUNTIME_ID,),
+        )
         WORLD_SCHEMA_READY = True
 
 
@@ -2435,16 +2443,90 @@ def get_current_agent_plan(conn, resident_id, world_time):
     ).fetchone()
     if not row:
         return None
-    return load_json_text(row["plan_json"], {})
+    plan = load_json_text(row["plan_json"], {})
+    plan["_plan_row_id"] = row["id"]
+    return plan
 
 
-def choose_plan_step(plan, world_time):
+def plan_step_key(step):
+    return "|".join(
+        str(step.get(key, "")).strip()
+        for key in ("time", "action", "location", "goal")
+    )
+
+
+def choose_plan_step(plan, world_time, current_location="校园"):
     steps = plan.get("steps") or []
     if not steps:
-        return {"action": "observe", "location": "校园", "goal": plan.get("intent", "观察校园环境")}
+        return {"action": "observe", "location": current_location, "goal": plan.get("intent", "观察校园环境"), "plan_state": "unplanned"}
     current_hm = world_time.strftime("%H:%M")
-    due_steps = [step for step in steps if str(step.get("time", "00:00")) <= current_hm]
-    return due_steps[-1] if due_steps else steps[0]
+    normalized = [step if isinstance(step, dict) else {} for step in steps]
+    due_steps = [
+        (index, step)
+        for index, step in enumerate(normalized)
+        if str(step.get("time", "00:00")) <= current_hm
+    ]
+    pending_due = [
+        (index, step)
+        for index, step in due_steps
+        if not step.get("executed_at")
+    ]
+    if pending_due:
+        index, step = pending_due[0]
+        selected = dict(step)
+        selected["step_index"] = index
+        selected["step_key"] = plan_step_key(step)
+        selected["plan_state"] = "due"
+        return selected
+    future_steps = [
+        (index, step)
+        for index, step in enumerate(normalized)
+        if str(step.get("time", "00:00")) > current_hm and not step.get("executed_at")
+    ]
+    if future_steps:
+        index, step = future_steps[0]
+        return {
+            "action": "observe",
+            "location": current_location,
+            "goal": f"等待 {step.get('time', '--:--')} 的计划：{step.get('goal') or plan.get('intent') or '继续观察校园环境'}",
+            "step_index": index,
+            "step_key": plan_step_key(step),
+            "plan_state": "waiting",
+            "next_step": step,
+        }
+    return {
+        "action": "reflect",
+        "location": current_location,
+        "goal": plan.get("intent") or "本窗口计划已完成，整理状态等待下一窗口。",
+        "plan_state": "completed",
+    }
+
+
+def mark_plan_step_executed(conn, plan, step, world_time, execution):
+    plan_row_id = plan.get("_plan_row_id")
+    step_index = step.get("step_index")
+    if not plan_row_id or step_index is None:
+        return
+    steps = plan.get("steps") or []
+    if not (0 <= int(step_index) < len(steps)):
+        return
+    steps[int(step_index)]["executed_at"] = world_time.isoformat()
+    steps[int(step_index)]["last_execution"] = {
+        "action": execution.get("action"),
+        "location": execution.get("location"),
+        "goal": execution.get("goal"),
+        "mode": execution.get("mode"),
+    }
+    plan["steps"] = steps
+    plan.pop("_plan_row_id", None)
+    conn.execute(
+        """
+        UPDATE agent_action_plans
+        SET plan_json = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (json.dumps(plan, ensure_ascii=False), plan_row_id),
+    )
 
 
 def should_generate_observed_agent_detail(conn, resident_id, world_time):
@@ -2517,12 +2599,134 @@ Agent：{agent['name']}，{agent['role']}
         return None
 
 
+def build_runtime_perception(conn, agent, world_time, day, slot, plan, step, observed):
+    env = dict(get_campus_environment(conn, day))
+    recent_events = conn.execute(
+        """
+        SELECT event_type, resident_id, location, title, content, created_at
+        FROM world_event_stream
+        WHERE day = ?
+        ORDER BY id DESC
+        LIMIT 8
+        """,
+        (day,),
+    ).fetchall()
+    location_counts = {
+        row["location"]: row["count"]
+        for row in conn.execute("SELECT location, COUNT(*) AS count FROM residents GROUP BY location").fetchall()
+    }
+    return {
+        "world_time": world_time.isoformat(),
+        "slot": slot,
+        "observed": observed,
+        "agent_location": agent["location"],
+        "local_crowd": int(location_counts.get(agent["location"], 0)),
+        "environment": {
+            "weather": env.get("weather"),
+            "temperature": env.get("temperature"),
+            "time_slot": env.get("time_slot"),
+            "campus_flow": env.get("campus_flow"),
+            "campus_mood": env.get("campus_mood"),
+        },
+        "plan_intent": plan.get("intent", ""),
+        "plan_step": step,
+        "recent_events": rows_to_dicts(recent_events),
+    }
+
+
+def normalize_runtime_decision(payload, fallback_step, fallback_location, fallback_goal):
+    payload = payload if isinstance(payload, dict) else {}
+    action = str(payload.get("action") or fallback_step.get("action") or "observe").strip().lower()
+    if action not in {"move", "observe", "chat", "reflect"}:
+        action = "observe"
+    location = str(payload.get("location") or fallback_step.get("location") or fallback_location or "校园").strip()
+    if location not in VALID_LOCATIONS:
+        location = fallback_location if fallback_location in VALID_LOCATIONS else "校园"
+    goal = str(payload.get("goal") or fallback_step.get("goal") or fallback_goal or "观察校园环境").strip()[:180]
+    reason = str(payload.get("reason") or goal).strip()[:220]
+    relation = str(payload.get("plan_relation") or "continue").strip().lower()
+    if relation not in {"continue", "adjust", "respond", "rest"}:
+        relation = "continue"
+    return {
+        "action": action,
+        "location": location,
+        "goal": goal,
+        "reason": reason,
+        "plan_relation": relation,
+        "mode": "llm-autonomous-v1",
+    }
+
+
+def fallback_runtime_decision(agent, step, reason, mode):
+    return {
+        "action": str(step.get("action") or "observe"),
+        "location": str(step.get("location") or agent["location"]),
+        "goal": str(step.get("goal") or "观察校园环境"),
+        "reason": reason,
+        "plan_relation": step.get("plan_state", "continue"),
+        "mode": mode,
+    }
+
+
+def build_autonomous_tick_decision(conn, agent, perception, step):
+    if step.get("plan_state") != "due":
+        return fallback_runtime_decision(agent, step, "计划步骤尚未到点或已完成，按当前位置进行轻量观察。", "rule-waiting-v1")
+    if not consume_auto_model_budget(conn, "autonomous_decision", resident_id=agent["id"]):
+        return fallback_runtime_decision(agent, step, "自动模型预算不足，按原计划执行。", "rule-budget-fallback-v1")
+    model_name = os.getenv("LLM_MODEL") or os.getenv("LLM_API_MODEL") or "configured-llm"
+    prompt = f"""
+你是校园平行世界中一个 Agent 的局部自主循环决策器。
+
+请根据当前环境、近期事件、Agent 长期目标和 8 小时计划步骤，决定这个 tick 是否继续计划、轻微调整、响应事件或休息。
+
+Agent:
+- id: {agent['id']}
+- name: {agent['name']}
+- role: {agent['role']}
+- current_location: {agent['location']}
+- long_goal: {agent['goal']}
+
+感知上下文：
+{json.dumps(perception, ensure_ascii=False)}
+
+只返回 JSON，不要解释。格式：
+{{
+  "action": "move|observe|chat|reflect",
+  "location": "只能从 {list(VALID_LOCATIONS)} 中选择",
+  "goal": "本 tick 的具体目标，80 字以内",
+  "reason": "为什么这样做，100 字以内",
+  "plan_relation": "continue|adjust|respond|rest"
+}}
+"""
+    try:
+        raw = ask_llm(prompt)
+        payload = extract_json(raw)
+        decision = normalize_runtime_decision(payload, step, agent["location"], step.get("goal"))
+        log_model_call(
+            conn,
+            "autonomous_decision",
+            status="success",
+            resident_id=agent["id"],
+            model_name=model_name,
+            prompt_version="autonomous-loop-v2",
+            input_tokens=max(1, len(prompt) // 4),
+            output_tokens=max(1, len(raw) // 4),
+        )
+        return decision
+    except Exception as exc:
+        logger.warning("Autonomous tick decision failed for resident %s", agent["id"], exc_info=True)
+        log_model_call(conn, "autonomous_decision", status=f"failed:{type(exc).__name__}", resident_id=agent["id"], model_name=model_name, prompt_version="autonomous-loop-v2")
+        return fallback_runtime_decision(agent, step, "自主决策失败，按原计划执行。", "rule-error-fallback-v1")
+
+
 def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observed=False):
     plan = get_current_agent_plan(conn, agent["id"], world_time) or {}
-    step = choose_plan_step(plan, world_time)
-    action = str(step.get("action") or "observe")
-    destination = str(step.get("location") or agent["location"])
-    goal = str(step.get("goal") or plan.get("intent") or "观察校园环境")
+    step = choose_plan_step(plan, world_time, agent["location"])
+    perception = build_runtime_perception(conn, agent, world_time, day, slot, plan, step, observed)
+    decision = build_autonomous_tick_decision(conn, agent, perception, step)
+    action = str(decision.get("action") or "observe")
+    destination = str(decision.get("location") or agent["location"])
+    goal = str(decision.get("goal") or plan.get("intent") or "观察校园环境")
     title = f"{agent['name']}正在{destination}行动"
 
     try:
@@ -2534,9 +2738,8 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
             content = f"{agent['name']} 在{agent['location']}观察{focus}，目标：{goal}。"
             add_event(conn, day, "world_agent_observe", content)
             add_memory_once(conn, agent["id"], day, content, importance=2 if observed else 1, source="world_tick")
-        perception = {"world_time": world_time.isoformat(), "slot": slot, "observed": observed, "plan_step": step}
-        execution = {"action": action, "result": {"description": content}, "success": True, "plan_step": step}
-        record_simulation_log(conn, agent["id"], perception, {"decision": {"action": action, "reason": goal, "tool_input": {"destination": destination}}, "memory_context": {"memories": []}}, execution, {})
+        execution = {"action": action, "result": {"description": content}, "success": True, "plan_step": step, "runtime_decision": decision}
+        record_simulation_log(conn, agent["id"], perception, {"decision": {"action": action, "reason": decision.get("reason") or goal, "tool_input": {"destination": destination}}, "memory_context": {"memories": []}}, execution, {})
         conn.execute(
             """
             UPDATE agent_profiles
@@ -2553,10 +2756,12 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
             tick_id=tick_id,
             resident_id=agent["id"],
             location=destination if destination in VALID_LOCATIONS else agent["location"],
-            payload={"action": action, "goal": goal, "observed": observed, "plan_step": step},
+            payload={"action": action, "goal": goal, "observed": observed, "plan_step": step, "runtime_decision": decision},
             day=day,
             slot=slot,
         )
+        if step.get("plan_state") == "due":
+            mark_plan_step_executed(conn, plan, step, world_time, {"action": action, "location": destination, "goal": goal, "mode": decision.get("mode")})
         if observed:
             generate_observed_agent_detail(conn, agent, step, world_time, tick_id, event, day, slot)
         conn.commit()
@@ -2607,14 +2812,14 @@ def sync_world_time_environment(conn, world_time):
     return get_campus_environment(conn, day)
 
 
-def sync_real_weather_into_world(conn, event_type="real_weather_manual_sync", tick_id=None, day=None, slot=None):
+def sync_real_weather_into_world(conn, event_type="real_weather_manual_sync", tick_id=None, day=None, slot=None, world_time=None):
     day = day or get_current_day(conn)
     current_env = get_campus_environment(conn, day)
     weather_data = fetch_real_weather()
     values = dict(current_env)
     values.update({key: weather_data[key] for key in ["weather", "temperature", "rainfall", "weather_source", "weather_observed_at"]})
     values = derive_environment_from_weather(values)
-    values = derive_environment_from_real_time(values)
+    values = derive_environment_from_real_time(values, world_time)
     save_environment_values(conn, day, values)
     content = f"接入真实天气：{values['weather']}，{values['temperature']}℃，降雨指数 {values['rainfall']}。"
     add_event(conn, day, "real_weather_sync", content)
@@ -2650,7 +2855,7 @@ def maybe_auto_sync_real_weather(conn, world_time, tick_id=None, day=None, slot=
     if latest_at and (world_time - latest_at).total_seconds() < WORLD_WEATHER_SYNC_INTERVAL_SECONDS:
         return {"skipped": True, "reason": "interval_not_elapsed", "last_synced_at": latest_at.isoformat()}
     try:
-        result = sync_real_weather_into_world(conn, event_type="real_weather_auto_sync", tick_id=tick_id, day=day, slot=slot)
+        result = sync_real_weather_into_world(conn, event_type="real_weather_auto_sync", tick_id=tick_id, day=day, slot=slot, world_time=world_time)
         env = result["environment"]
         return {
             "skipped": False,
