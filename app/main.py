@@ -3623,9 +3623,9 @@ def get_agent_timeline(resident_id: int, limit: int = 30, offset: int = 0):
             SELECT day, decision, execution, environment_feedback, created_at
             FROM simulation_action_logs
             WHERE resident_id = ?
-            ORDER BY id DESC LIMIT ?
+            ORDER BY id DESC LIMIT ? OFFSET ?
             """,
-            (resident_id, min(max(limit, 1), 100)),
+            (resident_id, min(max(limit, 1), 100), max(offset, 0)),
         ).fetchall()
         return [
             {
