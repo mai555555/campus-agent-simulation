@@ -455,3 +455,58 @@ CREATE INDEX IF NOT EXISTS idx_agent_action_plans_window ON agent_action_plans(w
 CREATE INDEX IF NOT EXISTS idx_observer_sessions_last_seen ON observer_sessions(last_seen_at);
 CREATE INDEX IF NOT EXISTS idx_model_call_logs_trigger_date ON model_call_logs(trigger_type, created_at);
 """
+
+RESEARCH_SYSTEM_SQL = """
+CREATE TABLE IF NOT EXISTS experiment_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id TEXT NOT NULL DEFAULT '',
+    run_id TEXT NOT NULL UNIQUE,
+    experiment_name TEXT NOT NULL DEFAULT '',
+    hypothesis TEXT NOT NULL DEFAULT '',
+    control_or_treatment TEXT NOT NULL DEFAULT 'natural',
+    intervention_type TEXT NOT NULL DEFAULT '',
+    start_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    end_time TEXT NOT NULL DEFAULT '',
+    random_seed TEXT NOT NULL DEFAULT '',
+    environment_version TEXT NOT NULL DEFAULT '',
+    agent_config_version TEXT NOT NULL DEFAULT '',
+    model_config_version TEXT NOT NULL DEFAULT '',
+    world_rules_version TEXT NOT NULL DEFAULT 'world-runtime-v1',
+    status TEXT NOT NULL DEFAULT 'running',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS world_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL DEFAULT '',
+    snapshot_type TEXT NOT NULL DEFAULT 'manual_checkpoint',
+    world_time TEXT NOT NULL DEFAULT '',
+    day INTEGER NOT NULL DEFAULT 0,
+    tick_id INTEGER,
+    reason TEXT NOT NULL DEFAULT '',
+    state_json TEXT NOT NULL DEFAULT '{}',
+    schema_version TEXT NOT NULL DEFAULT 'research-v1',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS research_export_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL DEFAULT '',
+    export_format TEXT NOT NULL DEFAULT 'both',
+    export_path TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'running',
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    quality_report_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_experiment_runs_run_id ON experiment_runs(run_id);
+CREATE INDEX IF NOT EXISTS idx_experiment_runs_status ON experiment_runs(status);
+CREATE INDEX IF NOT EXISTS idx_world_snapshots_run_id ON world_snapshots(run_id);
+CREATE INDEX IF NOT EXISTS idx_world_snapshots_created_at ON world_snapshots(created_at);
+CREATE INDEX IF NOT EXISTS idx_research_export_jobs_run_id ON research_export_jobs(run_id);
+CREATE INDEX IF NOT EXISTS idx_research_export_jobs_started_at ON research_export_jobs(started_at);
+"""

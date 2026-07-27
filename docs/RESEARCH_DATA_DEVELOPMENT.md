@@ -12,6 +12,29 @@
 
 开发时需要保持一个原则：所有影响仿真的输入和所有关键输出都应被结构化记录。不能只把结果显示在前端。
 
+## 当前阶段判断
+
+当前系统已经具备探索性研究基础，但尚未形成完整的可复现实验系统。
+
+现有数据能够支持内部探索、课程项目、实习生分析、社会科学概念验证和方法验证原型。它已经记录了 Agent 身份、行为日志、世界事件、记忆、关系网络、空间状态、观察记录、模型调用和行动计划等基础数据。
+
+但需要明确区分两件事：
+
+- 数据量丰富，不等于具备科研实验能力。
+- 有运行日志，不等于形成实验数据系统。
+
+当前系统更接近一个“运行日志系统”：它能够说明世界运行时发生了什么，也能支持调试和探索性分析。下一阶段需要把它升级为“实验数据系统”：能够明确实验批次、分组、配置、干预、快照、导出数据集和质量报告。
+
+论文和开发文档中建议明确区分三层系统：
+
+| 层级 | 职责 | 当前状态 |
+| --- | --- | --- |
+| 运行系统 | 让 Agent 世界持续运行，处理 tick、计划、事件、观察者和模型调用 | 已有较好基础 |
+| 实验系统 | 管理实验批次、分组、干预、配置、快照和复现条件 | 下一阶段重点建设 |
+| 研究数据系统 | 清洗、聚合、导出和检查研究数据集 | 下一阶段重点建设 |
+
+只有补齐实验系统和研究数据系统，项目才会从“可以观察 Agent 行为的虚拟世界”，进一步变成“可以被研究机构重复使用的 Agent 实验环境生成器”。
+
 ## 核心数据表
 
 ### 个体与状态
@@ -55,6 +78,124 @@
 | `observer_sessions` | 观察者进入、关注 Agent/地点 | 观察者效应 |
 | `participant_actions` | 参与者互动预留 | v2 互动干预 |
 | `model_call_logs` | 模型调用来源、状态、成本 | 成本与复杂度分析 |
+
+### 实验与复现（下一阶段）
+
+| 表 | 用途 | 研究价值 |
+| --- | --- | --- |
+| `experiment_runs` | 每次实验、运行批次、实验条件和状态 | 对照分析、实验分组、可复现条件 |
+| `world_snapshots` | 实验开始、干预前后、关键时点的世界状态快照 | 状态复原、异常定位、实验比较 |
+| `research_export_jobs` | 研究数据导出任务、范围、格式和质量报告位置 | 数据产品化、导出审计 |
+
+这三类表是下一阶段从“运行日志”走向“科研实验”的关键，不应只作为附属日志处理。
+
+## 实验运行单元
+
+建议新增统一的 `experiment_runs`，将每次仿真明确识别为一个独立实验或运行批次。
+
+最低字段建议：
+
+```text
+id
+experiment_id
+run_id
+experiment_name
+hypothesis
+control_or_treatment
+intervention_type
+start_time
+end_time
+random_seed
+environment_version
+agent_config_version
+model_config_version
+world_rules_version
+status
+metadata_json
+created_at
+updated_at
+```
+
+其中：
+
+- `experiment_id` 表示研究项目或实验设计。
+- `run_id` 表示某一次具体运行。
+- `control_or_treatment` 用于标记对照组、实验组或自然运行组。
+- `metadata_json` 保存额外配置，但关键字段仍应结构化。
+
+后续所有行为、事件、关系、记忆和模型调用数据，都应逐步关联到 `run_id`。没有这一层，多个实验的数据容易混在一起，也无法做严格对照分析。
+
+## 世界快照
+
+建议新增 `world_snapshots`，保存实验开始时、干预前后以及关键时间点的世界状态。
+
+快照不只是备份数据，而是为了回答：
+
+> 在某个时刻，整个实验世界处于什么状态？
+
+快照建议覆盖：
+
+- Agent 状态：位置、任务、能量、目标、profile 模块。
+- 关系网络：关系边、信任、合作、竞争、冲突。
+- 空间状态：开放状态、容量、拥挤度、在场 Agent。
+- 世界事件：最近事件流和活跃 campus events。
+- 环境参数：天气、时间、人流、校园情绪、资源压力。
+- 活跃计划：8 小时行动计划和当前执行步骤。
+- 资源与规则配置：模型预算、tick 间隔、同步开关、规则版本。
+
+最低字段建议：
+
+```text
+id
+run_id
+snapshot_type
+world_time
+day
+tick_id
+reason
+state_json
+schema_version
+created_at
+```
+
+`snapshot_type` 可以包括：
+
+- `run_start`
+- `pre_intervention`
+- `post_intervention`
+- `daily_checkpoint`
+- `manual_checkpoint`
+- `error_checkpoint`
+
+为了控制体积，第一版可以把快照保存为 JSON；后续如果研究需求稳定，再拆成更规范的快照明细表。
+
+## 实验配置记录
+
+目前模型、规则、tick、预算和外部同步信息分散在不同表中。下一阶段应形成统一的实验 metadata，避免实验结束后无法确认当时到底运行了哪套配置。
+
+建议记录：
+
+```text
+simulation_tick_seconds
+simulation_speed
+agents_per_tick
+llm_provider
+model_name
+temperature
+prompt_version
+token_budget
+agent_count
+world_rules_version
+planner_version
+weather_sync_enabled
+news_sync_enabled
+external_data_cutoff
+observer_effect_enabled
+observer_model_cooldown_seconds
+admin_intervention_enabled
+```
+
+这些字段应写入 `experiment_runs.metadata_json`，其中核心字段也可以冗余为结构化列，方便筛选实验。
 
 ## 推荐分析粒度
 
@@ -202,37 +343,55 @@ format=csv
 
 CSV 用于社会科学常用工具，JSON 用于保留 `payload`、决策日志、记忆内容等嵌套字段。
 
-## 导出脚本建议
+## 研究数据导出脚本
 
-如果暂时不做 API，可以先放脚本：
+当前 v1 已提供脚本：
 
 ```text
 scripts/export_research_dataset.py
 ```
 
-建议输出目录：
+示例：
 
-```text
-exports/research/YYYY-MM-DD-HHMM/
+```bash
+python scripts/export_research_dataset.py --format both --run-id pilot-001
+python scripts/export_research_dataset.py --from-day 20 --to-day 30 --format csv
 ```
 
-建议文件：
+默认输出目录：
 
 ```text
-agents.csv
-agent_days.csv
-agent_ticks.csv
-relationships.csv
-relationship_dynamics.csv
-spaces.csv
-space_time.csv
-events.csv
-observer_sessions.csv
-model_call_logs.csv
-metadata.json
+exports/research/<run_id>/
 ```
 
-`metadata.json` 必须包含：
+v1 会输出：
+
+```text
+agents
+agent_profiles
+memories
+simulation_actions
+relationships
+relationship_dynamics
+campus_state
+campus_spaces
+world_ticks
+events
+observer_records
+model_calls
+action_plans
+participant_actions
+experiment_runs
+world_snapshots
+agent_day
+space_time
+experiment_metadata.json
+data_quality_report.json
+```
+
+其中 `agent_day` 和 `space_time` 是派生研究数据集；其余文件主要来自运行时原始表。`--format both` 会同时输出 `.csv` 和 `.json`，CSV 用于常见社会科学统计工具，JSON 用于保留嵌套 payload。
+
+`experiment_metadata.json` 应持续补充：
 
 - git commit
 - 导出时间
@@ -240,6 +399,78 @@ metadata.json
 - world runtime 配置
 - 模型预算配置
 - 当前 schema 版本或迁移说明
+- 实验批次和 run_id
+- 数据质量检查结果摘要
+
+第一版可以先从现有表派生，不强制数据库已经有 `run_id`。但导出结果会在 metadata 和质量报告里明确说明数据范围、当前世界状态和是否缺少实验批次标识。
+
+## 派生研究数据集
+
+现有日志粒度较细，适合系统调试，但不适合研究人员直接使用。研究导出层应生成面向统计分析的派生数据集。
+
+建议优先实现：
+
+```text
+agent_tick
+agent_day
+agent_event_response
+relationship_daily
+space_time
+observer_attention
+intervention_response
+model_decision
+```
+
+例如 `agent_day` 可以整理为：
+
+```text
+run_id
+agent_id
+date
+action_count
+social_action_count
+movement_count
+observe_count
+unique_spaces_visited
+relationship_changes
+events_observed
+memory_count
+llm_calls
+token_cost
+observer_focus_count
+admin_intervention_exposure
+```
+
+例如 `observer_attention` 可以整理为：
+
+```text
+run_id
+observer_id
+session_type
+focused_resident_id
+focused_location
+observation_start
+observation_end
+duration_seconds
+attention_switches
+observer_model_detail_count
+```
+
+例如 `intervention_response` 可以整理为：
+
+```text
+run_id
+intervention_id
+intervention_type
+intervention_target
+intervention_time
+pre_snapshot_id
+post_snapshot_id
+affected_agents
+behavior_change_score
+relationship_change_score
+space_flow_change_score
+```
 
 ## 可复现性要求
 
@@ -290,6 +521,59 @@ metadata.json
 
 否则会把观察行为误判成世界自身行为。
 
+## 干预记录
+
+观察者行为和管理员操作不能只保存为普通文本日志。干预性研究至少需要结构化记录：
+
+```text
+observer_id
+observation_start
+observation_end
+observation_target
+attention_switches
+intervention_time
+intervention_target
+intervention_type
+intervention_content
+expected_effect
+```
+
+需要区分：
+
+- 被动观察
+- 参数调整
+- 信息注入
+- 角色干预
+- 环境干预
+- 行为限制
+
+否则后续难以判断 Agent 的变化来自自然演化，还是观察者或管理员介入。
+
+## 决策过程可解释性
+
+`model_call_logs` 可以记录模型调用，但科研分析还需要知道：
+
+- 使用了哪个 prompt 版本。
+- 输入了哪些上下文类型。
+- 模型返回了哪些候选结果。
+- 最终选择了什么行为。
+- 是否经过规则系统修改。
+- 是否发生降级、重试或人工干预。
+
+不一定要永久保存完整原始 prompt，但至少应保存：
+
+```text
+prompt_version
+context_hash
+output_hash
+decision_summary
+selected_action
+rule_override
+model_parameters
+```
+
+完整文本可以采用分级存储、脱敏和定期清理机制。默认情况下，不应把敏感 prompt 和用户输入长期裸存。
+
 ## 数据质量检查
 
 建议在导出前运行以下检查：
@@ -301,6 +585,28 @@ metadata.json
 - `relationship_dynamics` 是否存在孤立边。
 - `observer_sessions.last_seen_at` 是否晚于 `started_at`。
 - `model_call_logs.status` 是否记录失败原因。
+- 是否存在大量完全重复的 `memories`。
+- 是否存在大量连续重复的 `simulation_action_logs`。
+- 是否缺失 `run_id` 或实验批次标识。
+- 是否有事件时间超出实验运行区间。
+- 是否有模型调用没有对应决策或事件。
+- 是否同一 Agent 在同一 tick 出现互斥行为。
+- 是否快照状态与日志最终状态不一致。
+
+质量检查结果应形成独立报告，而不是只打印程序日志。建议导出：
+
+```text
+data_quality_report.json
+```
+
+报告中至少包含：
+
+- 检查项名称。
+- 严重级别。
+- 影响表。
+- 异常记录数量。
+- 示例记录 id。
+- 是否阻塞导出。
 
 ## 隐私和伦理边界
 
@@ -319,15 +625,21 @@ metadata.json
 
 ### v1
 
-- 补研究导出脚本。
-- 固化 Agent-Day、Agent-Tick、Relationship Edge、Space-Time、Event Stream 五类数据集。
-- 在 README 或运营文档中说明如何导出。
+- 已更新研究数据文档，明确运行系统、实验系统、研究数据系统三层边界。
+- 已增加 `experiment_runs`、`world_snapshots`、`research_export_jobs` schema。
+- 已补研究导出脚本 `scripts/export_research_dataset.py`。
+- 已输出 Agent-Day、Space-Time、Event Stream、Relationship、Model Call 等 v1 数据集。
+- 已输出 `experiment_metadata.json` 和 `data_quality_report.json`。
+- 已在 Supabase schema 文档中补充研究数据表。
 
 ### v2
 
 - 增加 `/api/research/export/*`。
 - 增加导出权限和 admin token 校验。
 - 增加研究场景配置表，例如实验组、干预组、运行窗口。
+- 将关键运行表逐步关联 `run_id`。
+- 支持实验开始、干预前后、每日 checkpoint 的世界快照。
+- 完善 Agent-Tick、Relationship Daily、Observer Attention、Intervention Response、Model Decision 的派生口径。
 
 ### v3
 

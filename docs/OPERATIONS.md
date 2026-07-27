@@ -226,6 +226,28 @@ World Runtime：
 - `participant_actions`
 - `model_call_logs`
 
+Research Data：
+
+- `experiment_runs`
+- `world_snapshots`
+- `research_export_jobs`
+
+## 导出研究数据
+
+第一版研究导出使用脚本生成 CSV/JSON 数据包：
+
+```bash
+python scripts/export_research_dataset.py --format both --run-id pilot-001
+```
+
+可按仿真日过滤：
+
+```bash
+python scripts/export_research_dataset.py --from-day 20 --to-day 30 --format csv
+```
+
+默认输出到 `exports/research/<run_id>/`，包含原始运行表、派生的 `agent_day` / `space_time`，以及 `experiment_metadata.json` 和 `data_quality_report.json`。如果 `.env` 配置了 `DATABASE_URL`，脚本会导出 Supabase/Postgres 数据；否则导出本地 SQLite 数据。
+
 ## 常见问题
 
 ### `RuntimeError: 缺少 LLM_API_KEY`
