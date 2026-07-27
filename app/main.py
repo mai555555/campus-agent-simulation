@@ -1575,37 +1575,159 @@ def consume_auto_model_budget(conn, trigger_type, resident_id=None):
     return True
 
 
+def role_group(role):
+    text = str(role or "")
+    if "老师" in text:
+        return "teacher"
+    if "商" in text or "老板" in text:
+        return "business"
+    if "后勤" in text or "管理" in text:
+        return "service"
+    return "student"
+
+
+def space_hours_by_location():
+    return {
+        location: {"open_hour": int(open_hour), "close_hour": int(close_hour)}
+        for _, _, location, _, open_hour, close_hour, _, _, _ in DEFAULT_SPACES
+    }
+
+
+def is_location_open_at_hour(location, hour):
+    if location not in VALID_LOCATIONS:
+        return False
+    hours = space_hours_by_location().get(location)
+    if not hours:
+        return True
+    open_hour = hours["open_hour"]
+    close_hour = hours["close_hour"]
+    if close_hour == 24:
+        return hour >= open_hour
+    if open_hour <= close_hour:
+        return open_hour <= hour < close_hour
+    return hour >= open_hour or hour < close_hour
+
+
+def weighted_choice(options):
+    weighted = [(item, max(0.0, float(weight))) for item, weight in options if item]
+    total = sum(weight for _, weight in weighted)
+    if total <= 0:
+        return weighted[0][0] if weighted else "宿舍区"
+    pick = random.uniform(0, total)
+    cursor = 0.0
+    for item, weight in weighted:
+        cursor += weight
+        if pick <= cursor:
+            return item
+    return weighted[-1][0]
+
+
+def location_options_for_context(role, hour, weather="", current_location=""):
+    group = role_group(role)
+    weather_text = str(weather or "")
+    rainy = any(token in weather_text for token in ("雨", "雷", "雪", "雾", "大风"))
+    if 0 <= hour < 6:
+        base = {
+            "student": [("宿舍区", 82), ("图书馆", 8), ("教学楼", 5), ("操场", 2), (current_location, 3)],
+            "teacher": [("宿舍区", 62), ("教学楼", 12), ("图书馆", 14), ("校务处", 5), (current_location, 7)],
+            "business": [("商业街", 26), ("宿舍区", 42), ("食堂", 8), ("校务处", 6), (current_location, 18)],
+            "service": [("宿舍区", 34), ("校务处", 26), ("食堂", 14), ("图书馆", 8), (current_location, 18)],
+        }.get(group, [("宿舍区", 80), (current_location, 20)])
+    elif 6 <= hour < 9:
+        base = {
+            "student": [("食堂", 34), ("教学楼", 24), ("宿舍区", 18), ("操场", 10), ("图书馆", 8), (current_location, 6)],
+            "teacher": [("教学楼", 34), ("食堂", 18), ("校务处", 16), ("图书馆", 16), (current_location, 16)],
+            "business": [("商业街", 30), ("食堂", 30), ("校务处", 8), (current_location, 32)],
+            "service": [("食堂", 28), ("校务处", 28), ("宿舍区", 18), ("教学楼", 12), (current_location, 14)],
+        }.get(group, [("食堂", 30), ("教学楼", 25), (current_location, 20)])
+    elif 9 <= hour < 11:
+        base = {
+            "student": [("教学楼", 48), ("图书馆", 24), ("操场", 8), ("商业街", 6), (current_location, 14)],
+            "teacher": [("教学楼", 50), ("图书馆", 18), ("校务处", 18), (current_location, 14)],
+            "business": [("商业街", 55), ("食堂", 20), ("校务处", 8), (current_location, 17)],
+            "service": [("校务处", 38), ("教学楼", 20), ("食堂", 18), ("图书馆", 10), (current_location, 14)],
+        }.get(group, [("教学楼", 35), ("图书馆", 25), (current_location, 15)])
+    elif 11 <= hour < 14:
+        base = {
+            "student": [("食堂", 42), ("教学楼", 18), ("图书馆", 16), ("商业街", 10), (current_location, 14)],
+            "teacher": [("食堂", 32), ("教学楼", 28), ("校务处", 12), ("图书馆", 12), (current_location, 16)],
+            "business": [("食堂", 36), ("商业街", 42), ("校务处", 6), (current_location, 16)],
+            "service": [("食堂", 30), ("校务处", 30), ("教学楼", 14), (current_location, 26)],
+        }.get(group, [("食堂", 38), ("教学楼", 20), (current_location, 15)])
+    elif 14 <= hour < 17:
+        base = {
+            "student": [("教学楼", 38), ("图书馆", 26), ("商业街", 10), ("操场", 8), (current_location, 18)],
+            "teacher": [("教学楼", 38), ("图书馆", 24), ("校务处", 20), (current_location, 18)],
+            "business": [("商业街", 56), ("食堂", 16), ("校务处", 8), (current_location, 20)],
+            "service": [("校务处", 34), ("图书馆", 18), ("教学楼", 18), ("食堂", 12), (current_location, 18)],
+        }.get(group, [("教学楼", 32), ("图书馆", 24), (current_location, 18)])
+    elif 17 <= hour < 21:
+        base = {
+            "student": [("食堂", 30), ("操场", 22), ("图书馆", 18), ("商业街", 14), ("宿舍区", 10), (current_location, 6)],
+            "teacher": [("食堂", 24), ("图书馆", 22), ("教学楼", 18), ("操场", 10), ("宿舍区", 12), (current_location, 14)],
+            "business": [("商业街", 46), ("食堂", 26), ("宿舍区", 8), (current_location, 20)],
+            "service": [("宿舍区", 24), ("食堂", 24), ("校务处", 18), ("操场", 12), (current_location, 22)],
+        }.get(group, [("食堂", 28), ("操场", 18), ("宿舍区", 16), (current_location, 12)])
+    else:
+        base = {
+            "student": [("宿舍区", 56), ("图书馆", 18), ("操场", 8), ("教学楼", 8), (current_location, 10)],
+            "teacher": [("宿舍区", 42), ("图书馆", 20), ("教学楼", 14), (current_location, 24)],
+            "business": [("商业街", 28), ("宿舍区", 30), ("食堂", 8), (current_location, 34)],
+            "service": [("宿舍区", 34), ("校务处", 20), ("食堂", 12), (current_location, 34)],
+        }.get(group, [("宿舍区", 50), (current_location, 20)])
+    if rainy:
+        base = [(location, weight * 0.25 if location == "操场" else weight) for location, weight in base]
+    open_options = [(location, weight) for location, weight in base if is_location_open_at_hour(location, hour)]
+    return open_options or [("宿舍区", 1)]
+
+
+def realistic_location_for_context(role, hour, weather="", current_location="", preferred_location=""):
+    if preferred_location and is_location_open_at_hour(preferred_location, hour):
+        if preferred_location == "操场" and any(token in str(weather or "") for token in ("雨", "雷", "雪", "大风")):
+            return weighted_choice(location_options_for_context(role, hour, weather, current_location))
+        return preferred_location
+    return weighted_choice(location_options_for_context(role, hour, weather, current_location))
+
+
+def action_for_context(role, location, hour):
+    if 0 <= hour < 6:
+        return "reflect" if location == "宿舍区" else "observe"
+    if location == "宿舍区":
+        return "reflect" if hour >= 21 or hour < 7 else "observe"
+    if location in {"食堂", "商业街", "操场"}:
+        return "chat" if random.random() < 0.35 else "observe"
+    if "老师" in str(role or "") and location in {"教学楼", "图书馆", "校务处"}:
+        return "observe"
+    return "move" if random.random() < 0.55 else "observe"
+
+
 def build_rule_based_plan(resident, window_start, window_end):
     role = str(resident["role"])
-    morning = window_start.hour == 0
-    daytime = window_start.hour == 8
-    if "老师" in role:
-        locations = ["教学楼", "图书馆", "校务处"] if daytime else ["图书馆", "宿舍区", "教学楼"]
+    if role_group(role) == "teacher":
         intent = "平衡教学、指导学生和校园服务"
-    elif "商" in role or "老板" in role:
-        locations = ["商业街", "食堂", "校务处"] if daytime else ["商业街", "宿舍区", "食堂"]
+    elif role_group(role) == "business":
         intent = "维持校园服务供给并寻找需求变化"
-    elif "后勤" in role or "管理" in role:
-        locations = ["校务处", "食堂", "图书馆"] if daytime else ["宿舍区", "校务处", "食堂"]
+    elif role_group(role) == "service":
         intent = "维护空间秩序和资源稳定"
-    elif morning:
-        locations = ["宿舍区", "食堂", "教学楼"]
-        intent = "恢复精力并准备当天学习生活"
-    elif daytime:
-        locations = ["教学楼", "食堂", "图书馆"]
+    elif window_start.hour == 0:
+        intent = "在夜间恢复精力，并为白天学习生活做准备"
+    elif window_start.hour == 8:
         intent = "推进课程学习并保持必要社交"
     else:
-        locations = ["食堂", "操场", "宿舍区"]
         intent = "整理一天收获并进行轻量社交"
     steps = []
-    for index, location in enumerate(locations):
-        step_time = window_start + timedelta(minutes=45 + index * 135)
+    offsets = [45, 255, 435]
+    for index, offset in enumerate(offsets):
+        step_time = window_start + timedelta(minutes=offset + random.randint(-20, 20))
         if step_time >= window_end:
             step_time = window_end - timedelta(minutes=30)
+        hour = step_time.hour
+        location = realistic_location_for_context(role, hour, current_location=resident["location"])
+        action = action_for_context(role, location, hour)
         steps.append(
             {
                 "time": step_time.strftime("%H:%M"),
-                "action": "move" if index != 1 else "observe",
+                "action": action,
                 "location": location,
                 "goal": f"{resident['name']}围绕「{resident['goal']}」调整当前节奏",
             }
@@ -1634,6 +1756,13 @@ def normalize_plan_step(step, window_start, index, fallback_location, fallback_g
     if not re.fullmatch(r"\d{2}:\d{2}", time_text):
         step_time = window_start + timedelta(minutes=45 + index * 135)
         time_text = step_time.strftime("%H:%M")
+    try:
+        hour = int(time_text.split(":", 1)[0])
+    except (TypeError, ValueError):
+        hour = window_start.hour
+    if not is_location_open_at_hour(location, hour):
+        location = realistic_location_for_context("", hour, current_location=fallback_location)
+        action = "observe" if action == "move" else action
     return {"time": time_text, "action": action, "location": location, "goal": goal}
 
 
@@ -1648,6 +1777,11 @@ def build_llm_action_plan(conn, resident, window_start, window_end, world_time):
 计划窗口：{window_start.strftime('%H:%M')} 到 {window_end.strftime('%H:%M')}
 可选地点：{", ".join(VALID_LOCATIONS)}
 可选动作：move, observe, chat, reflect
+现实约束：
+- 00:00-06:00 大多数学生应在宿舍区休息或反思，只有少量异常情况会在其他开放空间观察。
+- 食堂开放 06:00-21:00，商业街 09:00-22:00，教学楼和图书馆夜间关闭，校务处 08:00-18:00。
+- 下雨、雷雨、大风时应显著减少操场计划。
+- 计划需要有少量随机性和个体差异，但不能让所有 Agent 同时去同一地点。
 
 Agent:
 - id: {resident['id']}
@@ -2622,12 +2756,23 @@ def build_runtime_perception(conn, agent, world_time, day, slot, plan, step, obs
         row["location"]: row["count"]
         for row in conn.execute("SELECT location, COUNT(*) AS count FROM residents GROUP BY location").fetchall()
     }
+    hour = world_time.hour
+    open_locations = [location for location in VALID_LOCATIONS if is_location_open_at_hour(location, hour)]
+    realistic_options = [location for location, _ in location_options_for_context(agent["role"], hour, env.get("weather"), agent["location"])]
     return {
         "world_time": world_time.isoformat(),
         "slot": slot,
         "observed": observed,
         "agent_location": agent["location"],
         "local_crowd": int(location_counts.get(agent["location"], 0)),
+        "open_locations": open_locations,
+        "realistic_location_options": realistic_options,
+        "realism_constraints": {
+            "hour": hour,
+            "deep_night": 0 <= hour < 6,
+            "bad_weather": any(token in str(env.get("weather") or "") for token in ("雨", "雷", "雪", "大风")),
+            "note": "行动可以随机偏离计划，但需符合时间、天气、空间开放和角色身份。",
+        },
         "environment": {
             "weather": env.get("weather"),
             "temperature": env.get("temperature"),
@@ -2664,6 +2809,61 @@ def normalize_runtime_decision(payload, fallback_step, fallback_location, fallba
     }
 
 
+def apply_realism_constraints_to_decision(conn, agent, decision, perception, world_time):
+    decision = dict(decision or {})
+    hour = world_time.hour
+    env = perception.get("environment", {}) if isinstance(perception, dict) else {}
+    weather = env.get("weather", "")
+    action = str(decision.get("action") or "observe")
+    destination = str(decision.get("location") or agent["location"])
+    role = str(agent.get("role") or "")
+    notes = []
+
+    if destination not in VALID_LOCATIONS:
+        notes.append("目的地不存在，改为当前位置观察")
+        destination = agent["location"] if agent["location"] in VALID_LOCATIONS else "宿舍区"
+        action = "observe"
+
+    if not is_location_open_at_hour(destination, hour):
+        adjusted = realistic_location_for_context(role, hour, weather, current_location=agent["location"])
+        notes.append(f"{destination}当前不适合进入，调整到{adjusted}")
+        destination = adjusted
+        action = "reflect" if destination == "宿舍区" and (hour < 6 or hour >= 22) else "observe"
+
+    if 0 <= hour < 6 and role_group(role) == "student" and destination != "宿舍区":
+        if random.random() < 0.88:
+            notes.append("深夜学生活动概率较低，回到宿舍区休息")
+            destination = "宿舍区"
+            action = "reflect"
+
+    if destination == "操场" and any(token in str(weather or "") for token in ("雨", "雷", "雪", "大风")):
+        if random.random() < 0.78:
+            adjusted = realistic_location_for_context(role, hour, weather, current_location=agent["location"])
+            notes.append(f"{weather}降低户外活动意愿，改到{adjusted}")
+            destination = adjusted
+            action = "observe" if action == "move" else action
+
+    if action == "move" and destination == agent["location"]:
+        action = "observe"
+        notes.append("已在目标地点，改为现场观察")
+
+    if random.random() < (0.08 if perception.get("observed") else 0.04):
+        alternate = realistic_location_for_context(role, hour, weather, current_location=agent["location"])
+        if alternate != destination:
+            notes.append(f"受到临时状态扰动，短暂偏离计划到{alternate}")
+            destination = alternate
+            action = "move" if alternate != agent["location"] else "observe"
+            decision["plan_relation"] = "adjust"
+
+    decision["action"] = action
+    decision["location"] = destination
+    if notes:
+        decision["constraint_notes"] = notes
+        reason = str(decision.get("reason") or "")
+        decision["reason"] = f"{reason}（现实约束：{'；'.join(notes)}）"[:220]
+    return decision
+
+
 def fallback_runtime_decision(agent, step, reason, mode):
     return {
         "action": str(step.get("action") or "observe"),
@@ -2695,6 +2895,12 @@ Agent:
 
 感知上下文：
 {json.dumps(perception, ensure_ascii=False)}
+
+现实约束：
+- 必须尊重当前时间段、空间开放时间、天气和拥挤度。
+- 深夜学生通常在宿舍区，食堂、商业街、校务处等关闭或低活跃空间不应成为普通目的地。
+- 行动可以有随机性，可以轻微偏离计划，但偏离需要有可解释原因。
+- 如果计划不合时宜，应选择 rest 或 adjust，而不是机械执行。
 
 只返回 JSON，不要解释。格式：
 {{
@@ -2731,6 +2937,7 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
     step = choose_plan_step(plan, world_time, agent["location"])
     perception = build_runtime_perception(conn, agent, world_time, day, slot, plan, step, observed)
     decision = build_autonomous_tick_decision(conn, agent, perception, step)
+    decision = apply_realism_constraints_to_decision(conn, agent, decision, perception, world_time)
     action = str(decision.get("action") or "observe")
     destination = str(decision.get("location") or agent["location"])
     goal = str(decision.get("goal") or plan.get("intent") or "观察校园环境")
@@ -2740,6 +2947,15 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
         if action == "move" and destination in VALID_LOCATIONS and destination != agent["location"]:
             result = move_resident(conn, agent["id"], destination)
             content = result["description"]
+        elif action == "chat":
+            focus = destination if destination in VALID_LOCATIONS else agent["location"]
+            content = f"{agent['name']} 在{agent['location']}围绕{focus}附近的校园状态进行轻量交流，目标：{goal}。"
+            add_event(conn, day, "world_agent_chat", content)
+            add_memory_once(conn, agent["id"], day, content, importance=2 if observed else 1, source="world_tick")
+        elif action == "reflect":
+            content = f"{agent['name']} 在{agent['location']}整理当前节奏和个人状态，目标：{goal}。"
+            add_event(conn, day, "world_agent_reflect", content)
+            add_memory_once(conn, agent["id"], day, content, importance=2 if observed else 1, source="world_tick")
         else:
             focus = destination if destination in VALID_LOCATIONS else "校园状态"
             content = f"{agent['name']} 在{agent['location']}观察{focus}，目标：{goal}。"
