@@ -62,6 +62,36 @@ WORLD_EXTERNAL_SYNC_INTERVAL_SECONDS = 3600
 WORLD_WEATHER_SYNC_INTERVAL_SECONDS = 3600
 WORLD_CAMPUS_NEWS_WINDOW_SECONDS = 8 * 3600
 OBSERVER_MODEL_DETAIL_COOLDOWN_SECONDS = 300
+WORLD_AUTONOMOUS_ACTIONS = {
+    "move", "observe", "chat", "reflect", "attend_class", "queue", "consume",
+    "rest", "club_activity", "conflict", "collaborate", "late", "request_leave",
+}
+
+DEFAULT_SCHEDULE_RULES = [
+    ("student_deep_night_rest", "student", "rest", "宿舍区", 0, 6, "all", 0, 100, 9.0, 0.10, "学生深夜以宿舍休息为主"),
+    ("student_breakfast", "student", "consume", "食堂", 6, 9, "all", 0, 100, 4.0, 0.25, "早餐时段学生更可能去食堂"),
+    ("student_morning_class", "student", "attend_class", "教学楼", 8, 12, "weekday", 0, 100, 7.0, 0.18, "工作日上午课程活动"),
+    ("student_noon_queue", "student", "queue", "食堂", 11, 13, "all", 0, 100, 5.0, 0.30, "午餐高峰排队"),
+    ("student_exam_study", "student", "observe", "图书馆", 18, 23, "all", 65, 100, 6.0, 0.20, "考试压力高时晚间自习增加"),
+    ("student_evening_club", "student", "club_activity", "操场", 18, 21, "all", 0, 70, 3.2, 0.35, "晚间社团与运动活动"),
+    ("teacher_morning_class", "teacher", "attend_class", "教学楼", 8, 12, "weekday", 0, 100, 6.5, 0.15, "教师上午授课"),
+    ("teacher_office_hour", "teacher", "collaborate", "校务处", 14, 17, "weekday", 0, 100, 3.5, 0.20, "教师下午处理教务协作"),
+    ("business_lunch_service", "business", "consume", "食堂", 10, 14, "all", 0, 100, 4.5, 0.25, "商户午间服务"),
+    ("business_shop_hours", "business", "consume", "商业街", 9, 22, "all", 0, 100, 6.0, 0.22, "商业街营业时段"),
+    ("service_morning_patrol", "service", "observe", "校务处", 7, 10, "all", 0, 100, 4.5, 0.18, "后勤早间巡查"),
+    ("service_crowd_support", "service", "collaborate", "食堂", 11, 13, "all", 0, 100, 3.6, 0.25, "后勤午间协调拥挤"),
+]
+
+DEFAULT_CAUSAL_WEIGHTS = [
+    ("rain_reduces_playground", "rainfall", "location", "操场", -1.0, 0.75, 25, 0.12, "降雨降低操场吸引力"),
+    ("rain_increases_library", "rainfall", "location", "图书馆", 1.0, 0.25, 25, 0.10, "降雨增加室内学习倾向"),
+    ("exam_increases_library", "exam_pressure", "location", "图书馆", 1.0, 0.70, 60, 0.10, "考试压力增加图书馆密度"),
+    ("exam_increases_teaching", "exam_pressure", "location", "教学楼", 1.0, 0.35, 60, 0.10, "考试压力增加教学楼学习活动"),
+    ("activity_increases_playground", "activity_heat", "location", "操场", 1.0, 0.45, 60, 0.18, "活动热度提高操场活动概率"),
+    ("resource_pressure_increases_queue", "resource_pressure", "action", "queue", 1.0, 0.65, 60, 0.12, "资源压力提高排队和等待行为"),
+    ("crowd_increases_conflict", "campus_flow", "action", "conflict", 1.0, 0.20, 75, 0.18, "拥挤提高小冲突概率"),
+    ("study_mood_increases_collaboration", "study_atmosphere", "action", "collaborate", 1.0, 0.28, 65, 0.14, "学习氛围提升协作概率"),
+]
 
 from app.schema import (
     CAMPUS_STATE_SQL, SPACE_SYSTEM_SQL, DEFAULT_SPACES, DEFAULT_ENV, ENV_COLUMN_TYPES,
@@ -1349,6 +1379,17 @@ class AdminWorldEventRequest(BaseModel):
     payload: dict = Field(default_factory=dict)
 
 
+class CalibrationObservationRequest(BaseModel):
+    source_name: str = "manual"
+    observed_at: str = ""
+    metric_name: str
+    metric_value: float
+    location: str = ""
+    role_group: str = ""
+    sample_size: int = Field(default=0, ge=0)
+    metadata: dict = Field(default_factory=dict)
+
+
 def row_to_dict(row):
     return dict(row) if row else None
 
@@ -1399,6 +1440,7 @@ def ensure_world_runtime_tables(conn):
             return
         conn.executescript(WORLD_RUNTIME_SQL)
         conn.executescript(RESEARCH_SYSTEM_SQL)
+        seed_world_runtime_rules(conn)
         now = datetime.now(WORLD_TZ).isoformat()
         budget_date = now[:10]
         conn.execute(
@@ -1418,6 +1460,28 @@ def ensure_world_runtime_tables(conn):
             (WORLD_RUNTIME_ID,),
         )
         WORLD_SCHEMA_READY = True
+
+
+def seed_world_runtime_rules(conn):
+    for rule in DEFAULT_SCHEDULE_RULES:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO campus_schedule_rules
+            (rule_key, role_group, action_type, location, start_hour, end_hour,
+             weekday_pattern, min_exam_pressure, max_exam_pressure, base_weight, noise, description)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rule,
+        )
+    for weight in DEFAULT_CAUSAL_WEIGHTS:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO world_causal_weights
+            (weight_key, source_metric, target_type, target_key, direction, strength, threshold, noise, description)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            weight,
+        )
 
 
 def get_world_now():
@@ -1622,7 +1686,71 @@ def weighted_choice(options):
     return weighted[-1][0]
 
 
-def location_options_for_context(role, hour, weather="", current_location=""):
+def active_schedule_rules(conn, role, hour, env=None):
+    if not conn:
+        return []
+    group = role_group(role)
+    env = env or {}
+    exam_pressure = int(env.get("exam_pressure") or 0)
+    rows = conn.execute(
+        """
+        SELECT * FROM campus_schedule_rules
+        WHERE status = 'active'
+          AND role_group IN ('all', ?)
+          AND min_exam_pressure <= ?
+          AND max_exam_pressure >= ?
+        """,
+        (group, exam_pressure, exam_pressure),
+    ).fetchall()
+    rules = []
+    for row in rows:
+        start_hour = int(row["start_hour"])
+        end_hour = int(row["end_hour"])
+        if (start_hour <= end_hour and start_hour <= hour < end_hour) or (start_hour > end_hour and (hour >= start_hour or hour < end_hour)):
+            rules.append(dict(row))
+    return rules
+
+
+def causal_multiplier_for_target(conn, env, target_type, target_key):
+    if not conn:
+        return 1.0
+    rows = conn.execute(
+        """
+        SELECT * FROM world_causal_weights
+        WHERE status = 'active' AND target_type = ? AND target_key = ?
+        """,
+        (target_type, target_key),
+    ).fetchall()
+    multiplier = 1.0
+    for row in rows:
+        metric = float(env.get(row["source_metric"]) or 0)
+        threshold = float(row["threshold"] or 0)
+        if metric < threshold:
+            continue
+        effect = ((metric - threshold) / 100.0) * float(row["strength"] or 0) * float(row["direction"] or 1)
+        effect += random.uniform(-float(row["noise"] or 0), float(row["noise"] or 0))
+        multiplier *= max(0.05, 1.0 + effect)
+    return multiplier
+
+
+def action_noise_for_agent(agent):
+    text = " ".join(str(agent.get(key, "")) for key in ("personality", "goal", "role"))
+    bias = {"social": 1.0, "study": 1.0, "routine": 1.0, "risk": 1.0, "service": 1.0}
+    if any(token in text for token in ("外向", "社交", "朋友", "活动", "社团")):
+        bias["social"] += 0.35
+    if any(token in text for token in ("认真", "学习", "成绩", "科研", "论文", "自律")):
+        bias["study"] += 0.35
+    if any(token in text for token in ("谨慎", "内向", "稳定", "秩序", "规则")):
+        bias["routine"] += 0.25
+        bias["risk"] -= 0.20
+    if any(token in text for token in ("叛逆", "冲动", "冒险", "竞争")):
+        bias["risk"] += 0.30
+    if role_group(agent.get("role")) in {"service", "teacher"}:
+        bias["service"] += 0.30
+    return bias
+
+
+def location_options_for_context(role, hour, weather="", current_location="", conn=None, env=None, agent=None):
     group = role_group(role)
     weather_text = str(weather or "")
     rainy = any(token in weather_text for token in ("雨", "雷", "雪", "雾", "大风"))
@@ -1677,32 +1805,92 @@ def location_options_for_context(role, hour, weather="", current_location=""):
         }.get(group, [("宿舍区", 50), (current_location, 20)])
     if rainy:
         base = [(location, weight * 0.25 if location == "操场" else weight) for location, weight in base]
+    for rule in active_schedule_rules(conn, role, hour, env):
+        if rule.get("location") in VALID_LOCATIONS:
+            noise = float(rule.get("noise") or 0)
+            weight = float(rule.get("base_weight") or 1.0) * 8
+            weight *= 1 + random.uniform(-noise, noise)
+            base.append((rule["location"], weight))
+    if agent:
+        bias = action_noise_for_agent(agent)
+        adjusted = []
+        for location, weight in base:
+            if location in {"教学楼", "图书馆"}:
+                weight *= bias["study"]
+            if location in {"食堂", "操场", "商业街"}:
+                weight *= bias["social"]
+            if location in {"校务处", "宿舍区"}:
+                weight *= bias["routine"]
+            adjusted.append((location, weight))
+        base = adjusted
+    if conn and env:
+        base = [
+            (location, weight * causal_multiplier_for_target(conn, env, "location", location))
+            for location, weight in base
+        ]
     open_options = [(location, weight) for location, weight in base if is_location_open_at_hour(location, hour)]
     return open_options or [("宿舍区", 1)]
 
 
-def realistic_location_for_context(role, hour, weather="", current_location="", preferred_location=""):
+def realistic_location_for_context(role, hour, weather="", current_location="", preferred_location="", conn=None, env=None, agent=None):
     if preferred_location and is_location_open_at_hour(preferred_location, hour):
         if preferred_location == "操场" and any(token in str(weather or "") for token in ("雨", "雷", "雪", "大风")):
-            return weighted_choice(location_options_for_context(role, hour, weather, current_location))
+            return weighted_choice(location_options_for_context(role, hour, weather, current_location, conn=conn, env=env, agent=agent))
         return preferred_location
-    return weighted_choice(location_options_for_context(role, hour, weather, current_location))
+    return weighted_choice(location_options_for_context(role, hour, weather, current_location, conn=conn, env=env, agent=agent))
 
 
-def action_for_context(role, location, hour):
+def action_for_context(role, location, hour, conn=None, env=None, agent=None):
+    options = []
     if 0 <= hour < 6:
-        return "reflect" if location == "宿舍区" else "observe"
-    if location == "宿舍区":
-        return "reflect" if hour >= 21 or hour < 7 else "observe"
-    if location in {"食堂", "商业街", "操场"}:
-        return "chat" if random.random() < 0.35 else "observe"
-    if "老师" in str(role or "") and location in {"教学楼", "图书馆", "校务处"}:
-        return "observe"
-    return "move" if random.random() < 0.55 else "observe"
+        options = [("rest", 7), ("reflect", 3)] if location == "宿舍区" else [("observe", 4), ("late", 1)]
+    elif location == "宿舍区":
+        options = [("rest", 4), ("reflect", 3), ("observe", 1)] if hour >= 21 or hour < 7 else [("reflect", 3), ("observe", 2)]
+    elif location == "教学楼":
+        options = [("attend_class", 5), ("collaborate", 2), ("late", 0.5), ("observe", 1)]
+    elif location == "图书馆":
+        options = [("observe", 4), ("collaborate", 1.2), ("reflect", 1)]
+    elif location == "食堂":
+        options = [("queue", 3), ("consume", 4), ("chat", 2), ("conflict", 0.2)]
+    elif location == "商业街":
+        options = [("consume", 4), ("queue", 1), ("chat", 2), ("conflict", 0.25)]
+    elif location == "操场":
+        options = [("club_activity", 4), ("chat", 2), ("collaborate", 1), ("observe", 1)]
+    elif location == "校务处":
+        options = [("request_leave", 1.5), ("collaborate", 3), ("observe", 2)]
+    else:
+        options = [("observe", 2), ("move", 1)]
+    for rule in active_schedule_rules(conn, role, hour, env):
+        if not rule.get("location") or rule.get("location") == location:
+            noise = float(rule.get("noise") or 0)
+            weight = float(rule.get("base_weight") or 1.0) * (1 + random.uniform(-noise, noise))
+            options.append((rule["action_type"], weight))
+    if conn and env:
+        options = [
+            (action, weight * causal_multiplier_for_target(conn, env, "action", action))
+            for action, weight in options
+        ]
+    if agent:
+        bias = action_noise_for_agent(agent)
+        adjusted = []
+        for action, weight in options:
+            if action in {"chat", "club_activity", "collaborate"}:
+                weight *= bias["social"]
+            if action in {"attend_class", "observe", "reflect"}:
+                weight *= bias["study"]
+            if action in {"conflict", "late"}:
+                weight *= bias["risk"]
+            if action in {"request_leave", "collaborate"}:
+                weight *= bias["service"]
+            adjusted.append((action, weight))
+        options = adjusted
+    return weighted_choice(options)
 
 
-def build_rule_based_plan(resident, window_start, window_end):
+def build_rule_based_plan(conn, resident, window_start, window_end, world_time=None):
     role = str(resident["role"])
+    env = dict(get_campus_environment(conn, get_current_day(conn))) if conn else {}
+    agent = dict(resident)
     if role_group(role) == "teacher":
         intent = "平衡教学、指导学生和校园服务"
     elif role_group(role) == "business":
@@ -1722,8 +1910,8 @@ def build_rule_based_plan(resident, window_start, window_end):
         if step_time >= window_end:
             step_time = window_end - timedelta(minutes=30)
         hour = step_time.hour
-        location = realistic_location_for_context(role, hour, current_location=resident["location"])
-        action = action_for_context(role, location, hour)
+        location = realistic_location_for_context(role, hour, env.get("weather", ""), current_location=resident["location"], conn=conn, env=env, agent=agent)
+        action = action_for_context(role, location, hour, conn=conn, env=env, agent=agent)
         steps.append(
             {
                 "time": step_time.strftime("%H:%M"),
@@ -1746,7 +1934,7 @@ def build_rule_based_plan(resident, window_start, window_end):
 def normalize_plan_step(step, window_start, index, fallback_location, fallback_goal):
     step = step if isinstance(step, dict) else {}
     action = str(step.get("action") or "observe").strip().lower()
-    if action not in {"move", "observe", "chat", "reflect"}:
+    if action not in WORLD_AUTONOMOUS_ACTIONS:
         action = "observe"
     location = str(step.get("location") or fallback_location or "校园").strip()
     if location not in VALID_LOCATIONS:
@@ -1762,7 +1950,7 @@ def normalize_plan_step(step, window_start, index, fallback_location, fallback_g
         hour = window_start.hour
     if not is_location_open_at_hour(location, hour):
         location = realistic_location_for_context("", hour, current_location=fallback_location)
-        action = "observe" if action == "move" else action
+        action = "observe" if action in {"move", "attend_class", "consume", "queue", "club_activity"} else action
     return {"time": time_text, "action": action, "location": location, "goal": goal}
 
 
@@ -1776,7 +1964,7 @@ def build_llm_action_plan(conn, resident, window_start, window_end, world_time):
 世界时间：{world_time.strftime('%Y-%m-%d %H:%M')}
 计划窗口：{window_start.strftime('%H:%M')} 到 {window_end.strftime('%H:%M')}
 可选地点：{", ".join(VALID_LOCATIONS)}
-可选动作：move, observe, chat, reflect
+可选动作：move, observe, chat, reflect, attend_class, queue, consume, rest, club_activity, conflict, collaborate, late, request_leave
 现实约束：
 - 00:00-06:00 大多数学生应在宿舍区休息或反思，只有少量异常情况会在其他开放空间观察。
 - 食堂开放 06:00-21:00，商业街 09:00-22:00，教学楼和图书馆夜间关闭，校务处 08:00-18:00。
@@ -1794,7 +1982,7 @@ Agent:
 {{
   "intent": "一句话说明这个 8 小时窗口的意图",
   "steps": [
-    {{"time": "HH:MM", "action": "move", "location": "教学楼", "goal": "具体目标"}}
+    {{"time": "HH:MM", "action": "attend_class", "location": "教学楼", "goal": "具体目标"}}
   ],
   "flexibility": 0.35
 }}
@@ -1837,7 +2025,7 @@ steps 保持 3 条以内，时间必须落在计划窗口内。
 def ensure_current_action_plans(conn, world_time):
     ensure_world_runtime_tables(conn)
     window_start, window_end = get_world_plan_window(world_time)
-    residents = conn.execute("SELECT id, name, role, goal, location FROM residents ORDER BY id").fetchall()
+    residents = conn.execute("SELECT id, name, role, personality, goal, money, location FROM residents ORDER BY id").fetchall()
     created = 0
     llm_plans = 0
     rule_based_plans = 0
@@ -1856,7 +2044,7 @@ def ensure_current_action_plans(conn, world_time):
             model_name = os.getenv("LLM_MODEL") or os.getenv("LLM_API_MODEL") or "configured-llm"
             llm_plans += 1
         else:
-            plan = build_rule_based_plan(resident, window_start, window_end)
+            plan = build_rule_based_plan(conn, resident, window_start, window_end, world_time)
             model_name = "rule-based-v1"
             rule_based_plans += 1
         conn.execute(
@@ -2758,20 +2946,57 @@ def build_runtime_perception(conn, agent, world_time, day, slot, plan, step, obs
     }
     hour = world_time.hour
     open_locations = [location for location in VALID_LOCATIONS if is_location_open_at_hour(location, hour)]
-    realistic_options = [location for location, _ in location_options_for_context(agent["role"], hour, env.get("weather"), agent["location"])]
+    realistic_options = [
+        location
+        for location, _ in location_options_for_context(
+            agent["role"], hour, env.get("weather"), agent["location"], conn=conn, env=env, agent=agent
+        )
+    ]
+    schedule_rules = active_schedule_rules(conn, agent["role"], hour, env)
+    relationships = conn.execute(
+        """
+        SELECT r.to_resident_id, residents.name, r.affinity, r.trust, r.cooperation, r.conflict, r.tension
+        FROM relationship_dynamics r
+        JOIN residents ON residents.id = r.to_resident_id
+        WHERE r.from_resident_id = ?
+        ORDER BY r.interaction_count DESC, r.trust DESC
+        LIMIT 5
+        """,
+        (agent["id"],),
+    ).fetchall()
+    profile = conn.execute("SELECT energy, time_budget, mood, skills, strategy FROM agent_profiles WHERE resident_id = ?", (agent["id"],)).fetchone()
     return {
         "world_time": world_time.isoformat(),
         "slot": slot,
         "observed": observed,
         "agent_location": agent["location"],
+        "agent_profile": {
+            "personality": agent.get("personality", ""),
+            "money": agent.get("money", 0),
+            "energy": profile["energy"] if profile else None,
+            "time_budget": profile["time_budget"] if profile else None,
+            "mood": profile["mood"] if profile else "",
+            "trait_bias": action_noise_for_agent(agent),
+        },
         "local_crowd": int(location_counts.get(agent["location"], 0)),
         "open_locations": open_locations,
         "realistic_location_options": realistic_options,
+        "available_actions": sorted(WORLD_AUTONOMOUS_ACTIONS),
+        "active_schedule_rules": [
+            {
+                "action_type": row.get("action_type"),
+                "location": row.get("location"),
+                "base_weight": row.get("base_weight"),
+                "description": row.get("description"),
+            }
+            for row in schedule_rules[:6]
+        ],
+        "relationship_context": rows_to_dicts(relationships),
         "realism_constraints": {
             "hour": hour,
             "deep_night": 0 <= hour < 6,
             "bad_weather": any(token in str(env.get("weather") or "") for token in ("雨", "雷", "雪", "大风")),
-            "note": "行动可以随机偏离计划，但需符合时间、天气、空间开放和角色身份。",
+            "note": "行动可以随机偏离计划，但需符合时间、天气、空间开放、角色身份、个体差异和关系网络。",
         },
         "environment": {
             "weather": env.get("weather"),
@@ -2779,6 +3004,10 @@ def build_runtime_perception(conn, agent, world_time, day, slot, plan, step, obs
             "time_slot": env.get("time_slot"),
             "campus_flow": env.get("campus_flow"),
             "campus_mood": env.get("campus_mood"),
+            "exam_pressure": env.get("exam_pressure"),
+            "resource_pressure": env.get("resource_pressure"),
+            "activity_heat": env.get("activity_heat"),
+            "rainfall": env.get("rainfall"),
         },
         "plan_intent": plan.get("intent", ""),
         "plan_step": step,
@@ -2789,7 +3018,7 @@ def build_runtime_perception(conn, agent, world_time, day, slot, plan, step, obs
 def normalize_runtime_decision(payload, fallback_step, fallback_location, fallback_goal):
     payload = payload if isinstance(payload, dict) else {}
     action = str(payload.get("action") or fallback_step.get("action") or "observe").strip().lower()
-    if action not in {"move", "observe", "chat", "reflect"}:
+    if action not in WORLD_AUTONOMOUS_ACTIONS:
         action = "observe"
     location = str(payload.get("location") or fallback_step.get("location") or fallback_location or "校园").strip()
     if location not in VALID_LOCATIONS:
@@ -2819,6 +3048,19 @@ def apply_realism_constraints_to_decision(conn, agent, decision, perception, wor
     role = str(agent.get("role") or "")
     notes = []
 
+    action_location_defaults = {
+        "attend_class": "教学楼",
+        "queue": "食堂",
+        "consume": "食堂" if 6 <= hour < 14 or 17 <= hour < 21 else "商业街",
+        "rest": "宿舍区",
+        "club_activity": "操场",
+        "request_leave": "校务处",
+    }
+    if action in action_location_defaults:
+        preferred = action_location_defaults[action]
+        if is_location_open_at_hour(preferred, hour):
+            destination = preferred
+
     if destination not in VALID_LOCATIONS:
         notes.append("目的地不存在，改为当前位置观察")
         destination = agent["location"] if agent["location"] in VALID_LOCATIONS else "宿舍区"
@@ -2846,6 +3088,20 @@ def apply_realism_constraints_to_decision(conn, agent, decision, perception, wor
     if action == "move" and destination == agent["location"]:
         action = "observe"
         notes.append("已在目标地点，改为现场观察")
+
+    if action == "attend_class" and destination != "教学楼":
+        action = "observe"
+        notes.append("课程活动无法在当前空间完成，改为观察学习状态")
+    if action in {"queue", "consume"} and destination not in {"食堂", "商业街"}:
+        action = "observe"
+        notes.append("消费/排队行为与当前空间不匹配，改为观察")
+    if action == "club_activity" and destination != "操场":
+        action = "chat"
+        notes.append("社团活动转为室内轻量交流")
+    if action == "request_leave" and not is_location_open_at_hour("校务处", hour):
+        action = "reflect"
+        destination = "宿舍区" if is_location_open_at_hour("宿舍区", hour) else agent["location"]
+        notes.append("校务处未开放，请假改为整理申请理由")
 
     if random.random() < (0.08 if perception.get("observed") else 0.04):
         alternate = realistic_location_for_context(role, hour, weather, current_location=agent["location"])
@@ -2904,7 +3160,7 @@ Agent:
 
 只返回 JSON，不要解释。格式：
 {{
-  "action": "move|observe|chat|reflect",
+  "action": "move|observe|chat|reflect|attend_class|queue|consume|rest|club_activity|conflict|collaborate|late|request_leave",
   "location": "只能从 {list(VALID_LOCATIONS)} 中选择",
   "goal": "本 tick 的具体目标，80 字以内",
   "reason": "为什么这样做，100 字以内",
@@ -2932,6 +3188,96 @@ Agent:
         return fallback_runtime_decision(agent, step, "自主决策失败，按原计划执行。", "rule-error-fallback-v1")
 
 
+def nearby_interaction_target(conn, agent_id, location):
+    row = conn.execute(
+        """
+        SELECT id, name FROM residents
+        WHERE id != ? AND location = ?
+        ORDER BY RANDOM()
+        LIMIT 1
+        """,
+        (agent_id, location),
+    ).fetchone()
+    if row:
+        return dict(row)
+    row = conn.execute(
+        """
+        SELECT id, name FROM residents
+        WHERE id != ?
+        ORDER BY RANDOM()
+        LIMIT 1
+        """,
+        (agent_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def apply_runtime_social_effect(conn, agent, action, location, day):
+    target = nearby_interaction_target(conn, agent["id"], location)
+    if not target:
+        return None
+    if action in {"chat", "club_activity", "collaborate"}:
+        change = evolve_relationship(conn, agent["id"], target["id"], action, f"{location}发生协作或交流", 3, 4, -1)
+        return {"target_id": target["id"], "target_name": target["name"], "effect": "positive", "relationship": change}
+    if action == "conflict":
+        change = evolve_relationship(conn, agent["id"], target["id"], "conflict", f"{location}发生轻微摩擦", -3, -2, 4)
+        add_event(conn, day, "world_agent_conflict", f"{agent['name']} 与 {target['name']} 在{location}出现轻微摩擦。")
+        return {"target_id": target["id"], "target_name": target["name"], "effect": "conflict", "relationship": change}
+    return None
+
+
+def describe_runtime_action(conn, agent, action, destination, goal, day, observed=False):
+    social_effect = None
+    importance = 2 if observed else 1
+    if action == "attend_class":
+        content = f"{agent['name']} 在{destination}参与课程活动，围绕「{goal}」记录课堂进展。"
+        event_type = "world_agent_attend_class"
+    elif action == "queue":
+        content = f"{agent['name']} 在{destination}排队等待服务，资源压力让当前节奏变慢，目标：{goal}。"
+        event_type = "world_agent_queue"
+    elif action == "consume":
+        content = f"{agent['name']} 在{destination}完成一次校园消费或服务使用，目标：{goal}。"
+        event_type = "world_agent_consume"
+    elif action == "rest":
+        content = f"{agent['name']} 在{destination}休息恢复精力，暂时放慢行动节奏，目标：{goal}。"
+        event_type = "world_agent_rest"
+    elif action == "club_activity":
+        content = f"{agent['name']} 在{destination}参加社团或课余活动，校园互动热度被轻微带动，目标：{goal}。"
+        event_type = "world_agent_club_activity"
+        social_effect = apply_runtime_social_effect(conn, agent, action, destination, day)
+    elif action == "conflict":
+        content = f"{agent['name']} 在{destination}因拥挤、资源或意见差异出现轻微冲突，目标：{goal}。"
+        event_type = "world_agent_conflict"
+        social_effect = apply_runtime_social_effect(conn, agent, action, destination, day)
+        importance = max(importance, 3)
+    elif action == "collaborate":
+        content = f"{agent['name']} 在{destination}与他人协作推进任务，目标：{goal}。"
+        event_type = "world_agent_collaborate"
+        social_effect = apply_runtime_social_effect(conn, agent, action, destination, day)
+        importance = max(importance, 2)
+    elif action == "late":
+        content = f"{agent['name']} 到达{destination}的节奏偏慢，可能错过部分安排，目标：{goal}。"
+        event_type = "world_agent_late"
+        importance = max(importance, 2)
+    elif action == "request_leave":
+        content = f"{agent['name']} 在{destination}整理或提交请假/事务申请，目标：{goal}。"
+        event_type = "world_agent_request_leave"
+    elif action == "chat":
+        content = f"{agent['name']} 在{agent['location']}围绕{destination}附近的校园状态进行轻量交流，目标：{goal}。"
+        event_type = "world_agent_chat"
+        social_effect = apply_runtime_social_effect(conn, agent, action, agent["location"], day)
+    elif action == "reflect":
+        content = f"{agent['name']} 在{agent['location']}整理当前节奏和个人状态，目标：{goal}。"
+        event_type = "world_agent_reflect"
+    else:
+        focus = destination if destination in VALID_LOCATIONS else "校园状态"
+        content = f"{agent['name']} 在{agent['location']}观察{focus}，目标：{goal}。"
+        event_type = "world_agent_observe"
+    add_event(conn, day, event_type, content)
+    add_memory_once(conn, agent["id"], day, content, importance=importance, source="world_tick")
+    return content, event_type, social_effect
+
+
 def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observed=False):
     plan = get_current_agent_plan(conn, agent["id"], world_time) or {}
     step = choose_plan_step(plan, world_time, agent["location"])
@@ -2947,21 +3293,16 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
         if action == "move" and destination in VALID_LOCATIONS and destination != agent["location"]:
             result = move_resident(conn, agent["id"], destination)
             content = result["description"]
-        elif action == "chat":
-            focus = destination if destination in VALID_LOCATIONS else agent["location"]
-            content = f"{agent['name']} 在{agent['location']}围绕{focus}附近的校园状态进行轻量交流，目标：{goal}。"
-            add_event(conn, day, "world_agent_chat", content)
-            add_memory_once(conn, agent["id"], day, content, importance=2 if observed else 1, source="world_tick")
-        elif action == "reflect":
-            content = f"{agent['name']} 在{agent['location']}整理当前节奏和个人状态，目标：{goal}。"
-            add_event(conn, day, "world_agent_reflect", content)
-            add_memory_once(conn, agent["id"], day, content, importance=2 if observed else 1, source="world_tick")
+        elif action in {"attend_class", "queue", "consume", "rest", "club_activity", "request_leave", "collaborate", "conflict", "late"} and destination in VALID_LOCATIONS and destination != agent["location"]:
+            move_resident(conn, agent["id"], destination)
+            agent = dict(agent)
+            agent["location"] = destination
+            content, _, social_effect = describe_runtime_action(conn, agent, action, destination, goal, day, observed=observed)
         else:
-            focus = destination if destination in VALID_LOCATIONS else "校园状态"
-            content = f"{agent['name']} 在{agent['location']}观察{focus}，目标：{goal}。"
-            add_event(conn, day, "world_agent_observe", content)
-            add_memory_once(conn, agent["id"], day, content, importance=2 if observed else 1, source="world_tick")
+            content, _, social_effect = describe_runtime_action(conn, agent, action, destination, goal, day, observed=observed)
         execution = {"action": action, "result": {"description": content}, "success": True, "plan_step": step, "runtime_decision": decision}
+        if "social_effect" in locals() and social_effect:
+            execution["social_effect"] = social_effect
         record_simulation_log(conn, agent["id"], perception, {"decision": {"action": action, "reason": decision.get("reason") or goal, "tool_input": {"destination": destination}}, "memory_context": {"memories": []}}, execution, {})
         conn.execute(
             """
@@ -2979,7 +3320,15 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
             tick_id=tick_id,
             resident_id=agent["id"],
             location=destination if destination in VALID_LOCATIONS else agent["location"],
-            payload={"action": action, "goal": goal, "observed": observed, "plan_step": step, "runtime_decision": decision},
+            payload={
+                "action": action,
+                "goal": goal,
+                "observed": observed,
+                "plan_step": step,
+                "runtime_decision": decision,
+                "social_effect": execution.get("social_effect"),
+                "action_taxonomy": "world-runtime-v3",
+            },
             day=day,
             slot=slot,
         )
@@ -3186,7 +3535,7 @@ def maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=None, 
 
 
 def select_world_tick_agents(conn, runtime):
-    agents = [dict(row) for row in conn.execute("SELECT id, name, role, goal, location FROM residents ORDER BY id").fetchall()]
+    agents = [dict(row) for row in conn.execute("SELECT id, name, role, personality, goal, money, location FROM residents ORDER BY id").fetchall()]
     if not agents:
         return [], int(runtime.get("current_agent_cursor", 0) or 0), set()
     focused_agent_ids, _ = get_recent_observer_focus(conn)
@@ -3202,6 +3551,74 @@ def select_world_tick_agents(conn, runtime):
             selected.append(candidate)
         next_cursor += 1
     return selected[:per_tick], next_cursor % len(agents), focused_set
+
+
+def maybe_generate_group_behavior_event(conn, world_time, tick_id, day, slot):
+    ensure_world_runtime_tables(conn)
+    latest = conn.execute(
+        """
+        SELECT created_at FROM world_event_stream
+        WHERE event_type IN ('group_diffusion', 'crowd_transmission', 'organization_mobilization')
+        ORDER BY id DESC LIMIT 1
+        """
+    ).fetchone()
+    latest_at = parse_world_datetime(latest["created_at"]) if latest else None
+    if latest_at and (world_time - latest_at).total_seconds() < 1800:
+        return {"skipped": True, "reason": "interval_not_elapsed"}
+
+    env = dict(get_campus_environment(conn, day))
+    counts = {
+        row["location"]: int(row["count"])
+        for row in conn.execute("SELECT location, COUNT(*) AS count FROM residents GROUP BY location").fetchall()
+    }
+    hot_location, hot_count = max(counts.items(), key=lambda item: item[1]) if counts else ("校园", 0)
+    campus_flow = int(env.get("campus_flow") or 0)
+    activity_heat = int(env.get("activity_heat") or 0)
+    event = None
+    if hot_count >= 4 and campus_flow >= 65:
+        event = append_world_event(
+            conn,
+            "crowd_transmission",
+            "空间拥堵正在传导",
+            f"{hot_location} 聚集了 {hot_count} 位 Agent，拥挤感开始影响周边行动选择。",
+            tick_id=tick_id,
+            location=hot_location,
+            payload={"location": hot_location, "agent_count": hot_count, "campus_flow": campus_flow},
+            day=day,
+            slot=slot,
+        )
+    elif activity_heat >= 70 and random.random() < 0.35:
+        event = append_world_event(
+            conn,
+            "organization_mobilization",
+            "组织活动正在动员",
+            "校园活动热度较高，部分社团和组织开始吸引周边 Agent 关注。",
+            tick_id=tick_id,
+            payload={"activity_heat": activity_heat, "mechanism": "activity_heat_threshold"},
+            day=day,
+            slot=slot,
+        )
+    else:
+        recent_info = conn.execute(
+            """
+            SELECT title, category FROM external_information
+            ORDER BY id DESC LIMIT 1
+            """
+        ).fetchone()
+        if recent_info and random.random() < 0.25:
+            event = append_world_event(
+                conn,
+                "group_diffusion",
+                "外部信息沿关系扩散",
+                f"关于「{recent_info['title']}」的讨论开始在少数相关 Agent 之间扩散。",
+                tick_id=tick_id,
+                payload={"information_title": recent_info["title"], "category": recent_info["category"], "mechanism": "relationship_and_place_diffusion"},
+                day=day,
+                slot=slot,
+            )
+    if not event:
+        return {"skipped": True, "reason": "no_group_trigger"}
+    return {"skipped": False, "event_id": event["id"], "event_type": event["event_type"]}
 
 
 def sync_world_time_environment(conn, world_time):
@@ -3368,6 +3785,7 @@ def advance_world_tick(reason="background"):
                 day=day,
                 slot=slot,
             )
+            group_behavior = maybe_generate_group_behavior_event(conn, world_time, tick_id, day, slot)
             campus_news = maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=tick_id, day=day)
             conn.commit()
             return {
@@ -3380,6 +3798,7 @@ def advance_world_tick(reason="background"):
                 "processed_agents": len(results),
                 "failed_agents": failed,
                 "events": [start_event, finish_event],
+                "group_behavior": group_behavior,
                 "campus_news": campus_news,
                 "results": results,
             }
@@ -3628,6 +4047,96 @@ def get_world_events(after_id: int = 0, limit: int = 50):
             "events": events,
             "next_after_id": events[-1]["id"] if events else after_id,
         }
+
+
+def current_metric_value(conn, metric_name, location=""):
+    day = get_current_day(conn)
+    env = dict(get_campus_environment(conn, day))
+    if metric_name in env:
+        return float(env.get(metric_name) or 0)
+    if metric_name == "agent_count" and location:
+        row = conn.execute("SELECT COUNT(*) AS value FROM residents WHERE location = ?", (location,)).fetchone()
+        return float(row["value"] if row else 0)
+    if metric_name == "action_count":
+        row = conn.execute("SELECT COUNT(*) AS value FROM simulation_action_logs WHERE day = ?", (day,)).fetchone()
+        return float(row["value"] if row else 0)
+    return None
+
+
+@app.post("/api/research/calibration-observations")
+def create_calibration_observation(payload: CalibrationObservationRequest):
+    with get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        if payload.location and payload.location not in VALID_LOCATIONS:
+            raise HTTPException(status_code=400, detail="校准观测地点不存在")
+        cursor = conn.execute(
+            """
+            INSERT INTO calibration_observations
+            (source_name, observed_at, metric_name, metric_value, location, role_group, sample_size, metadata_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload.source_name,
+                payload.observed_at or get_world_now().isoformat(),
+                payload.metric_name,
+                payload.metric_value,
+                payload.location,
+                payload.role_group,
+                payload.sample_size,
+                json.dumps(payload.metadata, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM calibration_observations WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        return {"observation": dict(row)}
+
+
+@app.get("/api/research/calibration-report")
+def get_calibration_report():
+    with get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        rows = conn.execute(
+            """
+            SELECT * FROM calibration_observations
+            ORDER BY id DESC
+            LIMIT 100
+            """
+        ).fetchall()
+        comparisons = []
+        for row in rows:
+            simulated = current_metric_value(conn, row["metric_name"], row["location"])
+            if simulated is None:
+                continue
+            observed = float(row["metric_value"])
+            delta = simulated - observed
+            comparisons.append(
+                {
+                    "metric_name": row["metric_name"],
+                    "location": row["location"],
+                    "observed": observed,
+                    "simulated": simulated,
+                    "delta": delta,
+                    "relative_error": round(abs(delta) / max(1.0, abs(observed)), 3),
+                }
+            )
+        mean_error = round(sum(item["relative_error"] for item in comparisons) / len(comparisons), 3) if comparisons else None
+        summary = "暂无可比较校准观测。" if mean_error is None else f"最近 {len(comparisons)} 条可比较观测的平均相对误差为 {mean_error}。"
+        report_key = f"calibration-{get_world_now().strftime('%Y%m%d%H%M%S')}"
+        cursor = conn.execute(
+            """
+            INSERT INTO calibration_reports
+            (report_key, summary, parameter_updates, quality_report_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                report_key,
+                summary,
+                json.dumps({}, ensure_ascii=False),
+                json.dumps({"mean_relative_error": mean_error, "comparisons": comparisons[:40]}, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+        return {"report_id": cursor.lastrowid, "summary": summary, "mean_relative_error": mean_error, "comparisons": comparisons}
 
 
 @app.post("/api/world/observer-sessions")

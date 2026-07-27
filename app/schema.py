@@ -446,6 +446,64 @@ CREATE TABLE IF NOT EXISTS model_call_logs (
     FOREIGN KEY (related_event_id) REFERENCES world_event_stream(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS campus_schedule_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_key TEXT NOT NULL UNIQUE,
+    role_group TEXT NOT NULL DEFAULT 'all',
+    action_type TEXT NOT NULL,
+    location TEXT NOT NULL DEFAULT '',
+    start_hour INTEGER NOT NULL DEFAULT 0,
+    end_hour INTEGER NOT NULL DEFAULT 24,
+    weekday_pattern TEXT NOT NULL DEFAULT 'all',
+    min_exam_pressure INTEGER NOT NULL DEFAULT 0,
+    max_exam_pressure INTEGER NOT NULL DEFAULT 100,
+    base_weight REAL NOT NULL DEFAULT 1.0,
+    noise REAL NOT NULL DEFAULT 0.15,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS world_causal_weights (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    weight_key TEXT NOT NULL UNIQUE,
+    source_metric TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_key TEXT NOT NULL,
+    direction REAL NOT NULL DEFAULT 1.0,
+    strength REAL NOT NULL DEFAULT 1.0,
+    threshold REAL NOT NULL DEFAULT 0.0,
+    noise REAL NOT NULL DEFAULT 0.1,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS calibration_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL DEFAULT '',
+    observed_at TEXT NOT NULL DEFAULT '',
+    metric_name TEXT NOT NULL,
+    metric_value REAL NOT NULL,
+    location TEXT NOT NULL DEFAULT '',
+    role_group TEXT NOT NULL DEFAULT '',
+    sample_size INTEGER NOT NULL DEFAULT 0,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS calibration_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_key TEXT NOT NULL UNIQUE,
+    run_id TEXT NOT NULL DEFAULT '',
+    generated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    summary TEXT NOT NULL DEFAULT '',
+    parameter_updates TEXT NOT NULL DEFAULT '{}',
+    quality_report_json TEXT NOT NULL DEFAULT '{}'
+);
+
 CREATE INDEX IF NOT EXISTS idx_world_ticks_started_at ON world_ticks(started_at);
 CREATE INDEX IF NOT EXISTS idx_world_event_stream_created_at ON world_event_stream(created_at);
 CREATE INDEX IF NOT EXISTS idx_world_event_stream_event_type ON world_event_stream(event_type);
@@ -454,6 +512,10 @@ CREATE INDEX IF NOT EXISTS idx_world_event_stream_tick_id ON world_event_stream(
 CREATE INDEX IF NOT EXISTS idx_agent_action_plans_window ON agent_action_plans(window_start, window_end);
 CREATE INDEX IF NOT EXISTS idx_observer_sessions_last_seen ON observer_sessions(last_seen_at);
 CREATE INDEX IF NOT EXISTS idx_model_call_logs_trigger_date ON model_call_logs(trigger_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_campus_schedule_rules_context ON campus_schedule_rules(role_group, action_type, start_hour, end_hour);
+CREATE INDEX IF NOT EXISTS idx_world_causal_weights_source ON world_causal_weights(source_metric, target_type);
+CREATE INDEX IF NOT EXISTS idx_calibration_observations_metric ON calibration_observations(metric_name, observed_at);
+CREATE INDEX IF NOT EXISTS idx_calibration_reports_run_id ON calibration_reports(run_id);
 """
 
 RESEARCH_SYSTEM_SQL = """

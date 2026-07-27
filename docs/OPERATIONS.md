@@ -88,6 +88,18 @@ v1 的 8 小时行动计划优先使用 `llm-planner-v1`，写入 `agent_action_
 
 校园新闻由 world tick 在每个已完成的 8 小时窗口后自动尝试发布一次。系统从上一窗口的 `agent_tick` 事件里抽取当天还没有发布过校园新闻的 Agent，最多生成 3 条 `campus-news-window-v1` 快讯，写入 `agent_news_posts`，并在 `world_event_stream` 写入 `campus_news_published`。如果窗口内没有新素材或预算耗尽，会写入 `campus_news_skipped`，世界运行继续。
 
+v3 真实感规则由 `campus_schedule_rules` 和 `world_causal_weights` 驱动。前者定义角色、动作、地点、时间段和随机噪声，例如上课、用餐、排队、夜间休息、社团活动；后者定义天气、考试压力、活动热度、资源压力和人流如何影响地点/动作权重。自主循环支持 `attend_class`、`queue`、`consume`、`rest`、`club_activity`、`conflict`、`collaborate`、`late`、`request_leave` 等动作。
+
+研究校准可以先手动录入观测值，再生成偏差报告：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/research/calibration-observations \
+  -H "Content-Type: application/json" \
+  -d '{"metric_name":"library_crowd","metric_value":72,"source_name":"survey","location":"图书馆","sample_size":30}'
+
+curl http://127.0.0.1:8000/api/research/calibration-report
+```
+
 观察者聚焦 Agent 时可能触发 `observer_model_detail`，但同一个 Agent 默认 5 分钟内最多触发一次观察者模型细节，避免单个观察者持续停留导致模型调用过密。前端会在 HUD、事件流和 Agent 气泡中标记“观察者触发”。
 
 高频 world tick 会继续写 `simulation_action_logs` 作为完整审计记录，但普通 `world_tick` 观察记忆会按同一 Agent、同一天、同一内容去重写入，避免个人经历被重复观察刷屏。
