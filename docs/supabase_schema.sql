@@ -307,7 +307,7 @@ create table if not exists world_runtime (
     world_time text not null default '',
     tick_interval_seconds integer not null default 60,
     agents_per_tick integer not null default 3,
-    daily_auto_model_budget integer not null default 100,
+    daily_auto_model_budget integer not null default 500,
     auto_model_calls_used integer not null default 0,
     budget_date text not null default '',
     current_agent_cursor integer not null default 0,

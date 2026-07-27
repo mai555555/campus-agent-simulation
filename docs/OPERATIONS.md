@@ -82,9 +82,11 @@ localStorage.setItem("ADMIN_TOKEN", "你的_ADMIN_TOKEN")
 
 刷新页面后会显示启动、暂停、推进 tick 和旧“模拟一天”调试入口。
 
-v1 的 8 小时行动计划优先使用 `llm-planner-v1`，写入 `agent_action_plans`，每次自动模型调用都会进入 `model_call_logs` 并消耗 `daily_auto_model_budget`。预算耗尽或模型失败时会自动降级为 `rule-based-v1`，世界运行不会被阻塞。
+v1 的 8 小时行动计划优先使用 `llm-planner-v1`，写入 `agent_action_plans`，每次自动模型调用都会进入 `model_call_logs` 并消耗 `daily_auto_model_budget`。v2 默认每日自动预算为 500 次；预算耗尽或模型失败时会自动降级为规则计划、规则等待或规则观察，世界运行不会被阻塞。`model_call_logs` 只记录真实成功、失败或预算耗尽结果，不把预算预占记作一次模型调用。
 
 真实天气和外部世界资讯由 world tick 每小时自动同步一次。天气会更新 `campus_state` 并写入 `real_weather_auto_sync` / `real_weather_auto_sync_failed` 事件；资讯会写入 `external_information`、`agent_information` 和 `external_information_auto_sync` / `external_information_auto_sync_failed` 事件。前端不再提供手动同步按钮。
+
+校园新闻由 world tick 在每个已完成的 8 小时窗口后自动尝试发布一次。系统从上一窗口的 `agent_tick` 事件里抽取当天还没有发布过校园新闻的 Agent，最多生成 3 条 `campus-news-window-v1` 快讯，写入 `agent_news_posts`，并在 `world_event_stream` 写入 `campus_news_published`。如果窗口内没有新素材或预算耗尽，会写入 `campus_news_skipped`，世界运行继续。
 
 观察者聚焦 Agent 时可能触发 `observer_model_detail`，但同一个 Agent 默认 5 分钟内最多触发一次观察者模型细节，避免单个观察者持续停留导致模型调用过密。前端会在 HUD、事件流和 Agent 气泡中标记“观察者触发”。
 
