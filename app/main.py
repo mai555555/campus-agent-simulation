@@ -93,6 +93,29 @@ DEFAULT_CAUSAL_WEIGHTS = [
     ("study_mood_increases_collaboration", "study_atmosphere", "action", "collaborate", 1.0, 0.28, 65, 0.14, "学习氛围提升协作概率"),
 ]
 
+DEFAULT_AGENT_PERSONALITY_TRAITS = {
+    1: {"extraversion": 82, "conscientiousness": 58, "emotional_stability": 64, "risk_tolerance": 62, "rule_orientation": 45, "social_need": 88, "competitiveness": 36, "empathy": 72, "autonomy": 60, "stress_sensitivity": 48},
+    2: {"extraversion": 42, "conscientiousness": 88, "emotional_stability": 76, "risk_tolerance": 34, "rule_orientation": 82, "social_need": 38, "competitiveness": 66, "empathy": 54, "autonomy": 74, "stress_sensitivity": 42},
+    3: {"extraversion": 46, "conscientiousness": 74, "emotional_stability": 38, "risk_tolerance": 48, "rule_orientation": 62, "social_need": 45, "competitiveness": 68, "empathy": 50, "autonomy": 70, "stress_sensitivity": 82},
+    4: {"extraversion": 72, "conscientiousness": 86, "emotional_stability": 68, "risk_tolerance": 46, "rule_orientation": 78, "social_need": 76, "competitiveness": 52, "empathy": 82, "autonomy": 72, "stress_sensitivity": 58},
+    5: {"extraversion": 58, "conscientiousness": 78, "emotional_stability": 72, "risk_tolerance": 44, "rule_orientation": 64, "social_need": 52, "competitiveness": 62, "empathy": 48, "autonomy": 76, "stress_sensitivity": 42},
+    6: {"extraversion": 84, "conscientiousness": 62, "emotional_stability": 70, "risk_tolerance": 68, "rule_orientation": 48, "social_need": 82, "competitiveness": 64, "empathy": 66, "autonomy": 78, "stress_sensitivity": 36},
+    7: {"extraversion": 52, "conscientiousness": 84, "emotional_stability": 82, "risk_tolerance": 32, "rule_orientation": 86, "social_need": 54, "competitiveness": 30, "empathy": 86, "autonomy": 62, "stress_sensitivity": 34},
+    8: {"extraversion": 26, "conscientiousness": 82, "emotional_stability": 78, "risk_tolerance": 24, "rule_orientation": 92, "social_need": 28, "competitiveness": 26, "empathy": 54, "autonomy": 66, "stress_sensitivity": 32},
+    9: {"extraversion": 86, "conscientiousness": 66, "emotional_stability": 74, "risk_tolerance": 70, "rule_orientation": 50, "social_need": 84, "competitiveness": 74, "empathy": 62, "autonomy": 72, "stress_sensitivity": 34},
+    10: {"extraversion": 44, "conscientiousness": 88, "emotional_stability": 80, "risk_tolerance": 30, "rule_orientation": 90, "social_need": 46, "competitiveness": 34, "empathy": 68, "autonomy": 58, "stress_sensitivity": 36},
+    11: {"extraversion": 30, "conscientiousness": 76, "emotional_stability": 62, "risk_tolerance": 30, "rule_orientation": 68, "social_need": 34, "competitiveness": 28, "empathy": 76, "autonomy": 58, "stress_sensitivity": 58},
+    12: {"extraversion": 90, "conscientiousness": 36, "emotional_stability": 66, "risk_tolerance": 66, "rule_orientation": 34, "social_need": 92, "competitiveness": 42, "empathy": 62, "autonomy": 56, "stress_sensitivity": 40},
+    13: {"extraversion": 36, "conscientiousness": 90, "emotional_stability": 72, "risk_tolerance": 28, "rule_orientation": 84, "social_need": 34, "competitiveness": 58, "empathy": 52, "autonomy": 84, "stress_sensitivity": 44},
+    14: {"extraversion": 22, "conscientiousness": 72, "emotional_stability": 58, "risk_tolerance": 46, "rule_orientation": 52, "social_need": 24, "competitiveness": 40, "empathy": 48, "autonomy": 86, "stress_sensitivity": 56},
+    15: {"extraversion": 84, "conscientiousness": 60, "emotional_stability": 68, "risk_tolerance": 64, "rule_orientation": 42, "social_need": 80, "competitiveness": 58, "empathy": 70, "autonomy": 76, "stress_sensitivity": 42},
+    16: {"extraversion": 34, "conscientiousness": 92, "emotional_stability": 42, "risk_tolerance": 30, "rule_orientation": 86, "social_need": 30, "competitiveness": 88, "empathy": 42, "autonomy": 78, "stress_sensitivity": 78},
+    17: {"extraversion": 54, "conscientiousness": 86, "emotional_stability": 76, "risk_tolerance": 38, "rule_orientation": 74, "social_need": 58, "competitiveness": 42, "empathy": 84, "autonomy": 72, "stress_sensitivity": 40},
+    18: {"extraversion": 18, "conscientiousness": 82, "emotional_stability": 46, "risk_tolerance": 26, "rule_orientation": 70, "social_need": 20, "competitiveness": 46, "empathy": 44, "autonomy": 88, "stress_sensitivity": 74},
+    19: {"extraversion": 48, "conscientiousness": 70, "emotional_stability": 40, "risk_tolerance": 24, "rule_orientation": 62, "social_need": 62, "competitiveness": 20, "empathy": 94, "autonomy": 54, "stress_sensitivity": 86},
+    20: {"extraversion": 78, "conscientiousness": 54, "emotional_stability": 68, "risk_tolerance": 88, "rule_orientation": 32, "social_need": 70, "competitiveness": 78, "empathy": 50, "autonomy": 90, "stress_sensitivity": 34},
+}
+
 from app.schema import (
     CAMPUS_STATE_SQL, SPACE_SYSTEM_SQL, DEFAULT_SPACES, DEFAULT_ENV, ENV_COLUMN_TYPES,
     AGENT_NEWS_SQL, EXTERNAL_INFORMATION_SQL, AGENT_PROFILE_SQL, PROFILE_COLUMN_TYPES,
@@ -488,6 +511,8 @@ def get_agent_module_state(conn, resident_id):
                 "description": "我想干什么",
                 "goal": resident["goal"],
                 "personality": resident["personality"],
+                "personality_traits": strategy.get("personality_traits", {}),
+                "personality_version": strategy.get("personality_version", ""),
                 "task": profile_data.get("current_task", "适应校园生活"),
             },
             "Social": {
@@ -1459,6 +1484,7 @@ def ensure_world_runtime_tables(conn):
             """,
             (WORLD_RUNTIME_ID,),
         )
+        seed_agent_personality_traits(conn)
         WORLD_SCHEMA_READY = True
 
 
@@ -1481,6 +1507,34 @@ def seed_world_runtime_rules(conn):
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             weight,
+        )
+
+
+def seed_agent_personality_traits(conn):
+    try:
+        rows = conn.execute("SELECT resident_id, strategy FROM agent_profiles").fetchall()
+    except Exception:
+        return
+    for row in rows:
+        resident_id = int(row["resident_id"])
+        traits = DEFAULT_AGENT_PERSONALITY_TRAITS.get(resident_id)
+        if not traits:
+            continue
+        strategy = load_json_text(row["strategy"], {})
+        if not isinstance(strategy, dict):
+            strategy = {}
+        existing = strategy.get("personality_traits")
+        if isinstance(existing, dict) and all(key in existing for key in traits):
+            continue
+        strategy["personality_traits"] = {**traits, **(existing if isinstance(existing, dict) else {})}
+        strategy["personality_version"] = "structured-v1"
+        conn.execute(
+            """
+            UPDATE agent_profiles
+            SET strategy = ?
+            WHERE resident_id = ?
+            """,
+            (json.dumps(strategy, ensure_ascii=False), resident_id),
         )
 
 
@@ -1734,8 +1788,24 @@ def causal_multiplier_for_target(conn, env, target_type, target_key):
 
 
 def action_noise_for_agent(agent):
+    strategy = load_json_text(agent.get("strategy"), {}) if isinstance(agent, dict) else {}
+    traits = strategy.get("personality_traits") if isinstance(strategy, dict) else None
+    if isinstance(traits, dict):
+        def score(name, default=50):
+            try:
+                return float(traits.get(name, default))
+            except (TypeError, ValueError):
+                return float(default)
+        return {
+            "social": max(0.35, 0.5 + score("extraversion") / 100 * 0.65 + score("social_need") / 100 * 0.45 + score("empathy") / 100 * 0.20),
+            "study": max(0.35, 0.55 + score("conscientiousness") / 100 * 0.75 + score("rule_orientation") / 100 * 0.25),
+            "routine": max(0.35, 0.55 + score("rule_orientation") / 100 * 0.55 + score("conscientiousness") / 100 * 0.25),
+            "risk": max(0.2, 0.45 + score("risk_tolerance") / 100 * 0.75 + score("competitiveness") / 100 * 0.25 - score("rule_orientation") / 100 * 0.20),
+            "service": max(0.35, 0.55 + score("empathy") / 100 * 0.45 + score("conscientiousness") / 100 * 0.30),
+            "stress": max(0.2, 0.4 + score("stress_sensitivity") / 100 * 0.9 - score("emotional_stability") / 100 * 0.35),
+        }
     text = " ".join(str(agent.get(key, "")) for key in ("personality", "goal", "role"))
-    bias = {"social": 1.0, "study": 1.0, "routine": 1.0, "risk": 1.0, "service": 1.0}
+    bias = {"social": 1.0, "study": 1.0, "routine": 1.0, "risk": 1.0, "service": 1.0, "stress": 1.0}
     if any(token in text for token in ("外向", "社交", "朋友", "活动", "社团")):
         bias["social"] += 0.35
     if any(token in text for token in ("认真", "学习", "成绩", "科研", "论文", "自律")):
@@ -2025,7 +2095,14 @@ steps 保持 3 条以内，时间必须落在计划窗口内。
 def ensure_current_action_plans(conn, world_time):
     ensure_world_runtime_tables(conn)
     window_start, window_end = get_world_plan_window(world_time)
-    residents = conn.execute("SELECT id, name, role, personality, goal, money, location FROM residents ORDER BY id").fetchall()
+    residents = conn.execute(
+        """
+        SELECT r.id, r.name, r.role, r.personality, r.goal, r.money, r.location, p.strategy
+        FROM residents r
+        LEFT JOIN agent_profiles p ON p.resident_id = r.id
+        ORDER BY r.id
+        """
+    ).fetchall()
     created = 0
     llm_plans = 0
     rule_based_plans = 0
@@ -3535,7 +3612,17 @@ def maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=None, 
 
 
 def select_world_tick_agents(conn, runtime):
-    agents = [dict(row) for row in conn.execute("SELECT id, name, role, personality, goal, money, location FROM residents ORDER BY id").fetchall()]
+    agents = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT r.id, r.name, r.role, r.personality, r.goal, r.money, r.location, p.strategy
+            FROM residents r
+            LEFT JOIN agent_profiles p ON p.resident_id = r.id
+            ORDER BY r.id
+            """
+        ).fetchall()
+    ]
     if not agents:
         return [], int(runtime.get("current_agent_cursor", 0) or 0), set()
     focused_agent_ids, _ = get_recent_observer_focus(conn)
