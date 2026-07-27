@@ -28,6 +28,7 @@ from tools.city_tools import (
     VALID_LOCATIONS,
     add_event,
     add_memory,
+    add_memory_once,
     buy_sell,
     chat_between,
     ensure_memory_columns,
@@ -2531,7 +2532,7 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
             focus = destination if destination in VALID_LOCATIONS else "校园状态"
             content = f"{agent['name']} 在{agent['location']}观察{focus}，目标：{goal}。"
             add_event(conn, day, "world_agent_observe", content)
-            add_memory(conn, agent["id"], day, content, importance=2 if observed else 1, source="world_tick")
+            add_memory_once(conn, agent["id"], day, content, importance=2 if observed else 1, source="world_tick")
         perception = {"world_time": world_time.isoformat(), "slot": slot, "observed": observed, "plan_step": step}
         execution = {"action": action, "result": {"description": content}, "success": True, "plan_step": step}
         record_simulation_log(conn, agent["id"], perception, {"decision": {"action": action, "reason": goal, "tool_input": {"destination": destination}}, "memory_context": {"memories": []}}, execution, {})

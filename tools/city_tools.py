@@ -88,6 +88,29 @@ def add_memory(conn, resident_id, day, content, importance=1, memory_type=None, 
     )
 
 
+def add_memory_once(conn, resident_id, day, content, importance=1, memory_type=None, tags=None, source=None):
+    ensure_memory_columns(conn)
+    memory_type, tags, source = infer_memory_metadata(content, memory_type, tags, source)
+    existing = conn.execute(
+        """
+        SELECT id FROM memories
+        WHERE resident_id = ? AND day = ? AND content = ? AND source = ?
+        LIMIT 1
+        """,
+        (resident_id, day, content, source),
+    ).fetchone()
+    if existing:
+        return False
+    conn.execute(
+        """
+        INSERT INTO memories (resident_id, day, content, importance, memory_type, tags, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (resident_id, day, content, importance, memory_type, tags, source),
+    )
+    return True
+
+
 def change_relationship(conn, from_id, to_id, delta, note):
     conn.execute(
         """
