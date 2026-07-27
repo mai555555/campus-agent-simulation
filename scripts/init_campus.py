@@ -7,6 +7,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.db import execute_script, get_connection
 from app.models import SCHEMA_SQL
+from app.main import DEFAULT_AGENT_PERSONALITY_TRAITS
 from tools.city_tools import add_event, add_inventory
 
 CAMPUS_STATE_SQL = """
@@ -171,8 +172,8 @@ def main():
                 """
                 INSERT INTO agent_profiles (
                     resident_id, gender, avatar_style, avatar_image, energy, mood,
-                    current_task, schedule, perception
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    current_task, schedule, perception, strategy
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     resident_id,
@@ -184,6 +185,13 @@ def main():
                     current_task,
                     json.dumps(schedule, ensure_ascii=False),
                     json.dumps(perception, ensure_ascii=False),
+                    json.dumps(
+                        {
+                            "personality_traits": DEFAULT_AGENT_PERSONALITY_TRAITS.get(resident_id, {}),
+                            "personality_version": "structured-v1",
+                        },
+                        ensure_ascii=False,
+                    ),
                 ),
             )
 
@@ -216,5 +224,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
