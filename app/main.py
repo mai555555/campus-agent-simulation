@@ -1564,7 +1564,6 @@ def consume_auto_model_budget(conn, trigger_type, resident_id=None):
         """,
         (WORLD_RUNTIME_ID,),
     )
-    log_model_call(conn, trigger_type, status="reserved", resident_id=resident_id)
     return True
 
 
