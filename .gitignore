@@ -22,6 +22,7 @@ data/
 *.sqlite3
 data/*.db
 data/*.sqlite*
+exports/research/
 
 # IDE and OS
 .idea/
@@ -32,4 +33,3 @@ Thumbs.db
 # Backups
 backup_*/
 backup_campus_*/
-

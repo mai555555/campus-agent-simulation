@@ -14,7 +14,8 @@ POSTGRES_ID_TABLES = {
     "city_events", "collaborations", "competitions", "external_information",
     "group_goals", "inventory", "long_term_goals", "memories", "model_call_logs",
     "observer_sessions", "participant_actions", "policies", "residents",
-    "simulation_action_logs", "transactions", "world_event_stream", "world_ticks",
+    "research_export_jobs", "simulation_action_logs", "transactions",
+    "world_event_stream", "world_snapshots", "world_ticks", "experiment_runs",
 }
 
 

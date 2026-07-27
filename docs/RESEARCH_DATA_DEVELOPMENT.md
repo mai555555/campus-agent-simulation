@@ -343,37 +343,55 @@ format=csv
 
 CSV 用于社会科学常用工具，JSON 用于保留 `payload`、决策日志、记忆内容等嵌套字段。
 
-## 导出脚本建议
+## 研究数据导出脚本
 
-如果暂时不做 API，可以先放脚本：
+当前 v1 已提供脚本：
 
 ```text
 scripts/export_research_dataset.py
 ```
 
-建议输出目录：
+示例：
 
-```text
-exports/research/YYYY-MM-DD-HHMM/
+```bash
+python scripts/export_research_dataset.py --format both --run-id pilot-001
+python scripts/export_research_dataset.py --from-day 20 --to-day 30 --format csv
 ```
 
-建议文件：
+默认输出目录：
 
 ```text
-agents.csv
-agent_days.csv
-agent_ticks.csv
-relationships.csv
-relationship_dynamics.csv
-spaces.csv
-space_time.csv
-events.csv
-observer_sessions.csv
-model_call_logs.csv
-metadata.json
+exports/research/<run_id>/
 ```
 
-`metadata.json` 必须包含：
+v1 会输出：
+
+```text
+agents
+agent_profiles
+memories
+simulation_actions
+relationships
+relationship_dynamics
+campus_state
+campus_spaces
+world_ticks
+events
+observer_records
+model_calls
+action_plans
+participant_actions
+experiment_runs
+world_snapshots
+agent_day
+space_time
+experiment_metadata.json
+data_quality_report.json
+```
+
+其中 `agent_day` 和 `space_time` 是派生研究数据集；其余文件主要来自运行时原始表。`--format both` 会同时输出 `.csv` 和 `.json`，CSV 用于常见社会科学统计工具，JSON 用于保留嵌套 payload。
+
+`experiment_metadata.json` 应持续补充：
 
 - git commit
 - 导出时间
@@ -384,23 +402,7 @@ metadata.json
 - 实验批次和 run_id
 - 数据质量检查结果摘要
 
-`scripts/export_research_dataset.py` 不应只是简单 dump 表，而应成为研究数据产品层。建议按照实验批次导出：
-
-```text
-experiment_metadata.json
-agent_tick.csv
-agent_day.csv
-relationships.csv
-relationship_daily.csv
-space_time.csv
-events.csv
-interventions.csv
-observer_records.csv
-model_calls.csv
-data_quality_report.json
-```
-
-第一版可以先从现有表派生，不强制数据库已经有 `run_id`。但导出结果中必须在 metadata 里明确说明数据范围、当前世界状态和是否缺少实验批次标识。
+第一版可以先从现有表派生，不强制数据库已经有 `run_id`。但导出结果会在 metadata 和质量报告里明确说明数据范围、当前世界状态和是否缺少实验批次标识。
 
 ## 派生研究数据集
 
@@ -623,12 +625,12 @@ data_quality_report.json
 
 ### v1
 
-- 更新研究数据文档，明确运行系统、实验系统、研究数据系统三层边界。
-- 设计 `experiment_runs` 和 `world_snapshots` schema。
-- 补研究导出脚本 `scripts/export_research_dataset.py`。
-- 固化 Agent-Day、Agent-Tick、Relationship Edge、Space-Time、Event Stream 五类数据集。
-- 输出 `metadata.json` 和 `data_quality_report.json`。
-- 在 README 或运营文档中说明如何导出。
+- 已更新研究数据文档，明确运行系统、实验系统、研究数据系统三层边界。
+- 已增加 `experiment_runs`、`world_snapshots`、`research_export_jobs` schema。
+- 已补研究导出脚本 `scripts/export_research_dataset.py`。
+- 已输出 Agent-Day、Space-Time、Event Stream、Relationship、Model Call 等 v1 数据集。
+- 已输出 `experiment_metadata.json` 和 `data_quality_report.json`。
+- 已在 Supabase schema 文档中补充研究数据表。
 
 ### v2
 
@@ -637,6 +639,7 @@ data_quality_report.json
 - 增加研究场景配置表，例如实验组、干预组、运行窗口。
 - 将关键运行表逐步关联 `run_id`。
 - 支持实验开始、干预前后、每日 checkpoint 的世界快照。
+- 完善 Agent-Tick、Relationship Daily、Observer Attention、Intervention Response、Model Decision 的派生口径。
 
 ### v3
 
