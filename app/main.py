@@ -3291,6 +3291,41 @@ def get_relevant_agent_memories(resident_id: int, query: str = ""):
             "memories": retrieve_relevant_memories(conn, resident_id, query_terms=terms),
         }
 
+
+@app.get("/api/agents/{resident_id}/memories")
+def get_agent_memories(resident_id: int, limit: int = 20, offset: int = 0):
+    with get_connection() as conn:
+        if not get_resident(conn, resident_id):
+            raise HTTPException(status_code=404, detail="Agent 不存在")
+        ensure_memory_columns(conn)
+        current_day = get_current_day(conn)
+        page_limit = min(max(limit, 1), 100)
+        page_offset = max(offset, 0)
+        total = conn.execute(
+            "SELECT COUNT(*) AS total FROM memories WHERE resident_id = ? AND day <= ?",
+            (resident_id, current_day),
+        ).fetchone()["total"]
+        rows = conn.execute(
+            """
+            SELECT id, day, content, importance, memory_type, tags, source,
+                   access_count, last_accessed_at, created_at
+            FROM memories
+            WHERE resident_id = ? AND day <= ?
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (resident_id, current_day, page_limit, page_offset),
+        ).fetchall()
+        memories = rows_to_dicts(rows)
+        return {
+            "resident_id": resident_id,
+            "total": total,
+            "offset": page_offset,
+            "limit": page_limit,
+            "has_more": page_offset + len(memories) < total,
+            "memories": memories,
+        }
+
 @app.get("/api/inventory")
 def get_inventory():
     with get_connection() as conn:
@@ -3578,7 +3613,7 @@ def get_agent_social_graph(resident_id: int):
 
 
 @app.get("/api/agents/{resident_id}/timeline")
-def get_agent_timeline(resident_id: int, limit: int = 30):
+def get_agent_timeline(resident_id: int, limit: int = 30, offset: int = 0):
     with get_connection() as conn:
         if not get_resident(conn, resident_id):
             raise HTTPException(status_code=404, detail="Agent 不存在")
