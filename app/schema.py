@@ -275,6 +275,134 @@ CREATE TABLE IF NOT EXISTS long_term_goals (
     FOREIGN KEY (resident_id) REFERENCES residents(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS agent_goals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    resident_id INTEGER NOT NULL,
+    parent_goal_id INTEGER,
+    legacy_long_term_goal_id INTEGER UNIQUE,
+    horizon TEXT NOT NULL DEFAULT 'medium',
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT 'general',
+    source TEXT NOT NULL DEFAULT 'self',
+    priority INTEGER NOT NULL DEFAULT 50,
+    commitment INTEGER NOT NULL DEFAULT 50,
+    expected_utility INTEGER NOT NULL DEFAULT 50,
+    feasibility INTEGER NOT NULL DEFAULT 50,
+    uncertainty INTEGER NOT NULL DEFAULT 30,
+    deadline_at TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    progress INTEGER NOT NULL DEFAULT 0,
+    visibility TEXT NOT NULL DEFAULT 'private',
+    created_day INTEGER NOT NULL DEFAULT 1,
+    last_reviewed_day INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT,
+    FOREIGN KEY (resident_id) REFERENCES residents(id) ON DELETE CASCADE,
+    FOREIGN KEY (parent_goal_id) REFERENCES agent_goals(id) ON DELETE SET NULL,
+    FOREIGN KEY (legacy_long_term_goal_id) REFERENCES long_term_goals(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS goal_dependencies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    goal_id INTEGER NOT NULL,
+    related_goal_id INTEGER NOT NULL,
+    relationship_type TEXT NOT NULL DEFAULT 'supports',
+    strength INTEGER NOT NULL DEFAULT 50,
+    explanation TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(goal_id, related_goal_id, relationship_type),
+    FOREIGN KEY (goal_id) REFERENCES agent_goals(id) ON DELETE CASCADE,
+    FOREIGN KEY (related_goal_id) REFERENCES agent_goals(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS goal_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    goal_id INTEGER NOT NULL,
+    resident_id INTEGER NOT NULL,
+    day INTEGER NOT NULL DEFAULT 1,
+    tick_id INTEGER,
+    revision_type TEXT NOT NULL,
+    before_json TEXT NOT NULL DEFAULT '{}',
+    after_json TEXT NOT NULL DEFAULT '{}',
+    reason TEXT NOT NULL DEFAULT '',
+    trigger_type TEXT NOT NULL DEFAULT 'reflection',
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (goal_id) REFERENCES agent_goals(id) ON DELETE CASCADE,
+    FOREIGN KEY (resident_id) REFERENCES residents(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS agent_commitments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    resident_id INTEGER NOT NULL,
+    goal_id INTEGER,
+    counterparty_resident_id INTEGER,
+    organization_id INTEGER,
+    commitment_type TEXT NOT NULL DEFAULT 'personal',
+    title TEXT NOT NULL,
+    start_at TEXT NOT NULL DEFAULT '',
+    due_at TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    importance INTEGER NOT NULL DEFAULT 50,
+    flexibility INTEGER NOT NULL DEFAULT 50,
+    visibility TEXT NOT NULL DEFAULT 'private',
+    source_event_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (resident_id) REFERENCES residents(id) ON DELETE CASCADE,
+    FOREIGN KEY (goal_id) REFERENCES agent_goals(id) ON DELETE SET NULL,
+    FOREIGN KEY (counterparty_resident_id) REFERENCES residents(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS plan_outcomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    resident_id INTEGER NOT NULL,
+    plan_id INTEGER,
+    long_goal_id INTEGER,
+    medium_goal_id INTEGER,
+    short_goal_id INTEGER,
+    tick_id INTEGER,
+    day INTEGER NOT NULL DEFAULT 1,
+    step_key TEXT NOT NULL DEFAULT '',
+    planned_json TEXT NOT NULL DEFAULT '{}',
+    actual_json TEXT NOT NULL DEFAULT '{}',
+    adherence TEXT NOT NULL DEFAULT 'unknown',
+    deviation_type TEXT NOT NULL DEFAULT '',
+    deviation_reason TEXT NOT NULL DEFAULT '',
+    outcome_summary TEXT NOT NULL DEFAULT '',
+    progress_delta INTEGER NOT NULL DEFAULT 0,
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (resident_id) REFERENCES residents(id) ON DELETE CASCADE,
+    FOREIGN KEY (long_goal_id) REFERENCES agent_goals(id) ON DELETE SET NULL,
+    FOREIGN KEY (medium_goal_id) REFERENCES agent_goals(id) ON DELETE SET NULL,
+    FOREIGN KEY (short_goal_id) REFERENCES agent_goals(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS trajectory_episodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    resident_id INTEGER NOT NULL,
+    parent_episode_id INTEGER,
+    goal_id INTEGER,
+    horizon TEXT NOT NULL DEFAULT 'short',
+    episode_type TEXT NOT NULL DEFAULT 'activity',
+    title TEXT NOT NULL,
+    start_at TEXT NOT NULL,
+    end_at TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    planned_summary TEXT NOT NULL DEFAULT '',
+    actual_summary TEXT NOT NULL DEFAULT '',
+    outcome_summary TEXT NOT NULL DEFAULT '',
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (resident_id) REFERENCES residents(id) ON DELETE CASCADE,
+    FOREIGN KEY (parent_episode_id) REFERENCES trajectory_episodes(id) ON DELETE SET NULL,
+    FOREIGN KEY (goal_id) REFERENCES agent_goals(id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS group_goals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -354,6 +482,87 @@ CREATE TABLE IF NOT EXISTS relationship_change_events (
     FOREIGN KEY (from_resident_id) REFERENCES residents(id) ON DELETE CASCADE,
     FOREIGN KEY (to_resident_id) REFERENCES residents(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS social_interaction_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day INTEGER NOT NULL DEFAULT 1,
+    tick_id INTEGER,
+    world_event_id INTEGER,
+    relationship_change_event_id INTEGER,
+    actor_resident_id INTEGER NOT NULL,
+    target_resident_id INTEGER,
+    participants_json TEXT NOT NULL DEFAULT '[]',
+    location TEXT NOT NULL DEFAULT '',
+    interaction_type TEXT NOT NULL DEFAULT 'interaction',
+    interaction_channel TEXT NOT NULL DEFAULT 'in_person',
+    intensity INTEGER NOT NULL DEFAULT 50,
+    valence INTEGER NOT NULL DEFAULT 0,
+    visibility TEXT NOT NULL DEFAULT 'local',
+    disclosure_state TEXT NOT NULL DEFAULT 'ordinary',
+    resource_context TEXT NOT NULL DEFAULT '',
+    institution_context TEXT NOT NULL DEFAULT '',
+    observer_summary TEXT NOT NULL DEFAULT '',
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (actor_resident_id) REFERENCES residents(id) ON DELETE CASCADE,
+    FOREIGN KEY (target_resident_id) REFERENCES residents(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS social_relation_interpretations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day INTEGER NOT NULL DEFAULT 1,
+    tick_id INTEGER,
+    from_resident_id INTEGER NOT NULL,
+    to_resident_id INTEGER NOT NULL,
+    perspective TEXT NOT NULL DEFAULT 'system_researcher',
+    current_label TEXT NOT NULL DEFAULT '未形成稳定解释',
+    label_confidence INTEGER NOT NULL DEFAULT 20,
+    candidate_labels_json TEXT NOT NULL DEFAULT '[]',
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    metrics_json TEXT NOT NULL DEFAULT '{}',
+    interpretation_boundary TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (from_resident_id) REFERENCES residents(id) ON DELETE CASCADE,
+    FOREIGN KEY (to_resident_id) REFERENCES residents(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS social_beliefs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day INTEGER NOT NULL DEFAULT 1,
+    tick_id INTEGER,
+    subject_resident_id INTEGER NOT NULL,
+    object_type TEXT NOT NULL DEFAULT 'relationship',
+    object_resident_id INTEGER,
+    related_resident_id INTEGER,
+    belief_type TEXT NOT NULL DEFAULT 'knows',
+    belief_summary TEXT NOT NULL DEFAULT '',
+    confidence INTEGER NOT NULL DEFAULT 50,
+    visibility TEXT NOT NULL DEFAULT 'private',
+    source_event_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (subject_resident_id) REFERENCES residents(id) ON DELETE CASCADE,
+    FOREIGN KEY (object_resident_id) REFERENCES residents(id) ON DELETE SET NULL,
+    FOREIGN KEY (related_resident_id) REFERENCES residents(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_social_interaction_events_day ON social_interaction_events(day);
+CREATE INDEX IF NOT EXISTS idx_social_interaction_events_actor_day ON social_interaction_events(actor_resident_id, day);
+CREATE INDEX IF NOT EXISTS idx_social_interaction_events_target_day ON social_interaction_events(target_resident_id, day);
+CREATE INDEX IF NOT EXISTS idx_social_interaction_events_type ON social_interaction_events(interaction_type);
+CREATE INDEX IF NOT EXISTS idx_social_relation_interpretations_pair_day ON social_relation_interpretations(from_resident_id, to_resident_id, day);
+CREATE INDEX IF NOT EXISTS idx_social_relation_interpretations_label ON social_relation_interpretations(current_label);
+CREATE INDEX IF NOT EXISTS idx_social_beliefs_subject_day ON social_beliefs(subject_resident_id, day);
+CREATE INDEX IF NOT EXISTS idx_agent_goals_resident_horizon_status ON agent_goals(resident_id, horizon, status);
+CREATE INDEX IF NOT EXISTS idx_agent_goals_parent ON agent_goals(parent_goal_id);
+CREATE INDEX IF NOT EXISTS idx_goal_dependencies_goal ON goal_dependencies(goal_id, relationship_type);
+CREATE INDEX IF NOT EXISTS idx_goal_revisions_goal_day ON goal_revisions(goal_id, day);
+CREATE INDEX IF NOT EXISTS idx_agent_commitments_resident_status_due ON agent_commitments(resident_id, status, due_at);
+CREATE INDEX IF NOT EXISTS idx_plan_outcomes_resident_day ON plan_outcomes(resident_id, day);
+CREATE INDEX IF NOT EXISTS idx_plan_outcomes_plan ON plan_outcomes(plan_id, step_key);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_outcomes_unique_step ON plan_outcomes(plan_id, step_key);
+CREATE INDEX IF NOT EXISTS idx_trajectory_episodes_resident_horizon ON trajectory_episodes(resident_id, horizon, status);
+CREATE INDEX IF NOT EXISTS idx_trajectory_episodes_goal ON trajectory_episodes(goal_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trajectory_episodes_unique_goal ON trajectory_episodes(resident_id, goal_id, horizon);
 """
 
 RELATIONSHIP_DYNAMIC_COLUMNS = {

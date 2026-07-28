@@ -53,6 +53,10 @@
 | --- | --- | --- |
 | `relationships` | Agent 间基础关系分 | 社会网络边权 |
 | `relationship_dynamics` | 好感、信任、合作、竞争、冲突 | 多维关系分析、冲突/合作机制 |
+| `relationship_change_events` | 关系指标变化和触发原因 | 关系演化证据、涌现关系解释 |
+| `social_interaction_events` | 共处、协作、冲突、资源交换等细粒度互动 | 关系生成机制、互动序列分析 |
+| `social_relation_interpretations` | 某一时刻的关系解释、候选标签和证据 | 关系标签如何形成和变化 |
+| `social_beliefs` | Agent 对关系的知道、怀疑、误解和公开/隐藏状态 | 信息不对称、秘密、误解和社会认知 |
 | `collaborations` | 协作项目 | 群体任务和合作结构 |
 | `competitions` | 竞争事件 | 竞争扩散、胜负影响 |
 | `group_goals` | 群体目标 | 集体行动和目标推进 |
@@ -75,6 +79,12 @@
 | `world_ticks` | 每次 tick 的开始、完成、处理人数、失败数 | 时间步审计、运行可靠性 |
 | `world_event_stream` | 统一事件流 | 时间序列主表 |
 | `agent_action_plans` | 8 小时行动计划 | 计划与实际行为偏离 |
+| `agent_goals` | 长期、中期、短期目标及父子层级 | 目标形成、分解、竞争与完成 |
+| `goal_dependencies` | 目标之间的支持、前置、冲突和替代 | 多目标权衡与资源竞争 |
+| `goal_revisions` | 目标创建、调整、暂停、放弃和完成记录 | 目标演化与人生转折 |
+| `agent_commitments` | 对他人、组织和制度的承诺 | 社会义务、违约与信任变化 |
+| `plan_outcomes` | 计划步骤、实际行为、偏离原因与结果 | 计划遵从、拖延和机会响应 |
+| `trajectory_episodes` | 多时间尺度的计划轨迹和实际轨迹 | 生命历程、路径依赖和阶段分析 |
 | `observer_sessions` | 观察者进入、关注 Agent/地点 | 观察者效应 |
 | `participant_actions` | 参与者互动预留 | v2 互动干预 |
 | `model_call_logs` | 模型调用来源、状态、成本 | 成本与复杂度分析 |
@@ -415,11 +425,39 @@ agent_tick
 agent_day
 agent_event_response
 relationship_daily
+emergent_relationships
+social_interactions
+social_relation_interpretations
+social_beliefs
 space_time
 observer_attention
 intervention_response
 model_decision
 ```
+
+其中 `emergent_relationships` 不应把“朋友”“亲密”“合作伙伴”等当作预设事实，而应从连续互动证据中生成候选解释。推荐导出字段包括：
+
+```text
+run_id
+from_agent_id
+to_agent_id
+current_label
+label_confidence
+candidate_labels
+evidence_count
+recent_evidence
+affinity
+trust
+cooperation
+competition
+conflict
+tension
+interaction_count
+interpretation_perspective
+interpretation_boundary
+```
+
+研究报告中需要明确：关系解释是“从互动证据和关系指标推断出的当前解释”，不是预设身份，也不是确定事实。这样才能研究关系如何从连续事件中生成、被感知、被误解和被改变。
 
 例如 `agent_day` 可以整理为：
 

@@ -180,6 +180,7 @@ def ensure_social_system_tables(conn):
     )
     normalize_agent_hierarchy(conn)
     seed_long_term_goals(conn)
+    seed_multiscale_goals(conn)
     seed_campus_organizations(conn)
 
 
@@ -228,6 +229,471 @@ def seed_long_term_goals(conn):
                     day,
                 ),
             )
+
+
+def seed_multiscale_goals(conn):
+    """Expose legacy long-term goals through the unified multi-horizon goal model."""
+    rows = conn.execute(
+        """
+        SELECT id, resident_id, title, category, progress, deadline_day, status,
+               last_update_day, created_at, completed_at
+        FROM long_term_goals
+        ORDER BY id
+        """
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            """
+            INSERT INTO agent_goals
+            (resident_id, legacy_long_term_goal_id, horizon, title, category, source,
+             priority, commitment, expected_utility, feasibility, uncertainty,
+             deadline_at, status, progress, visibility, created_day,
+             last_reviewed_day, created_at, completed_at)
+            VALUES (?, ?, 'long', ?, ?, 'legacy_migration',
+                    70, 65, 70, 55, 35, ?, ?, ?, 'private', 1, ?, ?, ?)
+            ON CONFLICT(legacy_long_term_goal_id) DO NOTHING
+            """,
+            (
+                row["resident_id"],
+                row["id"],
+                row["title"],
+                row["category"],
+                f"simulation-day:{row['deadline_day']}",
+                row["status"],
+                row["progress"],
+                row["last_update_day"],
+                row["created_at"],
+                row["completed_at"],
+            ),
+        )
+
+
+def record_goal_revision(conn, goal_id, resident_id, revision_type, before=None, after=None, reason="", trigger_type="runtime", tick_id=None):
+    conn.execute(
+        """
+        INSERT INTO goal_revisions
+        (goal_id, resident_id, day, tick_id, revision_type, before_json,
+         after_json, reason, trigger_type, evidence_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            goal_id,
+            resident_id,
+            get_current_day(conn),
+            tick_id,
+            revision_type,
+            json.dumps(before or {}, ensure_ascii=False),
+            json.dumps(after or {}, ensure_ascii=False),
+            reason[:240],
+            trigger_type,
+            json.dumps({"source": "multiscale-goal-runtime-v1"}, ensure_ascii=False),
+        ),
+    )
+
+
+def create_agent_goal(conn, resident_id, horizon, title, category="general", parent_goal_id=None,
+                      source="runtime", priority=50, commitment=50, expected_utility=50,
+                      feasibility=50, uncertainty=30, deadline_at="", visibility="private"):
+    day = get_current_day(conn)
+    cursor = conn.execute(
+        """
+        INSERT INTO agent_goals
+        (resident_id, parent_goal_id, horizon, title, category, source, priority,
+         commitment, expected_utility, feasibility, uncertainty, deadline_at,
+         status, progress, visibility, created_day, last_reviewed_day)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?)
+        """,
+        (
+            resident_id,
+            parent_goal_id,
+            horizon,
+            title[:180],
+            category,
+            source,
+            clamp(priority),
+            clamp(commitment),
+            clamp(expected_utility),
+            clamp(feasibility),
+            clamp(uncertainty),
+            deadline_at,
+            visibility,
+            day,
+            day,
+        ),
+    )
+    goal = dict(conn.execute("SELECT * FROM agent_goals WHERE id = ?", (cursor.lastrowid,)).fetchone())
+    record_goal_revision(
+        conn,
+        goal["id"],
+        resident_id,
+        "created",
+        after=goal,
+        reason=f"运行时生成{horizon}层目标",
+        trigger_type="goal_generation",
+    )
+    return goal
+
+
+def parse_goal_deadline(value):
+    if not value or str(value).startswith("simulation-day:"):
+        return None
+    return parse_world_datetime(value)
+
+
+def review_multiscale_goals(conn, resident_id, world_time, tick_id=None):
+    day = get_current_day(conn)
+    rows = conn.execute(
+        """
+        SELECT * FROM agent_goals
+        WHERE resident_id = ? AND status = 'active'
+        ORDER BY id
+        """,
+        (resident_id,),
+    ).fetchall()
+    reviewed = 0
+    revised = 0
+    for raw in rows:
+        goal = dict(raw)
+        interval = 7 if goal["horizon"] == "long" else 1
+        if day - int(goal.get("last_reviewed_day") or 0) < interval:
+            continue
+        before = dict(goal)
+        status = goal["status"]
+        deadline_at = goal["deadline_at"]
+        progress = int(goal["progress"] or 0)
+        revision_type = "reviewed"
+        reason = "按时间尺度完成周期复盘"
+        if progress >= 100:
+            status = "completed"
+            revision_type = "completed"
+            reason = "目标进度达到完成阈值"
+        else:
+            deadline = parse_goal_deadline(deadline_at)
+            if deadline and deadline <= world_time:
+                commitment = int(goal["commitment"] or 0)
+                feasibility = int(goal["feasibility"] or 0)
+                if goal["horizon"] == "short":
+                    status = "completed" if progress >= 75 else ("paused" if commitment >= 65 else "abandoned")
+                    revision_type = status
+                    reason = "短期目标到期，根据完成度和承诺强度结算"
+                elif goal["horizon"] == "medium" and feasibility < 35 and progress < 40:
+                    status = "paused"
+                    revision_type = "paused"
+                    reason = "中期项目到期且可行性持续偏低"
+                else:
+                    extension_days = 30 if goal["horizon"] == "long" else 7
+                    deadline_at = (world_time + timedelta(days=extension_days)).isoformat()
+                    revision_type = "extended"
+                    reason = "目标仍有价值，调整期限继续推进"
+        completed_at = world_time.isoformat() if status == "completed" else goal.get("completed_at")
+        conn.execute(
+            """
+            UPDATE agent_goals
+            SET status = ?, deadline_at = ?, last_reviewed_day = ?,
+                completed_at = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (status, deadline_at, day, completed_at, goal["id"]),
+        )
+        after = dict(conn.execute("SELECT * FROM agent_goals WHERE id = ?", (goal["id"],)).fetchone())
+        if revision_type != "reviewed":
+            record_goal_revision(
+                conn,
+                goal["id"],
+                resident_id,
+                revision_type,
+                before=before,
+                after=after,
+                reason=reason,
+                trigger_type="periodic_review",
+                tick_id=tick_id,
+            )
+        reviewed += 1
+        revised += int(revision_type != "reviewed")
+    return {"reviewed": reviewed, "revised": revised}
+
+
+def multiscale_goal_templates(resident, long_goal):
+    category = str(long_goal.get("category") or infer_goal_category(long_goal.get("title")))
+    role = role_group(resident.get("role"))
+    templates = {
+        "study": ("形成可检查的阶段学习成果", "完成当前阶段最重要的一项学习任务"),
+        "business": ("验证近期校园需求并改进服务", "完成一次具体服务并记录反馈"),
+        "social": ("通过持续互动发展一段有意义的关系", "履行一次交流、帮助或协作约定"),
+        "service": ("改善一个可观察的校园运行问题", "完成一次巡查、协调或服务响应"),
+        "general": ("把长期方向转化为一个可验证的阶段项目", "完成当前阶段最可行的一步"),
+    }
+    medium, short = templates.get(category, templates["general"])
+    if role == "teacher" and category == "general":
+        medium, short = "推进教学、指导或研究中的一个阶段成果", "完成一次具体教学或指导任务"
+    elif role == "business" and category == "general":
+        medium, short = templates["business"]
+        category = "business"
+    elif role == "service" and category == "general":
+        medium, short = templates["service"]
+        category = "service"
+    return category, f"{medium}：围绕《{long_goal['title']}》", short
+
+
+def ensure_goal_trajectory_episode(conn, goal, world_time):
+    cursor = conn.execute(
+        """
+        INSERT INTO trajectory_episodes
+        (resident_id, goal_id, horizon, episode_type, title, start_at, status,
+         planned_summary, evidence_json)
+        VALUES (?, ?, ?, 'goal_pursuit', ?, ?, 'active', ?, '{}')
+        ON CONFLICT(resident_id, goal_id, horizon) DO NOTHING
+        """,
+        (
+            goal["resident_id"],
+            goal["id"],
+            goal["horizon"],
+            goal["title"],
+            world_time.isoformat(),
+            f"围绕{goal['horizon']}层目标推进：{goal['title']}",
+        ),
+    )
+    row = conn.execute(
+        """
+        SELECT * FROM trajectory_episodes
+        WHERE resident_id = ? AND goal_id = ? AND horizon = ?
+        """,
+        (goal["resident_id"], goal["id"], goal["horizon"]),
+    ).fetchone()
+    return dict(row) if row else {"id": cursor.lastrowid}
+
+
+def ensure_daily_commitments(conn, resident, short_goal, world_time):
+    day_key = world_time.strftime("%Y-%m-%d")
+    conn.execute(
+        """
+        UPDATE agent_commitments
+        SET status = 'released', updated_at = CURRENT_TIMESTAMP
+        WHERE resident_id = ? AND status = 'active' AND goal_id IS NOT NULL
+          AND goal_id IN (
+              SELECT id FROM agent_goals
+              WHERE resident_id = ? AND status != 'active'
+          )
+        """,
+        (resident["id"], resident["id"]),
+    )
+    expired = conn.execute(
+        """
+        SELECT * FROM agent_commitments
+        WHERE resident_id = ? AND status = 'active' AND due_at != '' AND due_at <= ?
+        """,
+        (resident["id"], world_time.isoformat()),
+    ).fetchall()
+    for row in expired:
+        linked_goal = conn.execute(
+            "SELECT progress FROM agent_goals WHERE id = ?",
+            (row["goal_id"],),
+        ).fetchone() if row["goal_id"] else None
+        status = "fulfilled" if linked_goal and int(linked_goal["progress"] or 0) >= 60 else "missed"
+        conn.execute(
+            "UPDATE agent_commitments SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (status, row["id"]),
+        )
+    existing = conn.execute(
+        """
+        SELECT * FROM agent_commitments
+        WHERE resident_id = ? AND goal_id = ? AND status = 'active' AND start_at LIKE ?
+        ORDER BY importance DESC, id
+        LIMIT 1
+        """,
+        (resident["id"], short_goal["id"], f"{day_key}%"),
+    ).fetchone()
+    if existing:
+        return dict(existing)
+    group = role_group(resident.get("role"))
+    weekday = world_time.weekday() < 5
+    if group == "teacher":
+        title, commitment_type, importance = "履行当天教学与指导职责", "institutional", 82
+    elif group == "business":
+        title, commitment_type, importance = "维持当天校园服务并回应需求", "service", 76
+    elif group == "service":
+        title, commitment_type, importance = "完成当天校园运行巡查与协调", "institutional", 84
+    elif weekday:
+        title, commitment_type, importance = "完成当天课程与学习安排", "institutional", 78
+    else:
+        title, commitment_type, importance = "平衡休息、自主学习与社会联系", "personal", 62
+    start_at = world_time.replace(hour=0, minute=0, second=0, microsecond=0)
+    due_at = start_at + timedelta(days=1)
+    cursor = conn.execute(
+        """
+        INSERT INTO agent_commitments
+        (resident_id, goal_id, commitment_type, title, start_at, due_at,
+         status, importance, flexibility, visibility)
+        VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, 'private')
+        """,
+        (
+            resident["id"],
+            short_goal["id"],
+            commitment_type,
+            title,
+            start_at.isoformat(),
+            due_at.isoformat(),
+            importance,
+            35 if commitment_type == "institutional" else 65,
+        ),
+    )
+    return dict(conn.execute("SELECT * FROM agent_commitments WHERE id = ?", (cursor.lastrowid,)).fetchone())
+
+
+def ensure_multiscale_goal_structure(conn, resident, world_time, tick_id=None):
+    review = review_multiscale_goals(conn, resident["id"], world_time, tick_id=tick_id)
+    active = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT * FROM agent_goals
+            WHERE resident_id = ? AND status = 'active'
+            ORDER BY priority DESC, commitment DESC, id
+            """,
+            (resident["id"],),
+        ).fetchall()
+    ]
+    long_goals = [goal for goal in active if goal["horizon"] == "long"]
+    if not long_goals:
+        long_goal = create_agent_goal(
+            conn,
+            resident["id"],
+            "long",
+            resident.get("goal") or "形成稳定而有意义的校园生活",
+            category=infer_goal_category(resident.get("goal")),
+            source="self",
+            priority=70,
+            commitment=65,
+            expected_utility=70,
+            feasibility=55,
+            uncertainty=35,
+            deadline_at=(world_time + timedelta(days=90)).isoformat(),
+        )
+    else:
+        long_goal = max(
+            long_goals,
+            key=lambda goal: int(goal["priority"]) + int(goal["commitment"]) + int(goal["expected_utility"]) + random.uniform(-8, 8),
+        )
+        for competing_goal in long_goals:
+            if competing_goal["id"] == long_goal["id"]:
+                continue
+            conn.execute(
+                """
+                INSERT INTO goal_dependencies
+                (goal_id, related_goal_id, relationship_type, strength, explanation)
+                VALUES (?, ?, 'competes', 45, '多个长期方向竞争有限的时间、精力和资源')
+                ON CONFLICT(goal_id, related_goal_id, relationship_type) DO NOTHING
+                """,
+                (long_goal["id"], competing_goal["id"]),
+            )
+    category, medium_title, short_title = multiscale_goal_templates(resident, long_goal)
+    medium_row = conn.execute(
+        """
+        SELECT * FROM agent_goals
+        WHERE resident_id = ? AND parent_goal_id = ? AND horizon = 'medium' AND status = 'active'
+        ORDER BY priority DESC, id LIMIT 1
+        """,
+        (resident["id"], long_goal["id"]),
+    ).fetchone()
+    medium_goal = dict(medium_row) if medium_row else create_agent_goal(
+        conn,
+        resident["id"],
+        "medium",
+        medium_title,
+        category=category,
+        parent_goal_id=long_goal["id"],
+        source="goal_decomposition",
+        priority=68,
+        commitment=62,
+        expected_utility=68,
+        feasibility=62,
+        uncertainty=28,
+        deadline_at=(world_time + timedelta(days=21)).isoformat(),
+    )
+    short_row = conn.execute(
+        """
+        SELECT * FROM agent_goals
+        WHERE resident_id = ? AND parent_goal_id = ? AND horizon = 'short' AND status = 'active'
+        ORDER BY priority DESC, id LIMIT 1
+        """,
+        (resident["id"], medium_goal["id"]),
+    ).fetchone()
+    short_goal = dict(short_row) if short_row else create_agent_goal(
+        conn,
+        resident["id"],
+        "short",
+        short_title,
+        category=category,
+        parent_goal_id=medium_goal["id"],
+        source="goal_decomposition",
+        priority=72,
+        commitment=68,
+        expected_utility=66,
+        feasibility=72,
+        uncertainty=20,
+        deadline_at=(world_time + timedelta(days=3)).isoformat(),
+    )
+    for goal_id, related_goal_id in (
+        (medium_goal["id"], long_goal["id"]),
+        (short_goal["id"], medium_goal["id"]),
+    ):
+        conn.execute(
+            """
+            INSERT INTO goal_dependencies
+            (goal_id, related_goal_id, relationship_type, strength, explanation)
+            VALUES (?, ?, 'supports', 80, '下层目标为上层目标提供可验证进展')
+            ON CONFLICT(goal_id, related_goal_id, relationship_type) DO NOTHING
+            """,
+            (goal_id, related_goal_id),
+        )
+    commitment = ensure_daily_commitments(conn, resident, short_goal, world_time)
+    episodes = {
+        goal["horizon"]: ensure_goal_trajectory_episode(conn, goal, world_time)
+        for goal in (long_goal, medium_goal, short_goal)
+    }
+    conn.execute(
+        "UPDATE trajectory_episodes SET parent_episode_id = ? WHERE id = ?",
+        (episodes["long"]["id"], episodes["medium"]["id"]),
+    )
+    conn.execute(
+        "UPDATE trajectory_episodes SET parent_episode_id = ? WHERE id = ?",
+        (episodes["medium"]["id"], episodes["short"]["id"]),
+    )
+    return {
+        "long": long_goal,
+        "medium": medium_goal,
+        "short": short_goal,
+        "commitment": commitment,
+        "episodes": episodes,
+        "review": review,
+    }
+
+
+def attach_goal_context_to_plan(plan, goal_context):
+    plan = dict(plan or {})
+    chain = {
+        "long_goal_id": goal_context["long"]["id"],
+        "long_goal": goal_context["long"]["title"],
+        "medium_goal_id": goal_context["medium"]["id"],
+        "medium_goal": goal_context["medium"]["title"],
+        "short_goal_id": goal_context["short"]["id"],
+        "short_goal": goal_context["short"]["title"],
+        "commitment_id": goal_context["commitment"]["id"] if goal_context.get("commitment") else None,
+        "commitment": goal_context["commitment"]["title"] if goal_context.get("commitment") else "",
+    }
+    plan["goal_chain"] = chain
+    steps = []
+    for step in plan.get("steps") or []:
+        enriched = dict(step)
+        enriched.update({
+            "long_goal_id": chain["long_goal_id"],
+            "medium_goal_id": chain["medium_goal_id"],
+            "short_goal_id": chain["short_goal_id"],
+            "commitment_id": chain["commitment_id"],
+        })
+        steps.append(enriched)
+    plan["steps"] = steps
+    return plan
 
 
 def seed_campus_organizations(conn):
@@ -319,7 +785,7 @@ def evolve_relationship(
         """,
         (affinity, trust, cooperation, competition, conflict, tension, get_current_day(conn), from_id, to_id),
     )
-    conn.execute(
+    change_cursor = conn.execute(
         """
         INSERT INTO relationship_change_events
         (day, tick_id, event_id, from_resident_id, to_resident_id, interaction, reason,
@@ -335,6 +801,33 @@ def evolve_relationship(
             int(current["conflict"]), conflict,
         ),
     )
+    relationship_change_event_id = getattr(change_cursor, "lastrowid", None)
+    append_social_interaction_event(
+        conn,
+        actor_resident_id=from_id,
+        target_resident_id=to_id,
+        interaction_type=interaction,
+        summary=note or "",
+        tick_id=tick_id,
+        world_event_id=event_id,
+        relationship_change_event_id=relationship_change_event_id,
+        intensity=max(abs(affinity_delta), abs(trust_delta), abs(cooperation_delta), abs(competition_delta), abs(conflict_delta), 1) * 10,
+        valence=clamp(affinity_delta + trust_delta + cooperation_delta - conflict_delta, -100, 100),
+        evidence={
+            "relationship_delta": relationship_delta,
+            "affinity_before": int(current["affinity"]),
+            "affinity_after": affinity,
+            "trust_before": int(current["trust"]),
+            "trust_after": trust,
+            "cooperation_before": int(current["cooperation"]),
+            "cooperation_after": cooperation,
+            "competition_before": int(current["competition"]),
+            "competition_after": competition,
+            "conflict_before": int(current["conflict"]),
+            "conflict_after": conflict,
+        },
+    )
+    record_social_relation_interpretation(conn, from_id, to_id, tick_id=tick_id)
     return {
         "interaction": interaction,
         "affinity": affinity,
@@ -345,6 +838,142 @@ def evolve_relationship(
         "tension": tension,
         "relationship_score": relationship_score,
     }
+
+
+def append_social_interaction_event(
+    conn,
+    actor_resident_id,
+    target_resident_id=None,
+    interaction_type="interaction",
+    summary="",
+    tick_id=None,
+    world_event_id=None,
+    relationship_change_event_id=None,
+    location="",
+    channel="in_person",
+    intensity=50,
+    valence=0,
+    visibility="local",
+    disclosure_state="ordinary",
+    resource_context="",
+    institution_context="",
+    evidence=None,
+):
+    ensure_social_system_tables(conn)
+    participants = [actor_resident_id]
+    if target_resident_id is not None:
+        participants.append(target_resident_id)
+    conn.execute(
+        """
+        INSERT INTO social_interaction_events
+        (day, tick_id, world_event_id, relationship_change_event_id, actor_resident_id,
+         target_resident_id, participants_json, location, interaction_type, interaction_channel,
+         intensity, valence, visibility, disclosure_state, resource_context, institution_context,
+         observer_summary, evidence_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            get_current_day(conn), tick_id, world_event_id, relationship_change_event_id,
+            actor_resident_id, target_resident_id, json.dumps(participants, ensure_ascii=False),
+            location or "", interaction_type or "interaction", channel or "in_person",
+            clamp(intensity), max(-100, min(100, int(valence))), visibility or "local",
+            disclosure_state or "ordinary", resource_context or "", institution_context or "",
+            summary or "", json.dumps(evidence or {}, ensure_ascii=False),
+        ),
+    )
+
+
+def infer_emergent_relationship(conn, from_id, to_id, dynamics=None, score=None):
+    """Interpret an edge from accumulated evidence without declaring a fixed relationship type."""
+    dynamics = dynamics or get_relationship_dynamics(conn, from_id, to_id)
+    affinity = int(dynamics.get("affinity") or 50)
+    trust = int(dynamics.get("trust") or 50)
+    cooperation = int(dynamics.get("cooperation") or 50)
+    competition = int(dynamics.get("competition") or 0)
+    conflict = int(dynamics.get("conflict") or 0)
+    tension = int(dynamics.get("tension") or 0)
+    interaction_count = int(dynamics.get("interaction_count") or 0)
+    score = int(score if score is not None else get_relationship_score(conn, from_id, to_id))
+    history_rows = conn.execute(
+        """
+        SELECT interaction, reason, affinity_before, affinity_after, trust_before, trust_after,
+               cooperation_before, cooperation_after, competition_before, competition_after,
+               conflict_before, conflict_after, day, created_at
+        FROM relationship_change_events
+        WHERE from_resident_id = ? AND to_resident_id = ?
+        ORDER BY id DESC
+        LIMIT 12
+        """,
+        (from_id, to_id),
+    ).fetchall()
+    interaction_counts = {}
+    evidence = []
+    for row in history_rows:
+        interaction = row["interaction"] or "interaction"
+        interaction_counts[interaction] = interaction_counts.get(interaction, 0) + 1
+        if len(evidence) < 4:
+            reason = row["reason"] or interaction
+            evidence.append(f"第{row['day']}天：{reason}")
+
+    candidates = []
+
+    def add_candidate(label, weight, rationale):
+        weight = max(0, min(100, int(round(weight))))
+        if weight > 0:
+            candidates.append({"label": label, "confidence": weight, "rationale": rationale})
+
+    add_candidate("弱联系/待观察", 65 - min(interaction_count * 9, 45), "互动证据还少，关系解释应保持开放")
+    add_candidate("熟人关系", 34 + interaction_count * 4 + max(0, score - 45) * 0.5, "多次接触形成基本熟悉度")
+    add_candidate("可信关系", trust * 0.75 + interaction_count * 2 - conflict * 0.25, "信任值和稳定互动共同支撑")
+    add_candidate("合作伙伴", cooperation * 0.8 + interaction_counts.get("collaborate", 0) * 8 + interaction_counts.get("collaboration", 0) * 8, "协作行为和合作维度较强")
+    add_candidate("紧张关系", conflict * 0.9 + tension * 0.55 + interaction_counts.get("conflict", 0) * 10, "冲突、紧张或摩擦事件较多")
+    add_candidate("竞争关系", competition * 0.85 + interaction_counts.get("competition", 0) * 9, "竞争维度或竞争事件突出")
+    add_candidate("潜在亲近关系", affinity * 0.55 + trust * 0.35 + interaction_count * 2 - conflict * 0.45, "高好感、高信任与重复接触可能形成更亲近解释")
+    add_candidate("疏远但可信", trust * 0.7 - affinity * 0.2 - interaction_count * 1.5, "信任存在，但亲近和互动证据不足")
+
+    candidates.sort(key=lambda item: item["confidence"], reverse=True)
+    top = candidates[0] if candidates else {"label": "未形成稳定解释", "confidence": 20, "rationale": "缺少关系证据"}
+    if not evidence:
+        evidence.append("暂无明确关系变化事件，主要依据当前关系指标推断")
+    return {
+        "label": top["label"],
+        "confidence": top["confidence"],
+        "candidates": candidates[:4],
+        "evidence": evidence,
+        "metrics": {
+            "score": score,
+            "affinity": affinity,
+            "trust": trust,
+            "cooperation": cooperation,
+            "competition": competition,
+            "conflict": conflict,
+            "tension": tension,
+            "interaction_count": interaction_count,
+        },
+        "perspective": "from_agent",
+        "interpretation_boundary": "这是从互动证据和关系指标生成的当前解释，不是预设身份，也不是确定事实。",
+    }
+
+
+def record_social_relation_interpretation(conn, from_id, to_id, tick_id=None, perspective="system_researcher"):
+    ensure_social_system_tables(conn)
+    interpretation = infer_emergent_relationship(conn, from_id, to_id)
+    conn.execute(
+        """
+        INSERT INTO social_relation_interpretations
+        (day, tick_id, from_resident_id, to_resident_id, perspective, current_label,
+         label_confidence, candidate_labels_json, evidence_json, metrics_json, interpretation_boundary)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            get_current_day(conn), tick_id, from_id, to_id, perspective,
+            interpretation["label"], interpretation["confidence"],
+            json.dumps(interpretation["candidates"], ensure_ascii=False),
+            json.dumps(interpretation["evidence"], ensure_ascii=False),
+            json.dumps(interpretation["metrics"], ensure_ascii=False),
+            interpretation["interpretation_boundary"],
+        ),
+    )
 
 
 def advance_personal_goal(conn, resident_id, action, success):
@@ -1591,6 +2220,7 @@ def ensure_world_runtime_tables(conn):
     with WORLD_SCHEMA_LOCK:
         if WORLD_SCHEMA_READY:
             return
+        ensure_social_system_tables(conn)
         conn.executescript(WORLD_RUNTIME_SQL)
         conn.executescript(RESEARCH_SYSTEM_SQL)
         seed_world_runtime_rules(conn)
@@ -2086,7 +2716,7 @@ def action_for_context(role, location, hour, conn=None, env=None, agent=None):
     return weighted_choice(options)
 
 
-def build_rule_based_plan(conn, resident, window_start, window_end, world_time=None):
+def build_rule_based_plan(conn, resident, window_start, window_end, world_time=None, goal_context=None):
     role = str(resident["role"])
     env = dict(get_campus_environment(conn, get_current_day(conn))) if conn else {}
     agent = dict(resident)
@@ -2116,7 +2746,11 @@ def build_rule_based_plan(conn, resident, window_start, window_end, world_time=N
                 "time": step_time.strftime("%H:%M"),
                 "action": action,
                 "location": location,
-                "goal": f"{resident['name']}围绕「{resident['goal']}」调整当前节奏",
+                "goal": (
+                    goal_context["short"]["title"]
+                    if goal_context
+                    else f"{resident['name']}围绕「{resident['goal']}」调整当前节奏"
+                ),
             }
         )
     return {
@@ -2153,7 +2787,7 @@ def normalize_plan_step(step, window_start, index, fallback_location, fallback_g
     return {"time": time_text, "action": action, "location": location, "goal": goal}
 
 
-def build_llm_action_plan(conn, resident, window_start, window_end, world_time):
+def build_llm_action_plan(conn, resident, window_start, window_end, world_time, goal_context=None):
     if not consume_auto_model_budget(conn, "planner", resident_id=resident["id"]):
         return None
     model_name = os.getenv("LLM_MODEL") or os.getenv("LLM_API_MODEL") or "configured-llm"
@@ -2176,6 +2810,10 @@ Agent:
 - role: {resident['role']}
 - current_location: {resident['location']}
 - long_goal: {resident['goal']}
+- active_long_goal: {goal_context['long']['title'] if goal_context else resident['goal']}
+- medium_project: {goal_context['medium']['title'] if goal_context else '尚未建立'}
+- short_goal: {goal_context['short']['title'] if goal_context else '尚未建立'}
+- current_commitment: {goal_context['commitment']['title'] if goal_context and goal_context.get('commitment') else '无'}
 
 只返回 JSON，不要解释。格式：
 {{
@@ -2235,32 +2873,52 @@ def ensure_current_action_plans(conn, world_time):
     created = 0
     llm_plans = 0
     rule_based_plans = 0
+    backfilled_plans = 0
+    goals_revised = 0
     for resident in residents:
+        resident_dict = dict(resident)
+        goal_context = ensure_multiscale_goal_structure(conn, resident_dict, world_time)
+        goals_revised += int(goal_context["review"]["revised"])
         existing = conn.execute(
             """
-            SELECT id FROM agent_action_plans
+            SELECT id, plan_json FROM agent_action_plans
             WHERE resident_id = ? AND window_start = ? AND status = 'active'
             """,
             (resident["id"], window_start.isoformat()),
         ).fetchone()
         if existing:
+            existing_plan = load_json_text(existing["plan_json"], {})
+            if not existing_plan.get("goal_chain"):
+                existing_plan = attach_goal_context_to_plan(existing_plan, goal_context)
+                conn.execute(
+                    """
+                    UPDATE agent_action_plans
+                    SET plan_json = ?, prompt_version = 'world-runtime-v4',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (json.dumps(existing_plan, ensure_ascii=False), existing["id"]),
+                )
+                backfilled_plans += 1
             continue
-        plan = build_llm_action_plan(conn, resident, window_start, window_end, world_time)
+        plan = build_llm_action_plan(conn, resident, window_start, window_end, world_time, goal_context=goal_context)
         if plan:
             model_name = os.getenv("LLM_MODEL") or os.getenv("LLM_API_MODEL") or "configured-llm"
             llm_plans += 1
         else:
-            plan = build_rule_based_plan(conn, resident, window_start, window_end, world_time)
+            plan = build_rule_based_plan(conn, resident, window_start, window_end, world_time, goal_context=goal_context)
             model_name = "rule-based-v1"
             rule_based_plans += 1
+        plan = attach_goal_context_to_plan(plan, goal_context)
         conn.execute(
             """
             INSERT INTO agent_action_plans
             (resident_id, window_start, window_end, plan_json, model_name, prompt_version, status)
-            VALUES (?, ?, ?, ?, 'rule-based-v1', 'world-runtime-v1', 'active')
+            VALUES (?, ?, ?, ?, 'rule-based-v1', 'world-runtime-v4', 'active')
             ON CONFLICT(resident_id, window_start)
             DO UPDATE SET plan_json = excluded.plan_json, window_end = excluded.window_end,
-                          status = 'active', updated_at = CURRENT_TIMESTAMP
+                          prompt_version = 'world-runtime-v4', status = 'active',
+                          updated_at = CURRENT_TIMESTAMP
             """,
             (resident["id"], window_start.isoformat(), window_end.isoformat(), json.dumps(plan, ensure_ascii=False)),
         )
@@ -2279,6 +2937,8 @@ def ensure_current_action_plans(conn, world_time):
         "created": created,
         "llm_plans": llm_plans,
         "rule_based_plans": rule_based_plans,
+        "backfilled_plans": backfilled_plans,
+        "goals_revised": goals_revised,
     }
 
 
@@ -3069,6 +3729,248 @@ def mark_plan_step_executed(conn, plan, step, world_time, execution):
     )
 
 
+GOAL_RELEVANT_ACTIONS = {
+    "study": {"attend_class", "observe", "reflect", "collaborate"},
+    "business": {"consume", "queue", "chat", "collaborate"},
+    "social": {"chat", "club_activity", "collaborate"},
+    "service": {"observe", "request_leave", "collaborate", "queue"},
+    "wellbeing": {"rest", "reflect", "club_activity"},
+    "general": WORLD_AUTONOMOUS_ACTIONS - {"move", "late", "conflict"},
+}
+
+
+def goal_progress_delta(goal, action, adherence):
+    relevant = action in GOAL_RELEVANT_ACTIONS.get(goal.get("category"), GOAL_RELEVANT_ACTIONS["general"])
+    if not relevant:
+        return 0
+    base = {"short": 12, "medium": 5, "long": 2}.get(goal.get("horizon"), 1)
+    if adherence == "followed":
+        return base
+    if adherence == "adjusted":
+        return max(1, round(base * 0.7))
+    return max(0, round(base * 0.35))
+
+
+def advance_multiscale_goals_from_outcome(conn, resident_id, goal_ids, action, adherence, world_time, tick_id, outcome_id):
+    updates = []
+    for horizon, goal_id in goal_ids.items():
+        if not goal_id:
+            continue
+        raw = conn.execute(
+            "SELECT * FROM agent_goals WHERE id = ? AND resident_id = ?",
+            (goal_id, resident_id),
+        ).fetchone()
+        if not raw or raw["status"] != "active":
+            continue
+        goal = dict(raw)
+        delta = goal_progress_delta(goal, action, adherence)
+        if delta <= 0:
+            continue
+        before = dict(goal)
+        progress = clamp(int(goal["progress"] or 0) + delta)
+        status = "completed" if progress >= 100 else "active"
+        conn.execute(
+            """
+            UPDATE agent_goals
+            SET progress = ?, status = ?,
+                completed_at = CASE WHEN ? = 'completed' THEN ? ELSE completed_at END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (progress, status, status, world_time.isoformat(), goal_id),
+        )
+        if goal.get("legacy_long_term_goal_id"):
+            conn.execute(
+                """
+                UPDATE long_term_goals
+                SET progress = ?, status = ?, last_update_day = ?,
+                    completed_at = CASE WHEN ? = 'completed' THEN ? ELSE completed_at END
+                WHERE id = ?
+                """,
+                (
+                    progress,
+                    status,
+                    get_current_day(conn),
+                    status,
+                    world_time.isoformat(),
+                    goal["legacy_long_term_goal_id"],
+                ),
+            )
+        after = dict(conn.execute("SELECT * FROM agent_goals WHERE id = ?", (goal_id,)).fetchone())
+        if status == "completed":
+            record_goal_revision(
+                conn,
+                goal_id,
+                resident_id,
+                "completed",
+                before=before,
+                after=after,
+                reason=f"{action} 行动使目标达到完成阈值",
+                trigger_type="plan_outcome",
+                tick_id=tick_id,
+            )
+            conn.execute(
+                """
+                UPDATE trajectory_episodes
+                SET status = 'completed', end_at = ?, outcome_summary = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE resident_id = ? AND goal_id = ?
+                """,
+                (world_time.isoformat(), f"目标《{goal['title']}》完成", resident_id, goal_id),
+            )
+            if horizon == "short":
+                conn.execute(
+                    """
+                    UPDATE agent_commitments
+                    SET status = 'fulfilled', updated_at = CURRENT_TIMESTAMP
+                    WHERE resident_id = ? AND goal_id = ? AND status = 'active'
+                    """,
+                    (resident_id, goal_id),
+                )
+        updates.append({"goal_id": goal_id, "horizon": horizon, "delta": delta, "progress": progress, "status": status})
+    return updates
+
+
+def update_trajectory_from_outcome(conn, resident_id, goal_ids, action, location, adherence, world_time, outcome_id):
+    for horizon, goal_id in goal_ids.items():
+        if not goal_id:
+            continue
+        row = conn.execute(
+            """
+            SELECT * FROM trajectory_episodes
+            WHERE resident_id = ? AND goal_id = ? AND horizon = ?
+            """,
+            (resident_id, goal_id, horizon),
+        ).fetchone()
+        if not row:
+            continue
+        evidence = load_json_text(row["evidence_json"], {})
+        if not isinstance(evidence, dict):
+            evidence = {}
+        evidence["outcome_count"] = int(evidence.get("outcome_count") or 0) + 1
+        evidence["followed_count"] = int(evidence.get("followed_count") or 0) + int(adherence == "followed")
+        evidence["last_outcome_id"] = outcome_id
+        evidence["last_action"] = action
+        evidence["last_location"] = location
+        evidence["last_at"] = world_time.isoformat()
+        conn.execute(
+            """
+            UPDATE trajectory_episodes
+            SET actual_summary = ?, evidence_json = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                f"最近在{location}执行 {action}，计划关系：{adherence}",
+                json.dumps(evidence, ensure_ascii=False),
+                row["id"],
+            ),
+        )
+
+
+def record_plan_outcome(conn, agent, plan, step, decision, action, destination, content, world_time, tick_id, day, event_id):
+    plan_id = plan.get("_plan_row_id")
+    step_key = step.get("step_key") or plan_step_key(step)
+    if not plan_id or step.get("plan_state") != "due" or not step_key:
+        return None
+    planned_action = str(step.get("action") or "")
+    planned_location = str(step.get("location") or "")
+    relation = str(decision.get("plan_relation") or "continue")
+    if action == planned_action and destination == planned_location and relation == "continue":
+        adherence = "followed"
+        deviation_type = ""
+    elif relation in {"adjust", "respond", "rest"}:
+        adherence = "adjusted"
+        deviation_type = relation
+    else:
+        adherence = "deviated"
+        deviation_type = "action_or_location_changed"
+    deviation_reason = ""
+    if adherence != "followed":
+        notes = decision.get("constraint_notes") or []
+        deviation_reason = "；".join(str(note) for note in notes) or str(decision.get("reason") or "")
+    goal_ids = {
+        "long": step.get("long_goal_id") or plan.get("goal_chain", {}).get("long_goal_id"),
+        "medium": step.get("medium_goal_id") or plan.get("goal_chain", {}).get("medium_goal_id"),
+        "short": step.get("short_goal_id") or plan.get("goal_chain", {}).get("short_goal_id"),
+    }
+    cursor = conn.execute(
+        """
+        INSERT INTO plan_outcomes
+        (resident_id, plan_id, long_goal_id, medium_goal_id, short_goal_id,
+         tick_id, day, step_key, planned_json, actual_json, adherence,
+         deviation_type, deviation_reason, outcome_summary, evidence_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(plan_id, step_key) DO NOTHING
+        """,
+        (
+            agent["id"],
+            plan_id,
+            goal_ids["long"],
+            goal_ids["medium"],
+            goal_ids["short"],
+            tick_id,
+            day,
+            step_key,
+            json.dumps(step, ensure_ascii=False),
+            json.dumps({"action": action, "location": destination, "decision": decision}, ensure_ascii=False),
+            adherence,
+            deviation_type,
+            deviation_reason[:240],
+            content[:300],
+            json.dumps({"world_event_id": event_id}, ensure_ascii=False),
+        ),
+    )
+    outcome = conn.execute(
+        "SELECT * FROM plan_outcomes WHERE plan_id = ? AND step_key = ?",
+        (plan_id, step_key),
+    ).fetchone()
+    if not outcome:
+        return None
+    outcome_id = outcome["id"]
+    progress_updates = advance_multiscale_goals_from_outcome(
+        conn,
+        agent["id"],
+        goal_ids,
+        action,
+        adherence,
+        world_time,
+        tick_id,
+        outcome_id,
+    ) if cursor.rowcount else []
+    if cursor.rowcount:
+        conn.execute(
+            """
+            UPDATE plan_outcomes
+            SET progress_delta = ?, evidence_json = ?
+            WHERE id = ?
+            """,
+            (
+                sum(int(item["delta"]) for item in progress_updates),
+                json.dumps(
+                    {"world_event_id": event_id, "goal_progress": progress_updates},
+                    ensure_ascii=False,
+                ),
+                outcome_id,
+            ),
+        )
+        update_trajectory_from_outcome(
+            conn,
+            agent["id"],
+            goal_ids,
+            action,
+            destination,
+            adherence,
+            world_time,
+            outcome_id,
+        )
+    return {
+        "id": outcome_id,
+        "adherence": adherence,
+        "deviation_type": deviation_type,
+        "goal_progress": progress_updates,
+    }
+
+
 def should_generate_observed_agent_detail(conn, resident_id, world_time):
     row = conn.execute(
         """
@@ -3221,6 +4123,7 @@ def build_runtime_perception(conn, agent, world_time, day, slot, plan, step, obs
             "rainfall": env.get("rainfall"),
         },
         "plan_intent": plan.get("intent", ""),
+        "goal_chain": plan.get("goal_chain", {}),
         "plan_step": step,
         "recent_events": rows_to_dicts(recent_events),
     }
@@ -3332,12 +4235,14 @@ def apply_realism_constraints_to_decision(conn, agent, decision, perception, wor
 
 
 def fallback_runtime_decision(agent, step, reason, mode):
+    plan_state = str(step.get("plan_state") or "")
+    plan_relation = "continue" if plan_state in {"due", "waiting", "unplanned"} else ("rest" if plan_state == "completed" else "continue")
     return {
         "action": str(step.get("action") or "observe"),
         "location": str(step.get("location") or agent["location"]),
         "goal": str(step.get("goal") or "观察校园环境"),
         "reason": reason,
-        "plan_relation": step.get("plan_state", "continue"),
+        "plan_relation": plan_relation,
         "mode": mode,
     }
 
@@ -3423,13 +4328,62 @@ def nearby_interaction_target(conn, agent_id, location):
     return dict(row) if row else None
 
 
+def maybe_create_social_commitment(conn, agent_id, target, location):
+    existing = conn.execute(
+        """
+        SELECT * FROM agent_commitments
+        WHERE resident_id = ? AND counterparty_resident_id = ?
+          AND commitment_type = 'social_collaboration' AND status = 'active'
+        ORDER BY id DESC LIMIT 1
+        """,
+        (agent_id, target["id"]),
+    ).fetchone()
+    if existing:
+        return dict(existing)
+    short_goal = conn.execute(
+        """
+        SELECT * FROM agent_goals
+        WHERE resident_id = ? AND horizon = 'short' AND status = 'active'
+        ORDER BY priority DESC, id LIMIT 1
+        """,
+        (agent_id,),
+    ).fetchone()
+    if not short_goal:
+        return None
+    now = get_world_now()
+    cursor = conn.execute(
+        """
+        INSERT INTO agent_commitments
+        (resident_id, goal_id, counterparty_resident_id, commitment_type, title,
+         start_at, due_at, status, importance, flexibility, visibility)
+        VALUES (?, ?, ?, 'social_collaboration', ?, ?, ?, 'active', 68, 55, 'shared')
+        """,
+        (
+            agent_id,
+            short_goal["id"],
+            target["id"],
+            f"继续与{target['name']}推进在{location}形成的协作",
+            now.isoformat(),
+            (now + timedelta(days=3)).isoformat(),
+        ),
+    )
+    return dict(conn.execute("SELECT * FROM agent_commitments WHERE id = ?", (cursor.lastrowid,)).fetchone())
+
+
 def apply_runtime_social_effect(conn, agent, action, location, day):
     target = nearby_interaction_target(conn, agent["id"], location)
     if not target:
         return None
     if action in {"chat", "club_activity", "collaborate"}:
         change = evolve_relationship(conn, agent["id"], target["id"], action, f"{location}发生协作或交流", 3, 4, -1)
-        return {"target_id": target["id"], "target_name": target["name"], "effect": "positive", "relationship": change}
+        commitment = maybe_create_social_commitment(conn, agent["id"], target, location) if action == "collaborate" else None
+        return {
+            "target_id": target["id"],
+            "target_name": target["name"],
+            "effect": "positive",
+            "relationship": change,
+            "commitment": commitment,
+        }
     if action == "conflict":
         change = evolve_relationship(conn, agent["id"], target["id"], "conflict", f"{location}发生轻微摩擦", -3, -2, 4)
         add_event(conn, day, "world_agent_conflict", f"{agent['name']} 与 {target['name']} 在{location}出现轻微摩擦。")
@@ -3548,6 +4502,7 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
                 "goal": goal,
                 "observed": observed,
                 "plan_step": step,
+                "goal_chain": plan.get("goal_chain", {}),
                 "runtime_decision": decision,
                 "social_effect": execution.get("social_effect"),
                 "action_taxonomy": "world-runtime-v3",
@@ -3555,12 +4510,26 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
             day=day,
             slot=slot,
         )
+        plan_outcome = record_plan_outcome(
+            conn,
+            agent,
+            plan,
+            step,
+            decision,
+            action,
+            destination,
+            content,
+            world_time,
+            tick_id,
+            day,
+            event["id"],
+        )
         if step.get("plan_state") == "due":
             mark_plan_step_executed(conn, plan, step, world_time, {"action": action, "location": destination, "goal": goal, "mode": decision.get("mode")})
         if observed:
             generate_observed_agent_detail(conn, agent, step, world_time, tick_id, event, day, slot)
         conn.commit()
-        return {"resident_id": agent["id"], "success": True, "event": event}
+        return {"resident_id": agent["id"], "success": True, "event": event, "plan_outcome": plan_outcome}
     except Exception as exc:
         conn.rollback()
         error_content = f"{agent['name']} 的 world tick 行动失败，已保留状态：{type(exc).__name__}。"
@@ -4891,6 +5860,124 @@ def get_long_term_goals(resident_id: int):
         return rows_to_dicts(rows)
 
 
+@app.get("/api/agents/{resident_id}/goal-system")
+def get_agent_goal_system(resident_id: int):
+    with get_connection() as conn:
+        resident = get_resident(conn, resident_id)
+        if not resident:
+            raise HTTPException(status_code=404, detail="Agent 不存在")
+        ensure_social_system_tables(conn)
+        profile = conn.execute(
+            "SELECT strategy, energy, mood, current_task FROM agent_profiles WHERE resident_id = ?",
+            (resident_id,),
+        ).fetchone()
+        goals = rows_to_dicts(
+            conn.execute(
+                """
+                SELECT * FROM agent_goals
+                WHERE resident_id = ?
+                ORDER BY CASE horizon WHEN 'long' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+                         status, priority DESC, id
+                """,
+                (resident_id,),
+            ).fetchall()
+        )
+        by_parent = {}
+        for goal in goals:
+            by_parent.setdefault(goal.get("parent_goal_id"), []).append(goal)
+
+        def goal_node(goal):
+            item = dict(goal)
+            item["children"] = [goal_node(child) for child in by_parent.get(goal["id"], [])]
+            return item
+
+        dependencies = rows_to_dicts(
+            conn.execute(
+                """
+                SELECT * FROM goal_dependencies
+                WHERE goal_id IN (SELECT id FROM agent_goals WHERE resident_id = ?)
+                ORDER BY id
+                """,
+                (resident_id,),
+            ).fetchall()
+        )
+        commitments = rows_to_dicts(
+            conn.execute(
+                """
+                SELECT * FROM agent_commitments
+                WHERE resident_id = ?
+                ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, due_at DESC, id DESC
+                LIMIT 40
+                """,
+                (resident_id,),
+            ).fetchall()
+        )
+        revisions = rows_to_dicts(
+            conn.execute(
+                """
+                SELECT * FROM goal_revisions
+                WHERE resident_id = ?
+                ORDER BY id DESC LIMIT 60
+                """,
+                (resident_id,),
+            ).fetchall()
+        )
+        outcomes = rows_to_dicts(
+            conn.execute(
+                """
+                SELECT * FROM plan_outcomes
+                WHERE resident_id = ?
+                ORDER BY id DESC LIMIT 60
+                """,
+                (resident_id,),
+            ).fetchall()
+        )
+        trajectories = rows_to_dicts(
+            conn.execute(
+                """
+                SELECT * FROM trajectory_episodes
+                WHERE resident_id = ?
+                ORDER BY CASE horizon WHEN 'long' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+                         id DESC
+                """,
+                (resident_id,),
+            ).fetchall()
+        )
+        plan_row = conn.execute(
+            """
+            SELECT * FROM agent_action_plans
+            WHERE resident_id = ? AND status = 'active'
+            ORDER BY window_start DESC LIMIT 1
+            """,
+            (resident_id,),
+        ).fetchone()
+        current_plan = dict(plan_row) if plan_row else None
+        if current_plan:
+            current_plan["plan"] = load_json_text(current_plan.pop("plan_json"), {})
+        strategy = load_json_text(profile["strategy"], {}) if profile else {}
+        return {
+            "version": "multiscale-goals-v1",
+            "resident": dict(resident),
+            "stable_layer": {
+                "personality": resident["personality"],
+                "role": resident["role"],
+                "money": resident["money"],
+                "energy": profile["energy"] if profile else None,
+                "mood": profile["mood"] if profile else "",
+                "current_task": profile["current_task"] if profile else "",
+                "personality_traits": strategy.get("personality_traits", {}) if isinstance(strategy, dict) else {},
+            },
+            "goal_tree": [goal_node(goal) for goal in by_parent.get(None, [])],
+            "goals": goals,
+            "dependencies": dependencies,
+            "commitments": commitments,
+            "current_plan": current_plan,
+            "recent_outcomes": outcomes,
+            "goal_revisions": revisions,
+            "trajectory_episodes": trajectories,
+        }
+
+
 @app.post("/api/goals")
 def create_long_term_goal(payload: LongTermGoalRequest):
     with get_connection() as conn:
@@ -4905,9 +5992,18 @@ def create_long_term_goal(payload: LongTermGoalRequest):
             """,
             (payload.resident_id, payload.title, payload.category, payload.deadline_day or day + 14, day),
         )
+        seed_multiscale_goals(conn)
+        unified = conn.execute(
+            "SELECT id FROM agent_goals WHERE legacy_long_term_goal_id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
         add_event(conn, day, "long_term_goal", f"Agent {payload.resident_id} 新增长期目标《{payload.title}》。")
         conn.commit()
-        return {"message": "长期目标已创建", "goal_id": cursor.lastrowid}
+        return {
+            "message": "长期目标已创建",
+            "goal_id": cursor.lastrowid,
+            "agent_goal_id": unified["id"] if unified else None,
+        }
 
 
 @app.get("/api/social/relationships/{resident_id}")
@@ -5201,6 +6297,7 @@ def _life_course_relationships(conn, resident_id, timeline):
             "evidence_event_ids": related[:12],
             "history_available": bool(history_rows),
             "history": rows_to_dicts(history_rows),
+            "emergent_interpretation": infer_emergent_relationship(conn, resident_id, target_id, dict(row), row["score"]),
         })
     return result
 
@@ -5298,13 +6395,13 @@ def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, l
 
 
 @app.get("/api/agents/{resident_id}/life-course/overview")
-def get_agent_life_course_overview(resident_id: int, from_day: int | None = None, to_day: int | None = None, limit: int = 240):
+def get_agent_life_course_overview(resident_id: int, from_day: Optional[int] = None, to_day: Optional[int] = None, limit: int = 240):
     with get_connection() as conn:
         return _build_life_course_overview(conn, resident_id, from_day=from_day, to_day=to_day, limit=limit)
 
 
 @app.get("/api/agents/{resident_id}/life-course/events")
-def get_agent_life_course_events(resident_id: int, from_day: int | None = None, to_day: int | None = None, limit: int = 240):
+def get_agent_life_course_events(resident_id: int, from_day: Optional[int] = None, to_day: Optional[int] = None, limit: int = 240):
     with get_connection() as conn:
         overview = _build_life_course_overview(conn, resident_id, from_day=from_day, to_day=to_day, limit=limit)
         return {"analysis_version": overview["analysis_version"], "events": overview["timeline"], "research_boundaries": overview["research_boundaries"]}
@@ -5350,7 +6447,8 @@ def get_agent_social_graph(resident_id: int):
             SELECT relationships.to_resident_id, residents.name, residents.role,
                    relationships.score, relationship_dynamics.affinity, relationship_dynamics.trust,
                    relationship_dynamics.cooperation, relationship_dynamics.competition,
-                   relationship_dynamics.conflict
+                   relationship_dynamics.conflict, relationship_dynamics.tension,
+                   relationship_dynamics.interaction_count
             FROM relationships
             JOIN residents ON residents.id = relationships.to_resident_id
             LEFT JOIN relationship_dynamics
@@ -5375,6 +6473,9 @@ def get_agent_social_graph(resident_id: int):
                     "cooperation": row["cooperation"] if row["cooperation"] is not None else 50,
                     "competition": row["competition"] if row["competition"] is not None else 0,
                     "conflict": row["conflict"] if row["conflict"] is not None else 0,
+                    "tension": row["tension"] if row["tension"] is not None else 0,
+                    "interaction_count": row["interaction_count"] if row["interaction_count"] is not None else 0,
+                    "emergent_interpretation": infer_emergent_relationship(conn, resident_id, row["to_resident_id"], dict(row), row["score"]),
                 }
                 for row in rows
             ],
