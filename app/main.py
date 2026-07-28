@@ -4977,9 +4977,10 @@ def _life_course_timeline(conn, resident_id, from_day=None, to_day=None, limit=2
         result = execution.get("result") if isinstance(execution, dict) else {}
         result = result if isinstance(result, dict) else {}
         location = result.get("location") or decision.get("tool_input", {}).get("destination", "")
-        key = (row["day"], str(action or "action"), str(location or ""))
+        key = (row["day"], str(action or "action"), str(location or ""), str(result.get("description") or result.get("message") or decision.get("reason") or ""))
         if key in seen_action_keys:
             continue
+        seen_action_keys.add(key)
         goal_update = execution.get("long_term_goal") if isinstance(execution, dict) else {}
         item = {
             "id": row["id"],
