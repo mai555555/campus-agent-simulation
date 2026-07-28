@@ -5168,6 +5168,8 @@ def _life_course_episodes(timeline):
             "deviations": [],
             "feedback": [],
             "memories": [],
+            "state_before": None,
+            "state_after": None,
         })
         episode["event_ids"].append(event.get("id"))
         episode["event_count"] += 1
@@ -5186,6 +5188,12 @@ def _life_course_episodes(timeline):
             episode["deviations"].append({"planned": planned, "actual": actual, "reason": decision.get("reason", "")})
         if event.get("environment_feedback"):
             episode["feedback"].append(event["environment_feedback"])
+        before = event.get("state_before") if isinstance(event.get("state_before"), dict) else None
+        after = event.get("state_after") if isinstance(event.get("state_after"), dict) else None
+        if before and episode["state_before"] is None:
+            episode["state_before"] = before
+        if after:
+            episode["state_after"] = after
         if event.get("source") == "memories":
             episode["memories"].append(event.get("content", ""))
         if event.get("location") and event["location"] not in episode["locations"]:
@@ -5202,6 +5210,18 @@ def _life_course_episodes(timeline):
             "deviation_count": len(episode["deviations"]),
             "memory_count": len(episode["memories"]),
             "feedback_count": len(episode["feedback"]),
+        }
+        before = episode.get("state_before") or {}
+        after = episode.get("state_after") or {}
+        changes = {}
+        for key in ("location", "energy", "time_budget", "mood", "current_task"):
+            if before.get(key) != after.get(key) and (before.get(key) is not None or after.get(key) is not None):
+                changes[key] = {"before": before.get(key), "after": after.get(key)}
+        episode["impact"] = {
+            "state_changes": changes,
+            "memory_count": len(episode["memories"]),
+            "environment_feedback_count": len(episode["feedback"]),
+            "interpretation": "记录了时序上的后续状态变化，不代表已证明因果关系。" if changes or episode["memories"] or episode["feedback"] else "当前片段暂无可观测的后续状态变化。",
         }
         episode["evidence"] = episode["evidence"][:20]
         episodes.append(episode)
