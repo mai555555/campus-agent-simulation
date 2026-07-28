@@ -770,6 +770,7 @@ create index if not exists idx_world_ticks_started_at on world_ticks(started_at)
 create index if not exists idx_world_event_stream_created_at on world_event_stream(created_at);
 create index if not exists idx_world_event_stream_event_type on world_event_stream(event_type);
 create index if not exists idx_world_event_stream_resident_id on world_event_stream(resident_id);
+create index if not exists idx_world_event_stream_resident_day on world_event_stream(resident_id, day);
 create index if not exists idx_world_event_stream_tick_id on world_event_stream(tick_id);
 create index if not exists idx_agent_action_plans_window on agent_action_plans(window_start, window_end);
 create index if not exists idx_observer_sessions_last_seen on observer_sessions(last_seen_at);
