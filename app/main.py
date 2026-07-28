@@ -4915,6 +4915,7 @@ def _life_course_timeline(conn, resident_id, from_day=None, to_day=None, limit=2
     where = " AND ".join(clauses)
     events = []
     seen_action_keys = set()
+    world_event_items = {}
 
     world_rows = conn.execute(
         f"""
@@ -4929,7 +4930,12 @@ def _life_course_timeline(conn, resident_id, from_day=None, to_day=None, limit=2
     for row in world_rows:
         payload = load_json_text(row["payload"], {})
         action = payload.get("action") or payload.get("runtime_decision", {}).get("action")
-        key = (row["day"], str(action or row["event_type"]), row["location"] or "")
+        key = (row["day"], str(action or row["event_type"]), row["location"] or "", row["content"] or "")
+        if key in world_event_items:
+            existing = world_event_items[key]
+            existing["repeat_count"] = int(existing.get("repeat_count") or 1) + 1
+            existing["evidence"].append(_life_course_evidence("world_event_stream", row["id"]))
+            continue
         seen_action_keys.add(key)
         item = {
             "id": row["id"],
@@ -4947,7 +4953,9 @@ def _life_course_timeline(conn, resident_id, from_day=None, to_day=None, limit=2
             "success": row["event_type"] not in {"agent_tick_failed", "world_tick_failed"},
             "memory_importance": 0,
             "spread_count": len(payload.get("recipients", [])) if isinstance(payload.get("recipients"), list) else 0,
+            "repeat_count": 1,
         }
+        world_event_items[key] = item
         events.append(_life_course_score_event(item))
 
     log_rows = conn.execute(
