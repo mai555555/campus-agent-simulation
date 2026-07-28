@@ -5163,12 +5163,31 @@ def _life_course_episodes(timeline):
             "evidence": [],
             "event_count": 0,
             "repeat_count": 0,
+            "planned_actions": [],
+            "actual_actions": [],
+            "deviations": [],
+            "feedback": [],
+            "memories": [],
         })
         episode["event_ids"].append(event.get("id"))
         episode["event_count"] += 1
         episode["repeat_count"] += max(1, int(event.get("repeat_count") or 1))
         if event.get("action") and event["action"] not in episode["actions"]:
             episode["actions"].append(event["action"])
+        decision = event.get("decision") if isinstance(event.get("decision"), dict) else {}
+        execution = event.get("execution") if isinstance(event.get("execution"), dict) else {}
+        planned = decision.get("planned_action") or decision.get("action")
+        actual = execution.get("action") or event.get("action")
+        if planned and planned not in episode["planned_actions"]:
+            episode["planned_actions"].append(planned)
+        if actual and actual not in episode["actual_actions"]:
+            episode["actual_actions"].append(actual)
+        if planned and actual and planned != actual:
+            episode["deviations"].append({"planned": planned, "actual": actual, "reason": decision.get("reason", "")})
+        if event.get("environment_feedback"):
+            episode["feedback"].append(event["environment_feedback"])
+        if event.get("source") == "memories":
+            episode["memories"].append(event.get("content", ""))
         if event.get("location") and event["location"] not in episode["locations"]:
             episode["locations"].append(event["location"])
         episode["evidence"].extend(event.get("evidence") or [])
@@ -5177,6 +5196,13 @@ def _life_course_episodes(timeline):
         labels = [_life_course_action_label(action) for action in episode["actions"][:4]]
         episode["title"] = f"第{episode['day']}天经历片段"
         episode["summary"] = "、".join(labels) if labels else "校园日常观察"
+        episode["narrative"] = {
+            "intention": "、".join(_life_course_action_label(item) for item in episode["planned_actions"][:4]) or "未记录计划",
+            "actual": "、".join(_life_course_action_label(item) for item in episode["actual_actions"][:4]) or "未记录行动",
+            "deviation_count": len(episode["deviations"]),
+            "memory_count": len(episode["memories"]),
+            "feedback_count": len(episode["feedback"]),
+        }
         episode["evidence"] = episode["evidence"][:20]
         episodes.append(episode)
     return episodes
