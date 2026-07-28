@@ -4593,7 +4593,7 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
 
 
 def maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=None, day=None):
-    """Publish campus news once for the latest completed 8-hour world window."""
+    """Publish campus news from the autonomous runtime, prioritizing unusual emergent material."""
     ensure_agent_news_system(conn)
     ensure_world_runtime_tables(conn)
     day = day or get_current_day(conn)
@@ -4602,7 +4602,7 @@ def maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=None, 
     existing = conn.execute(
         """
         SELECT id FROM world_event_stream
-        WHERE event_type IN ('campus_news_published', 'campus_news_skipped')
+        WHERE event_type = 'campus_news_published'
           AND payload LIKE ?
         ORDER BY id DESC
         LIMIT 1
@@ -4612,33 +4612,14 @@ def maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=None, 
     if existing:
         return {"skipped": True, "reason": "already_published", "source_window_key": source_window_key}
 
-    rows = conn.execute(
-        """
-        SELECT e.id, e.resident_id, e.location, e.title, e.content, e.payload, r.name, r.role
-        FROM world_event_stream e
-        JOIN residents r ON r.id = e.resident_id
-        WHERE e.day = ?
-          AND e.slot = ?
-          AND e.event_type = 'agent_tick'
-          AND e.resident_id IS NOT NULL
-          AND NOT EXISTS (
-              SELECT 1 FROM agent_news_posts p
-              WHERE p.day = ? AND p.resident_id = e.resident_id
-          )
-        ORDER BY e.id DESC
-        LIMIT 24
-        """,
-        (day, source_slot, day),
-    ).fetchall()
-
     candidates = []
     seen_residents = set()
-    for row in rows:
-        resident_id = int(row["resident_id"])
+    for candidate in collect_campus_news_candidates(conn, day, source_slot):
+        resident_id = int(candidate["resident_id"])
         if resident_id in seen_residents:
             continue
         seen_residents.add(resident_id)
-        candidates.append(row)
+        candidates.append(candidate)
         if len(candidates) >= 3:
             break
 
@@ -4647,7 +4628,7 @@ def maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=None, 
             conn,
             "campus_news_skipped",
             "校园新闻本窗口未发布",
-            f"{source_slot} 暂无足够的新 Agent 行动素材，校园新闻保持等待。",
+            f"{source_slot} 暂无新的可发布发现，校园日报继续等待 runtime 事件。",
             tick_id=tick_id,
             payload={
                 "source_window_key": source_window_key,
@@ -4655,6 +4636,7 @@ def maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=None, 
                 "source_window_end": window_end.isoformat(),
                 "source_slot": source_slot,
                 "reason": "no_new_agent_material",
+                "retryable": True,
             },
             day=day,
             slot=source_slot,
@@ -4664,80 +4646,85 @@ def maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=None, 
     model_name = os.getenv("LLM_MODEL") or os.getenv("LLM_API_MODEL") or "configured-llm"
     published = []
     failed = []
-    for row in candidates:
-        payload = load_json_text(row["payload"], {})
-        action = payload.get("action") or payload.get("runtime_decision", {}).get("action") or "observe"
+    for candidate in candidates:
+        action = candidate.get("action") or "observe"
+        payload = candidate.get("payload") if isinstance(candidate.get("payload"), dict) else {}
         goal = payload.get("goal") or payload.get("runtime_decision", {}).get("goal") or "推进校园生活"
-        source_text = f"{row['title']}：{row['content']}"
-        if not consume_auto_model_budget(conn, "campus_news", resident_id=row["resident_id"]):
-            failed.append({"resident_id": row["resident_id"], "reason": "budget_exhausted"})
-            continue
+        source_text = f"{candidate['title']}：{candidate['content']}"
+        headline = campus_news_headline(candidate["category"], candidate["location"], candidate["name"])
+        content = None
         prompt = f"""
-你是《校园世界时报》的校园记者。请根据一个 Agent 在刚结束的 8 小时窗口中的真实行动，写一则 80 到 130 字的中文校园快讯。
+你是《校园世界时报》的运行时观察记者。请根据校园平行世界刚出现的事实材料，写一则 80 到 130 字的中文校园快讯。
 
 时间窗口：{source_slot}
-人物：{row['name']}（{row['role']}）
-地点：{row['location'] or '校园'}
+新闻类型：{candidate['category']}
+人物：{candidate['name']}（{candidate['role']}）
+地点：{candidate['location'] or '校园'}
 动作类型：{action}
 行动目标：{goal}
 事实材料：{source_text}
 
 要求：
 - 使用第三人称、客观新闻口吻。
-- 交代人物、地点、事件，以及这件事对校园运行的可观察影响。
+- 优先呈现突发异常、关系风向、反常行为、群体现象、内心发现或校园环境变化。
+- 只能基于事实材料写，不要编造材料中没有的人物关系或因果。
 - 不要写标题、JSON、Markdown、口号或解释，只输出新闻正文。
 """
-        try:
-            raw = ask_llm(prompt)
-            content = re.sub(r"\s+", " ", raw).strip().strip('"“”')
-            if not content or content.startswith(("{", "[")):
-                raise ValueError("invalid campus news content")
-            if "食堂" in content or row["location"] == "食堂":
-                headline = "校园餐饮服务出现新动态"
-            elif "图书馆" in content or row["location"] == "图书馆":
-                headline = "图书馆学习秩序持续更新"
-            elif "操场" in content or row["location"] == "操场":
-                headline = "操场活动带动校园交流"
-            elif "商业街" in content or row["location"] == "商业街":
-                headline = "商业街服务节奏发生变化"
-            elif "教学楼" in content or row["location"] == "教学楼":
-                headline = "教学楼学习活动继续推进"
-            else:
-                headline = f"{row['location'] or '校园'}发布最新校园动态"
-            cursor = conn.execute(
-                """
-                INSERT OR IGNORE INTO agent_news_posts (day, resident_id, headline, content)
-                VALUES (?, ?, ?, ?)
-                """,
-                (day, row["resident_id"], headline, content[:300]),
-            )
-            if cursor.rowcount:
-                published.append({"resident_id": row["resident_id"], "headline": headline, "source_event_id": row["id"]})
-            log_model_call(
-                conn,
-                "campus_news",
-                status="success",
-                resident_id=row["resident_id"],
-                model_name=model_name,
-                prompt_version="campus-news-window-v1",
-                input_tokens=max(1, len(prompt) // 4),
-                output_tokens=max(1, len(raw) // 4),
-            )
-        except Exception as exc:
-            logger.warning("Campus news generation failed for resident %s", row["resident_id"], exc_info=True)
-            failed.append({"resident_id": row["resident_id"], "reason": type(exc).__name__})
-            log_model_call(
-                conn,
-                "campus_news",
-                status=f"failed:{type(exc).__name__}",
-                resident_id=row["resident_id"],
-                model_name=model_name,
-                prompt_version="campus-news-window-v1",
+        if consume_auto_model_budget(conn, "campus_news", resident_id=candidate["resident_id"]):
+            try:
+                raw = ask_llm(prompt)
+                content = re.sub(r"\s+", " ", raw).strip().strip('"“”')
+                if not content or content.startswith(("{", "[")):
+                    raise ValueError("invalid campus news content")
+                log_model_call(
+                    conn,
+                    "campus_news",
+                    status="success",
+                    resident_id=candidate["resident_id"],
+                    related_event_id=candidate.get("source_event_id"),
+                    model_name=model_name,
+                    prompt_version="campus-news-runtime-v2",
+                    input_tokens=max(1, len(prompt) // 4),
+                    output_tokens=max(1, len(raw) // 4),
+                )
+            except Exception as exc:
+                logger.warning("Campus news generation failed for resident %s", candidate["resident_id"], exc_info=True)
+                failed.append({"resident_id": candidate["resident_id"], "reason": type(exc).__name__})
+                log_model_call(
+                    conn,
+                    "campus_news",
+                    status=f"failed:{type(exc).__name__}",
+                    resident_id=candidate["resident_id"],
+                    related_event_id=candidate.get("source_event_id"),
+                    model_name=model_name,
+                    prompt_version="campus-news-runtime-v2",
+                )
+        else:
+            failed.append({"resident_id": candidate["resident_id"], "reason": "budget_exhausted"})
+        if not content:
+            content = fallback_campus_news_content(candidate)
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO agent_news_posts (day, resident_id, headline, content)
+            VALUES (?, ?, ?, ?)
+            """,
+            (day, candidate["resident_id"], headline, content[:300]),
+        )
+        if cursor.rowcount:
+            published.append(
+                {
+                    "resident_id": candidate["resident_id"],
+                    "headline": headline,
+                    "category": candidate["category"],
+                    "source_event_id": candidate.get("source_event_id"),
+                    "score": candidate["score"],
+                }
             )
 
     if published:
         title = "校园新闻已自动发布"
-        content = f"{source_slot} 窗口生成 {len(published)} 条校园快讯，已同步到校园日报。"
+        labels = "、".join(sorted({item["category"] for item in published}))
+        content = f"{source_slot} 窗口从 runtime 事件中发布 {len(published)} 条校园快讯，类型包括：{labels}。"
         event_type = "campus_news_published"
     else:
         title = "校园新闻生成未完成"
@@ -6892,6 +6879,147 @@ def summarize_action_for_news(execution):
     return str(execution.get("action") or "完成了一次校园行动")
 
 
+def classify_campus_news_candidate(event_type, action="", content="", payload=None):
+    payload = payload if isinstance(payload, dict) else {}
+    text = f"{event_type} {action} {content} {json.dumps(payload, ensure_ascii=False)}"
+    if event_type in {"agent_tick_failed", "world_tick_failed", "real_weather_auto_sync_failed"} or any(word in text for word in ("失败", "异常", "降级", "冲突", "迟到")):
+        return "突发异常", 100
+    if action in {"conflict", "late", "request_leave"} or any(word in text for word in ("冲突", "紧张", "请假", "迟到")):
+        return "反常行为", 90
+    if event_type in {"social_interaction", "relationship_change"} or any(word in text for word in ("关系", "信任", "合作", "好感", "竞争")):
+        return "关系风向", 86
+    if action in {"collaborate", "create_group", "join_group", "club_activity"} or any(word in text for word in ("小组", "社团", "协作", "动员", "扩散")):
+        return "群体现象", 82
+    if event_type in {"crowd_transmission", "organization_mobilization", "group_diffusion"}:
+        return "群体现象", 80
+    if action in {"observe", "reflect"} or any(word in text for word in ("发现", "观察", "反思", "想法")):
+        return "内心发现", 70
+    if any(word in text for word in ("天气", "人流", "拥挤", "食堂", "图书馆", "空间", "资源", "服务")):
+        return "校园环境", 60
+    return "校园环境", 50
+
+
+def campus_news_headline(category, location, name):
+    location = location or "校园"
+    return {
+        "突发异常": f"{location}出现需要关注的异常信号",
+        "反常行为": f"{name}的反常行动引发关注",
+        "关系风向": "校园关系网络出现新动向",
+        "群体现象": f"{location}涌现出新的集体动态",
+        "内心发现": f"{name}记录到一条内心发现",
+        "校园环境": f"{location}出现新的环境变化",
+    }.get(category, f"{location}发布最新校园动态")
+
+
+def fallback_campus_news_content(candidate):
+    category = candidate["category"]
+    name = candidate["name"]
+    role = candidate["role"] or "校园居民"
+    location = candidate["location"] or "校园"
+    content = str(candidate["content"] or "校园出现一条新的运行记录。")
+    if category == "关系风向":
+        return f"{location}消息，{role}{name}相关的一次互动被记录下来。事件显示关系网络正在发生细微变化，后续信任、合作或紧张程度值得继续观察。"
+    if category == "突发异常":
+        return f"{location}消息，系统捕捉到与{role}{name}相关的异常片段：{content[:90]}。这类信号不会中断世界运行，但已进入校园日报观察。"
+    if category == "群体现象":
+        return f"{location}消息，{role}{name}参与的行动呈现出集体扩散迹象：{content[:90]}。这可能改变接下来一段时间的校园注意力。"
+    if category == "反常行为":
+        return f"{location}消息，{role}{name}做出了一次不同寻常的行动：{content[:90]}。校园编辑部将其列为今日反常行为。"
+    if category == "内心发现":
+        return f"{location}消息，{role}{name}在运行过程中记录到新的观察或想法：{content[:90]}。这条发现为理解 Agent 的选择提供了线索。"
+    if category == "校园环境":
+        return f"{location}消息，校园环境出现一条值得记录的变化：{content[:100]}。这类公共信息会影响后续行动和空间选择。"
+    return f"{location}消息，{role}{name}留下新的校园行动记录：{content[:100]}。"
+
+
+def collect_campus_news_candidates(conn, day, source_slot, limit=60):
+    existing_residents = {
+        int(row["resident_id"])
+        for row in conn.execute("SELECT resident_id FROM agent_news_posts WHERE day = ?", (day,)).fetchall()
+    }
+    candidates = []
+    rows = conn.execute(
+        """
+        SELECT e.id, e.event_type, e.resident_id, e.location, e.title, e.content, e.payload,
+               r.name, r.role
+        FROM world_event_stream e
+        LEFT JOIN residents r ON r.id = e.resident_id
+        WHERE e.day = ?
+          AND e.resident_id IS NOT NULL
+          AND e.event_type NOT IN (
+              'world_tick_started', 'world_tick_complete',
+              'campus_news_published', 'campus_news_skipped'
+          )
+        ORDER BY e.id DESC
+        LIMIT ?
+        """,
+        (day, limit),
+    ).fetchall()
+    for row in rows:
+        resident_id = int(row["resident_id"])
+        if resident_id in existing_residents:
+            continue
+        payload = load_json_text(row["payload"], {})
+        action = payload.get("action") or payload.get("runtime_decision", {}).get("action") or ""
+        category, score = classify_campus_news_candidate(row["event_type"], action, row["content"], payload)
+        if row["event_type"] == "agent_tick" and source_slot and row["content"] and row["location"]:
+            score += 5
+        candidates.append({
+            "resident_id": resident_id,
+            "name": row["name"] or f"Agent {resident_id}",
+            "role": row["role"] or "校园居民",
+            "location": row["location"] or "校园",
+            "event_type": row["event_type"],
+            "title": row["title"],
+            "content": row["content"],
+            "payload": payload,
+            "action": action,
+            "category": category,
+            "score": score,
+            "source_event_id": row["id"],
+        })
+
+    relationship_rows = conn.execute(
+        """
+        SELECT c.id, c.from_resident_id, c.to_resident_id, c.interaction, c.reason,
+               c.affinity_before, c.affinity_after, c.trust_before, c.trust_after,
+               c.cooperation_before, c.cooperation_after, c.conflict_before, c.conflict_after,
+               r.name, r.role, r.location, target.name AS target_name
+        FROM relationship_change_events c
+        JOIN residents r ON r.id = c.from_resident_id
+        JOIN residents target ON target.id = c.to_resident_id
+        WHERE c.day = ?
+        ORDER BY c.id DESC
+        LIMIT 40
+        """,
+        (day,),
+    ).fetchall()
+    for row in relationship_rows:
+        resident_id = int(row["from_resident_id"])
+        if resident_id in existing_residents:
+            continue
+        delta = abs(int(row["trust_after"] or 0) - int(row["trust_before"] or 0))
+        delta += abs(int(row["cooperation_after"] or 0) - int(row["cooperation_before"] or 0))
+        delta += abs(int(row["conflict_after"] or 0) - int(row["conflict_before"] or 0))
+        content = f"{row['name']}与{row['target_name']}的关系发生变化：{row['reason'] or row['interaction']}。"
+        candidates.append({
+            "resident_id": resident_id,
+            "name": row["name"],
+            "role": row["role"],
+            "location": row["location"] or "校园",
+            "event_type": "relationship_change",
+            "title": "关系变化被记录",
+            "content": content,
+            "payload": {"relationship_change_event_id": row["id"], "target_name": row["target_name"]},
+            "action": row["interaction"],
+            "category": "关系风向",
+            "score": 86 + min(delta, 20),
+            "source_event_id": None,
+        })
+    candidates.sort(key=lambda item: (-item["score"], item["resident_id"]))
+    return candidates
+
+
 def publish_agent_news(conn, day, results):
     """Create a small number of public-facing posts from autonomous actions."""
     ensure_agent_news_system(conn)
@@ -7025,23 +7153,39 @@ def backfill_agent_daily_diaries(day: Optional[int] = None, rewrite: bool = Fals
 
 
 @app.get("/api/newspaper/agent-posts")
-def agent_newspaper_posts():
-    """Return the daily reflections that Agents publish in their own voice."""
+def agent_newspaper_posts(day: Optional[int] = None):
+    """Return campus newspaper posts for the requested day, defaulting to today."""
     with get_connection() as conn:
         ensure_agent_news_system(conn)
-        day = get_current_day(conn)
+        current_day = get_current_day(conn)
+        target_day = max(1, int(day)) if day is not None else current_day
         posts = conn.execute(
             """
-            SELECT p.resident_id, r.name, r.role, p.headline, p.content, p.created_at
+            SELECT p.day, p.resident_id, r.name, r.role, p.headline, p.content, p.created_at
             FROM agent_news_posts p
             JOIN residents r ON r.id = p.resident_id
             WHERE p.day = ?
             ORDER BY p.id DESC
             LIMIT 12
             """,
-            (day,),
+            (target_day,),
         ).fetchall()
-        return {"day": day, "posts": rows_to_dicts(posts)}
+        days = [
+            int(row["day"])
+            for row in conn.execute(
+                "SELECT DISTINCT day FROM agent_news_posts ORDER BY day DESC LIMIT 60"
+            ).fetchall()
+        ]
+        previous_day = next((item for item in days if item < target_day), None)
+        next_day = next((item for item in sorted(days) if item > target_day), None)
+        return {
+            "day": target_day,
+            "current_day": current_day,
+            "available_days": days,
+            "previous_day": previous_day,
+            "next_day": next_day,
+            "posts": rows_to_dicts(posts),
+        }
 
 
 @app.get("/api/newspaper/ai-today")

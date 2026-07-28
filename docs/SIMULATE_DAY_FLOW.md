@@ -16,7 +16,7 @@
 6. 查询 `residents` 表中的全部 Agent，按 `id` 顺序逐个执行感知、决策、行动、反馈和日志写入。
 7. 推进群体目标。
 8. 为全部 Agent 生成第一人称日记。
-9. 从当天行动中随机抽取最多 4 个生成第三人称校园新闻。
+9. 兼容旧入口：从当天行动中随机抽取最多 4 个生成第三人称校园新闻。主体验中的校园日报已迁移到 world runtime 自主循环。
 10. 写入当天自动模拟完成事件并返回结果。
 11. 前端重新加载世界状态、日报和外部资讯。
 
@@ -96,7 +96,7 @@ flowchart TD
     W2 --> W3["写入 memories source=diary"]
 
     W3 --> X["publish_agent_news"]
-    X --> X1["从当天 actions 随机抽取最多 4 个"]
+    X --> X1["兼容旧入口：从当天 actions 随机抽取最多 4 个"]
     X1 --> X2["调用 LLM 写第三人称校园快讯"]
     X2 --> X3["写入 agent_news_posts"]
 
@@ -167,7 +167,7 @@ fallback_agents
 
 - `actions` 是每个 Agent 的感知、决策、执行和环境反馈结果。
 - `daily_diaries` 是本次成功生成日记的 Agent 数量。
-- `published_news` 是本次写入 `agent_news_posts` 的新闻摘要，最多来自 4 个 Agent。
+- `published_news` 是旧模拟入口本次写入 `agent_news_posts` 的新闻摘要，最多来自 4 个 Agent；常规校园日报由 world runtime 根据事件流、关系变化、异常和涌现行为自主发布。
 - `fallback_agents` 是当日执行管线发生外层异常并降级观察的 Agent id 列表。
 
 ## 前端刷新
