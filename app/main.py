@@ -5217,11 +5217,22 @@ def _life_course_episodes(timeline):
         for key in ("location", "energy", "time_budget", "mood", "current_task"):
             if before.get(key) != after.get(key) and (before.get(key) is not None or after.get(key) is not None):
                 changes[key] = {"before": before.get(key), "after": after.get(key)}
+        feedback_keys = []
+        for feedback in episode["feedback"]:
+            if isinstance(feedback, dict):
+                feedback_keys.extend(f"{key}={value}" for key, value in feedback.items())
+        impact_parts = []
+        if changes:
+            impact_parts.append("状态变化：" + "、".join(f"{key} {value['before']}→{value['after']}" for key, value in changes.items()))
+        if episode["memories"]:
+            impact_parts.append(f"形成 {len(episode['memories'])} 条后续记忆")
+        if feedback_keys:
+            impact_parts.append("环境反馈：" + "、".join(feedback_keys[:4]))
         episode["impact"] = {
             "state_changes": changes,
             "memory_count": len(episode["memories"]),
             "environment_feedback_count": len(episode["feedback"]),
-            "interpretation": "记录了时序上的后续状态变化，不代表已证明因果关系。" if changes or episode["memories"] or episode["feedback"] else "当前片段暂无可观测的后续状态变化。",
+            "interpretation": "；".join(impact_parts) + "。这些是时序上观察到的结果，不代表已证明因果关系。" if impact_parts else "当前片段暂无可观测的后续状态变化。",
         }
         episode["evidence"] = episode["evidence"][:20]
         episodes.append(episode)
