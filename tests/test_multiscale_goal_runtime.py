@@ -32,6 +32,7 @@ class MultiscaleGoalRuntimeTest(unittest.TestCase):
             VALUES (1, '女', '测试', 80, '平稳', '学习', '{}', '{}', '[]', '{}')
             """
         )
+        main.SOCIAL_SCHEMA_READY = False
         main.ensure_social_system_tables(self.conn)
         main.ensure_campus_state_table(self.conn)
         main.ensure_space_system(self.conn)
@@ -41,6 +42,7 @@ class MultiscaleGoalRuntimeTest(unittest.TestCase):
 
     def tearDown(self):
         self.conn.close()
+        main.SOCIAL_SCHEMA_READY = False
         main.WORLD_SCHEMA_READY = False
 
     def resident(self):
@@ -162,6 +164,75 @@ class MultiscaleGoalRuntimeTest(unittest.TestCase):
             (old_short["id"],),
         ).fetchone()
         self.assertEqual(revision["revision_type"], "paused")
+
+    def test_relationship_history_is_loaded_in_one_bounded_batch(self):
+        self.conn.execute(
+            """
+            INSERT INTO residents
+            (id, name, role, personality, goal, money, location)
+            VALUES (2, '测试同学', '学生', '外向', '参与校园协作', 100, '教学楼')
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO relationships
+            (from_resident_id, to_resident_id, score, notes)
+            VALUES (1, 2, 65, '多次协作')
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO relationship_dynamics
+            (from_resident_id, to_resident_id, affinity, trust, cooperation,
+             competition, conflict, tension, interaction_count, last_day)
+            VALUES (1, 2, 70, 72, 78, 10, 5, 8, 15, 1)
+            """
+        )
+        for index in range(15):
+            self.conn.execute(
+                """
+                INSERT INTO relationship_change_events
+                (day, from_resident_id, to_resident_id, interaction, reason)
+                VALUES (1, 1, 2, 'collaborate', ?)
+                """,
+                (f"协作证据 {index}",),
+            )
+        histories = main.relationship_histories_by_target(self.conn, 1, [2], per_target=12)
+        self.assertEqual(len(histories[2]), 12)
+        interpretation = main.infer_emergent_relationship(
+            self.conn,
+            1,
+            2,
+            dynamics=dict(
+                self.conn.execute(
+                    """
+                    SELECT * FROM relationship_dynamics
+                    WHERE from_resident_id = 1 AND to_resident_id = 2
+                    """
+                ).fetchone()
+            ),
+            score=65,
+            history_rows=histories[2],
+        )
+        self.assertIn("合作伙伴", [item["label"] for item in interpretation["candidates"]])
+        self.assertTrue(interpretation["evidence"])
+        graph = main.build_agent_social_graph(self.conn, 1, limit=10)
+        self.assertEqual(len(graph["links"]), 1)
+        self.conn.execute(
+            """
+            INSERT INTO simulation_action_logs
+            (day, resident_id, perception, retrieved_memories, decision, execution,
+             environment_feedback, state_before, state_after)
+            VALUES (1, 1, '{}', '[]', ?, ?, '{}', '{}', '{}')
+            """,
+            (
+                json.dumps({"action": "collaborate", "reason": "共同推进任务"}),
+                json.dumps({"result": {"description": "完成一次协作"}}),
+            ),
+        )
+        timeline = main.fetch_agent_timeline(self.conn, 1, limit=20)
+        self.assertEqual(timeline[0]["decision"]["action"], "collaborate")
+        self.assertEqual(timeline[0]["execution"]["result"]["description"], "完成一次协作")
 
 
 if __name__ == "__main__":
