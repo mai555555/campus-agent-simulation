@@ -5172,12 +5172,12 @@ def _life_course_episodes(timeline):
         episode["event_ids"].append(event.get("id"))
         episode["event_count"] += 1
         episode["repeat_count"] += max(1, int(event.get("repeat_count") or 1))
-        if event.get("action") and event["action"] not in episode["actions"]:
+        if event.get("action") and event["action"] != "memory" and event["action"] not in episode["actions"]:
             episode["actions"].append(event["action"])
         decision = event.get("decision") if isinstance(event.get("decision"), dict) else {}
         execution = event.get("execution") if isinstance(event.get("execution"), dict) else {}
         planned = decision.get("planned_action") or decision.get("action")
-        actual = execution.get("action") or event.get("action")
+        actual = execution.get("action") or (event.get("action") if event.get("action") != "memory" else None)
         if planned and planned not in episode["planned_actions"]:
             episode["planned_actions"].append(planned)
         if actual and actual not in episode["actual_actions"]:
