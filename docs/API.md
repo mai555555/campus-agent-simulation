@@ -178,6 +178,16 @@ curl -X POST http://127.0.0.1:8000/api/simulate/ai-day
 | GET | `/api/agents/{resident_id}/timeline?limit=30` | 简化行动时间线 |
 | GET | `/api/agents/{resident_id}/simulation-logs?limit=12` | 完整感知、记忆、决策、执行和反馈日志 |
 
+## Agent 生命历程观察台
+
+这些接口只读，不调用 LLM，也不会改变世界状态。返回的事件均带有 `evidence.source` 与 `evidence.id`；`research_boundaries.causal_links_available` 始终为 `false`，表示时间先后不等于因果关系。
+
+| GET | `/api/agents/{resident_id}/life-course/overview?from_day=1&to_day=30&limit=240` | 当前状态、经历时间线、转折点、关系与群体的综合视图 |
+| GET | `/api/agents/{resident_id}/life-course/events` | 带感知、检索记忆、决策、执行、环境反馈及前后状态快照的事件 |
+| GET | `/api/agents/{resident_id}/life-course/turning-points?limit=12` | 按透明规则评分的高重要性事件 |
+| GET | `/api/agents/{resident_id}/life-course/relationships` | 当前关系与已记录的关系变化历史 |
+| GET | `/api/agents/{resident_id}/life-course/groups` | 当前群体归属与关联证据（成员历史尚待运行数据积累） |
+
 ## 日报与外部资讯
 
 | Method | Path | 说明 |

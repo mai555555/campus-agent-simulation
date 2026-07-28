@@ -319,13 +319,40 @@ CREATE TABLE IF NOT EXISTS simulation_action_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     day INTEGER NOT NULL,
     resident_id INTEGER NOT NULL,
+    tick_id INTEGER,
     perception TEXT NOT NULL DEFAULT '{}',
     retrieved_memories TEXT NOT NULL DEFAULT '[]',
     decision TEXT NOT NULL DEFAULT '{}',
     execution TEXT NOT NULL DEFAULT '{}',
     environment_feedback TEXT NOT NULL DEFAULT '{}',
+    state_before TEXT NOT NULL DEFAULT '{}',
+    state_after TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (resident_id) REFERENCES residents(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS relationship_change_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day INTEGER NOT NULL DEFAULT 1,
+    tick_id INTEGER,
+    event_id INTEGER,
+    from_resident_id INTEGER NOT NULL,
+    to_resident_id INTEGER NOT NULL,
+    interaction TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    affinity_before INTEGER NOT NULL DEFAULT 50,
+    affinity_after INTEGER NOT NULL DEFAULT 50,
+    trust_before INTEGER NOT NULL DEFAULT 50,
+    trust_after INTEGER NOT NULL DEFAULT 50,
+    cooperation_before INTEGER NOT NULL DEFAULT 50,
+    cooperation_after INTEGER NOT NULL DEFAULT 50,
+    competition_before INTEGER NOT NULL DEFAULT 0,
+    competition_after INTEGER NOT NULL DEFAULT 0,
+    conflict_before INTEGER NOT NULL DEFAULT 0,
+    conflict_after INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (from_resident_id) REFERENCES residents(id) ON DELETE CASCADE,
+    FOREIGN KEY (to_resident_id) REFERENCES residents(id) ON DELETE CASCADE
 );
 """
 
