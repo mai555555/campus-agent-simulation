@@ -6089,6 +6089,7 @@ def _life_course_score_event(event):
     event_type = str(event.get("event_type") or "")
     action = str(event.get("action") or "")
     content = str(event.get("content") or "")
+    is_memory = event.get("source") == "memories"
     if action in {"chat", "conflict", "collaborate", "create_group", "join_group", "leave_group", "submit_policy"}:
         score += 2
         reasons.append("社会互动或群体行为")
@@ -6102,8 +6103,8 @@ def _life_course_score_event(event):
         score += 3
         reasons.append("长期目标完成")
     if event.get("memory_importance", 0) >= 3:
-        score += 2
-        reasons.append("被记录为高重要性记忆")
+        score += 1 if is_memory else 2
+        reasons.append("留下重要记忆" if is_memory else "行动被记忆强化")
     if event.get("spread_count", 0) > 1:
         score += 1
         reasons.append("影响多个对象或地点")
@@ -6116,6 +6117,35 @@ def _life_course_score_event(event):
     event["significance"] = level
     event["significance_reasons"] = reasons
     return event
+
+
+def _life_course_kind(item):
+    if item.get("source") == "memories":
+        return "memory"
+    return "action"
+
+
+def _life_course_display_title(item):
+    source = item.get("source")
+    action = item.get("action")
+    if source == "memories":
+        return "日记与记忆" if item.get("memory_source") == "diary" else "记忆沉淀"
+    if source == "simulation_action_logs":
+        return f"{_life_course_action_label(action)}路线"
+    if source == "world_event_stream":
+        return item.get("title") or f"{_life_course_action_label(action)}事件"
+    return item.get("title") or "校园经历"
+
+
+def _life_course_turning_summary(item):
+    reasons = item.get("significance_reasons") or []
+    if item.get("source") == "memories":
+        prefix = "重要记忆" if item.get("memory_source") != "diary" else "重要日记"
+    elif item.get("significance") == "turning_point":
+        prefix = "关键转折"
+    else:
+        prefix = "重要行动"
+    return f"{prefix} · {'、'.join(reasons[:2]) if reasons else '值得回看'}"
 
 
 def _life_course_timeline(conn, resident_id, from_day=None, to_day=None, limit=240):
@@ -6252,6 +6282,7 @@ def _life_course_timeline(conn, resident_id, from_day=None, to_day=None, limit=2
             "created_at": row["created_at"],
             "source": "memories",
             "evidence": [_life_course_evidence("memories", row["id"])],
+            "importance": importance,
             "memory_type": row["memory_type"],
             "memory_source": source,
             "memory_importance": importance,
@@ -6303,7 +6334,7 @@ def _life_course_relationships(conn, resident_id, timeline):
             FROM relationship_change_events
             WHERE from_resident_id = ? AND to_resident_id = ?
             ORDER BY day ASC, id ASC
-            LIMIT 100
+            LIMIT 30
             """,
             (resident_id, target_id),
         ).fetchall()
@@ -6374,6 +6405,12 @@ def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, l
         (resident_id,),
     ).fetchall()
     timeline = _life_course_timeline(conn, resident_id, from_day=from_day, to_day=to_day, limit=limit)
+    for item in timeline:
+        item["timeline_kind"] = _life_course_kind(item)
+        item["display_title"] = _life_course_display_title(item)
+        item["turning_summary"] = _life_course_turning_summary(item)
+    action_timeline = [item for item in timeline if item.get("timeline_kind") == "action"]
+    memory_timeline = [item for item in timeline if item.get("timeline_kind") == "memory"]
     relationships = _life_course_relationships(conn, resident_id, timeline)
     groups = _life_course_groups(conn, resident_id, timeline)
     action_counts = {}
@@ -6392,19 +6429,31 @@ def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, l
         "mood": current_profile.get("mood"),
         "current_task": current_profile.get("current_task"),
     }
-    important = [item for item in timeline if item.get("significance") in {"important", "turning_point"}]
+    important = [
+        item
+        for item in timeline
+        if item.get("significance") == "turning_point"
+        or (
+            item.get("significance") == "important"
+            and item.get("timeline_kind") == "action"
+        )
+    ]
     return {
-        "analysis_version": "life-course-v1",
+        "analysis_version": "life-course-v2",
         "resident": dict(resident),
         "current_state": current_state,
         "initial_goal": resident["goal"],
         "goals": [dict(goal) for goal in goals],
         "timeline": timeline,
+        "action_timeline": action_timeline,
+        "memory_timeline": memory_timeline,
         "turning_points": sorted(important, key=lambda item: (-int(item.get("turning_point_score") or 0), int(item.get("day") or 0)))[:12],
         "relationships": relationships,
         "groups": groups,
         "behavior_summary": {
             "event_count": len(timeline),
+            "action_event_count": len(action_timeline),
+            "memory_event_count": len(memory_timeline),
             "action_counts": action_counts,
             "unique_spaces": sorted(locations),
             "relationship_count": len(relationships),

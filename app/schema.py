@@ -552,6 +552,8 @@ CREATE INDEX IF NOT EXISTS idx_social_interaction_events_type ON social_interact
 CREATE INDEX IF NOT EXISTS idx_social_relation_interpretations_pair_day ON social_relation_interpretations(from_resident_id, to_resident_id, day);
 CREATE INDEX IF NOT EXISTS idx_social_relation_interpretations_label ON social_relation_interpretations(current_label);
 CREATE INDEX IF NOT EXISTS idx_social_beliefs_subject_day ON social_beliefs(subject_resident_id, day);
+CREATE INDEX IF NOT EXISTS idx_memories_resident_day ON memories(resident_id, day);
+CREATE INDEX IF NOT EXISTS idx_simulation_action_logs_resident_day ON simulation_action_logs(resident_id, day);
 CREATE INDEX IF NOT EXISTS idx_simulation_action_logs_resident_id_desc ON simulation_action_logs(resident_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_relationship_change_events_pair_id_desc ON relationship_change_events(from_resident_id, to_resident_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_goals_resident_horizon_status ON agent_goals(resident_id, horizon, status);
@@ -746,6 +748,7 @@ CREATE INDEX IF NOT EXISTS idx_world_ticks_started_at ON world_ticks(started_at)
 CREATE INDEX IF NOT EXISTS idx_world_event_stream_created_at ON world_event_stream(created_at);
 CREATE INDEX IF NOT EXISTS idx_world_event_stream_event_type ON world_event_stream(event_type);
 CREATE INDEX IF NOT EXISTS idx_world_event_stream_resident_id ON world_event_stream(resident_id);
+CREATE INDEX IF NOT EXISTS idx_world_event_stream_resident_day ON world_event_stream(resident_id, day);
 CREATE INDEX IF NOT EXISTS idx_world_event_stream_tick_id ON world_event_stream(tick_id);
 CREATE INDEX IF NOT EXISTS idx_agent_action_plans_window ON agent_action_plans(window_start, window_end);
 CREATE INDEX IF NOT EXISTS idx_observer_sessions_last_seen ON observer_sessions(last_seen_at);
