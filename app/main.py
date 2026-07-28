@@ -5298,13 +5298,13 @@ def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, l
 
 
 @app.get("/api/agents/{resident_id}/life-course/overview")
-def get_agent_life_course_overview(resident_id: int, from_day: int | None = None, to_day: int | None = None, limit: int = 240):
+def get_agent_life_course_overview(resident_id: int, from_day: Optional[int] = None, to_day: Optional[int] = None, limit: int = 240):
     with get_connection() as conn:
         return _build_life_course_overview(conn, resident_id, from_day=from_day, to_day=to_day, limit=limit)
 
 
 @app.get("/api/agents/{resident_id}/life-course/events")
-def get_agent_life_course_events(resident_id: int, from_day: int | None = None, to_day: int | None = None, limit: int = 240):
+def get_agent_life_course_events(resident_id: int, from_day: Optional[int] = None, to_day: Optional[int] = None, limit: int = 240):
     with get_connection() as conn:
         overview = _build_life_course_overview(conn, resident_id, from_day=from_day, to_day=to_day, limit=limit)
         return {"analysis_version": overview["analysis_version"], "events": overview["timeline"], "research_boundaries": overview["research_boundaries"]}
