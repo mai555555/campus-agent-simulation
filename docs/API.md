@@ -165,6 +165,7 @@ curl -X POST http://127.0.0.1:8000/api/simulate/ai-day
 | GET | `/api/agents/{resident_id}/social-graph` | 前端人物页使用的关系图 |
 | GET | `/api/agents/{resident_id}/learning` | 学习记录 |
 | GET | `/api/agents/{resident_id}/long-term-goals` | 长期目标 |
+| GET | `/api/agents/{resident_id}/goal-system` | 五层目标树、承诺、计划结果与行为轨迹 |
 | POST | `/api/goals` | 创建长期目标 |
 | GET | `/api/organizations` | 校园组织 |
 | GET | `/api/groups` | 群体目标 |
