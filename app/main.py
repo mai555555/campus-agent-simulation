@@ -119,7 +119,7 @@ DEFAULT_AGENT_PERSONALITY_TRAITS = {
 from app.schema import (
     CAMPUS_STATE_SQL, SPACE_SYSTEM_SQL, DEFAULT_SPACES, DEFAULT_ENV, ENV_COLUMN_TYPES,
     AGENT_NEWS_SQL, EXTERNAL_INFORMATION_SQL, AGENT_PROFILE_SQL, PROFILE_COLUMN_TYPES,
-    SOCIAL_SYSTEM_SQL, BEHAVIOR_SYSTEM_SQL, RELATIONSHIP_DYNAMIC_COLUMNS,
+SOCIAL_SYSTEM_SQL, BEHAVIOR_SYSTEM_SQL, RELATIONSHIP_DYNAMIC_COLUMNS,
     LONG_TERM_GOAL_COLUMNS, AGENT_INFORMATION_COLUMNS, WORLD_RUNTIME_SQL, RESEARCH_SYSTEM_SQL
 )
 
@@ -144,6 +144,39 @@ def ensure_social_system_tables(conn):
     for column, column_type in LONG_TERM_GOAL_COLUMNS.items():
         if column not in goal_columns:
             conn.execute(f"ALTER TABLE long_term_goals ADD COLUMN {column} {column_type}")
+    action_log_columns = {row["name"] for row in conn.execute("PRAGMA table_info(simulation_action_logs)").fetchall()}
+    for column, column_type in {
+        "tick_id": "INTEGER",
+        "state_before": "TEXT NOT NULL DEFAULT '{}'",
+        "state_after": "TEXT NOT NULL DEFAULT '{}'",
+    }.items():
+        if column not in action_log_columns:
+            conn.execute(f"ALTER TABLE simulation_action_logs ADD COLUMN {column} {column_type}")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS relationship_change_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            day INTEGER NOT NULL DEFAULT 1,
+            tick_id INTEGER,
+            event_id INTEGER,
+            from_resident_id INTEGER NOT NULL,
+            to_resident_id INTEGER NOT NULL,
+            interaction TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            affinity_before INTEGER NOT NULL DEFAULT 50,
+            affinity_after INTEGER NOT NULL DEFAULT 50,
+            trust_before INTEGER NOT NULL DEFAULT 50,
+            trust_after INTEGER NOT NULL DEFAULT 50,
+            cooperation_before INTEGER NOT NULL DEFAULT 50,
+            cooperation_after INTEGER NOT NULL DEFAULT 50,
+            competition_before INTEGER NOT NULL DEFAULT 0,
+            competition_after INTEGER NOT NULL DEFAULT 0,
+            conflict_before INTEGER NOT NULL DEFAULT 0,
+            conflict_after INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
     normalize_agent_hierarchy(conn)
     seed_long_term_goals(conn)
     seed_campus_organizations(conn)
@@ -260,6 +293,8 @@ def evolve_relationship(
     affinity_delta=None,
     competition_delta=0,
     conflict_delta=None,
+    tick_id=None,
+    event_id=None,
 ):
     current = get_relationship_dynamics(conn, from_id, to_id)
     if affinity_delta is None:
@@ -282,6 +317,22 @@ def evolve_relationship(
         WHERE from_resident_id = ? AND to_resident_id = ?
         """,
         (affinity, trust, cooperation, competition, conflict, tension, get_current_day(conn), from_id, to_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO relationship_change_events
+        (day, tick_id, event_id, from_resident_id, to_resident_id, interaction, reason,
+         affinity_before, affinity_after, trust_before, trust_after,
+         cooperation_before, cooperation_after, competition_before, competition_after,
+         conflict_before, conflict_after)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            get_current_day(conn), tick_id, event_id, from_id, to_id, interaction, note or "",
+            int(current["affinity"]), affinity, int(current["trust"]), trust,
+            int(current["cooperation"]), cooperation, int(current["competition"]), competition,
+            int(current["conflict"]), conflict,
+        ),
     )
     return {
         "interaction": interaction,
@@ -2589,24 +2640,29 @@ def apply_environment_feedback(conn, resident_id, action, result):
     return updates
 
 
-def record_simulation_log(conn, resident_id, perception, decision_data, execution, feedback):
+def record_simulation_log(conn, resident_id, perception, decision_data, execution, feedback,
+                          state_before=None, state_after=None, tick_id=None):
     """Persist the exact inputs and outcome that explain one autonomous action."""
     ensure_social_system_tables(conn)
     memory_context = decision_data.get("memory_context", {})
     conn.execute(
         """
         INSERT INTO simulation_action_logs
-        (day, resident_id, perception, retrieved_memories, decision, execution, environment_feedback)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        (day, resident_id, tick_id, perception, retrieved_memories, decision, execution,
+         environment_feedback, state_before, state_after)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             get_current_day(conn),
             resident_id,
+            tick_id,
             json.dumps(perception or {}, ensure_ascii=False),
             json.dumps(memory_context.get("memories", []), ensure_ascii=False),
             json.dumps(decision_data.get("decision", {}), ensure_ascii=False),
             json.dumps(execution or {}, ensure_ascii=False),
             json.dumps(feedback or {}, ensure_ascii=False),
+            json.dumps(state_before or {}, ensure_ascii=False),
+            json.dumps(state_after or {}, ensure_ascii=False),
         ),
     )
 
@@ -2617,9 +2673,9 @@ def run_lifecycle_step(conn, resident_id):
     decision_data = decide_agent_action(conn, resident_id)
     execution = execute_decision(conn, resident_id, decision_data["decision"])
     feedback = apply_environment_feedback(conn, resident_id, execution["action"], execution["result"])
-    record_simulation_log(conn, resident_id, perception, decision_data, execution, feedback)
-    conn.commit()
     after = get_agent_module_state(conn, resident_id)
+    record_simulation_log(conn, resident_id, perception, decision_data, execution, feedback, before, after)
+    conn.commit()
     env_after = get_campus_environment(conn)
     return {
         "loop": "perceive -> decide -> act -> feedback -> memory",
@@ -3356,6 +3412,7 @@ def describe_runtime_action(conn, agent, action, destination, goal, day, observe
 
 
 def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observed=False):
+    state_before = get_agent_module_state(conn, agent["id"])
     plan = get_current_agent_plan(conn, agent["id"], world_time) or {}
     step = choose_plan_step(plan, world_time, agent["location"])
     perception = build_runtime_perception(conn, agent, world_time, day, slot, plan, step, observed)
@@ -3380,7 +3437,18 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
         execution = {"action": action, "result": {"description": content}, "success": True, "plan_step": step, "runtime_decision": decision}
         if "social_effect" in locals() and social_effect:
             execution["social_effect"] = social_effect
-        record_simulation_log(conn, agent["id"], perception, {"decision": {"action": action, "reason": decision.get("reason") or goal, "tool_input": {"destination": destination}}, "memory_context": {"memories": []}}, execution, {})
+        state_after = get_agent_module_state(conn, agent["id"])
+        record_simulation_log(
+            conn,
+            agent["id"],
+            perception,
+            {"decision": {"action": action, "reason": decision.get("reason") or goal, "tool_input": {"destination": destination}}, "memory_context": {"memories": []}},
+            execution,
+            {},
+            state_before,
+            state_after,
+            tick_id=tick_id,
+        )
         conn.execute(
             """
             UPDATE agent_profiles
@@ -4775,6 +4843,393 @@ def get_social_relationships(resident_id: int):
         return relationships
 
 
+def _life_course_action_label(action):
+    return {
+        "move": "移动",
+        "chat": "交流",
+        "buy_sell": "交易",
+        "submit_policy": "政策提案",
+        "observe": "观察",
+        "create_group": "创建群体",
+        "join_group": "加入群体",
+        "leave_group": "离开群体",
+        "attend_class": "参加课程",
+        "club_activity": "参加活动",
+        "collaborate": "协作",
+        "conflict": "冲突",
+        "reflect": "反思",
+        "rest": "休息",
+    }.get(str(action or "").strip(), "行动")
+
+
+def _life_course_evidence(source, row_id):
+    return {"source": source, "id": row_id}
+
+
+def _life_course_score_event(event):
+    """Score turning points with transparent rules; never infer causality here."""
+    score = int(event.get("importance") or 1)
+    reasons = []
+    event_type = str(event.get("event_type") or "")
+    action = str(event.get("action") or "")
+    content = str(event.get("content") or "")
+    if action in {"chat", "conflict", "collaborate", "create_group", "join_group", "leave_group", "submit_policy"}:
+        score += 2
+        reasons.append("社会互动或群体行为")
+    if action in {"conflict", "submit_policy", "create_group", "leave_group"} or "conflict" in event_type:
+        score += 2
+        reasons.append("可能改变关系或群体状态")
+    if "failed" in event_type or event.get("success") is False:
+        score += 2
+        reasons.append("行动失败或运行异常")
+    if event.get("goal_completed"):
+        score += 3
+        reasons.append("长期目标完成")
+    if event.get("memory_importance", 0) >= 3:
+        score += 2
+        reasons.append("被记录为高重要性记忆")
+    if event.get("spread_count", 0) > 1:
+        score += 1
+        reasons.append("影响多个对象或地点")
+    if any(word in content for word in ("关系", "小组", "冲突", "目标", "政策", "信息")):
+        score += 1
+    if not reasons:
+        reasons.append("构成日常行动轨迹")
+    level = "turning_point" if score >= 7 else ("important" if score >= 4 else "ordinary")
+    event["turning_point_score"] = min(score, 12)
+    event["significance"] = level
+    event["significance_reasons"] = reasons
+    return event
+
+
+def _life_course_timeline(conn, resident_id, from_day=None, to_day=None, limit=240):
+    clauses = ["resident_id = ?"]
+    params = [resident_id]
+    if from_day is not None:
+        clauses.append("day >= ?")
+        params.append(max(1, int(from_day)))
+    if to_day is not None:
+        clauses.append("day <= ?")
+        params.append(max(1, int(to_day)))
+    where = " AND ".join(clauses)
+    events = []
+    seen_action_keys = set()
+
+    world_rows = conn.execute(
+        f"""
+        SELECT id, tick_id, day, slot, event_type, resident_id, location, title, content, payload, created_at
+        FROM world_event_stream
+        WHERE {where}
+        ORDER BY day ASC, id ASC
+        LIMIT ?
+        """,
+        params + [min(max(int(limit), 20), 500)],
+    ).fetchall()
+    for row in world_rows:
+        payload = load_json_text(row["payload"], {})
+        action = payload.get("action") or payload.get("runtime_decision", {}).get("action")
+        key = (row["day"], str(action or row["event_type"]), row["location"] or "")
+        seen_action_keys.add(key)
+        item = {
+            "id": row["id"],
+            "day": row["day"],
+            "slot": row["slot"],
+            "event_type": row["event_type"],
+            "action": action,
+            "title": row["title"],
+            "content": row["content"],
+            "location": row["location"],
+            "created_at": row["created_at"],
+            "source": "world_event_stream",
+            "evidence": [_life_course_evidence("world_event_stream", row["id"])],
+            "payload": payload,
+            "success": row["event_type"] not in {"agent_tick_failed", "world_tick_failed"},
+            "memory_importance": 0,
+            "spread_count": len(payload.get("recipients", [])) if isinstance(payload.get("recipients"), list) else 0,
+        }
+        events.append(_life_course_score_event(item))
+
+    log_rows = conn.execute(
+        f"""
+        SELECT id, day, tick_id, perception, retrieved_memories, decision, execution,
+               environment_feedback, state_before, state_after, created_at
+        FROM simulation_action_logs
+        WHERE {where}
+        ORDER BY day ASC, id ASC
+        LIMIT ?
+        """,
+        params + [min(max(int(limit), 20), 500)],
+    ).fetchall()
+    for row in log_rows:
+        decision = load_json_text(row["decision"], {})
+        execution = load_json_text(row["execution"], {})
+        feedback = load_json_text(row["environment_feedback"], {})
+        action = decision.get("action") or execution.get("action")
+        result = execution.get("result") if isinstance(execution, dict) else {}
+        result = result if isinstance(result, dict) else {}
+        location = result.get("location") or decision.get("tool_input", {}).get("destination", "")
+        key = (row["day"], str(action or "action"), str(location or ""))
+        if key in seen_action_keys:
+            continue
+        goal_update = execution.get("long_term_goal") if isinstance(execution, dict) else {}
+        item = {
+            "id": row["id"],
+            "day": row["day"],
+            "slot": "",
+            "event_type": "simulation_action",
+            "action": action,
+            "title": f"{_life_course_action_label(action)}行动",
+            "content": result.get("description") or result.get("message") or str(decision.get("reason") or "完成一次行动"),
+            "location": location,
+            "created_at": row["created_at"],
+            "tick_id": row["tick_id"],
+            "source": "simulation_action_logs",
+            "evidence": [_life_course_evidence("simulation_action_logs", row["id"])],
+            "decision": decision,
+            "execution": execution,
+            "environment_feedback": feedback,
+            "retrieved_memories": load_json_text(row["retrieved_memories"], []),
+            "state_before": load_json_text(row["state_before"], {}),
+            "state_after": load_json_text(row["state_after"], {}),
+            "success": execution.get("success", "error" not in result),
+            "goal_completed": isinstance(goal_update, dict) and goal_update.get("status") == "completed",
+            "memory_importance": 0,
+            "spread_count": 0,
+        }
+        events.append(_life_course_score_event(item))
+
+    memory_rows = conn.execute(
+        f"""
+        SELECT id, day, content, importance, memory_type, source, created_at
+        FROM memories
+        WHERE {where}
+        ORDER BY day ASC, id ASC
+        LIMIT ?
+        """,
+        params + [min(max(int(limit), 20), 500)],
+    ).fetchall()
+    for row in memory_rows:
+        importance = int(row["importance"] or 1)
+        source = str(row["source"] or "action")
+        if importance < 2 and source not in {"diary", "relationship", "fallback", "world_tick"}:
+            continue
+        item = {
+            "id": row["id"],
+            "day": row["day"],
+            "slot": "",
+            "event_type": "memory",
+            "action": "memory",
+            "title": "个人经历记录" if source != "diary" else "个人日记",
+            "content": row["content"],
+            "location": "",
+            "created_at": row["created_at"],
+            "source": "memories",
+            "evidence": [_life_course_evidence("memories", row["id"])],
+            "memory_type": row["memory_type"],
+            "memory_source": source,
+            "memory_importance": importance,
+            "success": True,
+            "spread_count": 0,
+        }
+        events.append(_life_course_score_event(item))
+
+    events.sort(key=lambda item: (int(item.get("day") or 0), str(item.get("created_at") or ""), int(item.get("id") or 0)))
+    return events[-min(max(int(limit), 20), 500):]
+
+
+def _life_course_relationships(conn, resident_id, timeline):
+    rows = conn.execute(
+        """
+        SELECT relationships.to_resident_id, residents.name, residents.role,
+               relationships.score, relationship_dynamics.affinity,
+               relationship_dynamics.trust, relationship_dynamics.cooperation,
+               relationship_dynamics.competition, relationship_dynamics.conflict,
+               relationship_dynamics.interaction_count
+        FROM relationships
+        JOIN residents ON residents.id = relationships.to_resident_id
+        LEFT JOIN relationship_dynamics
+          ON relationship_dynamics.from_resident_id = relationships.from_resident_id
+         AND relationship_dynamics.to_resident_id = relationships.to_resident_id
+        WHERE relationships.from_resident_id = ?
+        ORDER BY relationships.score DESC
+        LIMIT 12
+        """,
+        (resident_id,),
+    ).fetchall()
+    result = []
+    for row in rows:
+        target_id = row["to_resident_id"]
+        history_rows = conn.execute(
+            """
+            SELECT id, day, tick_id, event_id, interaction, reason,
+                   affinity_before, affinity_after, trust_before, trust_after,
+                   cooperation_before, cooperation_after, competition_before, competition_after,
+                   conflict_before, conflict_after, created_at
+            FROM relationship_change_events
+            WHERE from_resident_id = ? AND to_resident_id = ?
+            ORDER BY day ASC, id ASC
+            LIMIT 100
+            """,
+            (resident_id, target_id),
+        ).fetchall()
+        related = []
+        for event in timeline:
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            social = payload.get("social_effect") if isinstance(payload.get("social_effect"), dict) else {}
+            if social.get("target_id") == target_id or payload.get("target_id") == target_id:
+                related.append(event["id"])
+        result.append({
+            "resident_id": target_id,
+            "name": row["name"],
+            "role": row["role"],
+            "score": row["score"],
+            "affinity": row["affinity"] if row["affinity"] is not None else 50,
+            "trust": row["trust"] if row["trust"] is not None else 50,
+            "cooperation": row["cooperation"] if row["cooperation"] is not None else 50,
+            "competition": row["competition"] if row["competition"] is not None else 0,
+            "conflict": row["conflict"] if row["conflict"] is not None else 0,
+            "interaction_count": row["interaction_count"] if row["interaction_count"] is not None else 0,
+            "evidence_event_ids": related[:12],
+            "history_available": bool(history_rows),
+            "history": rows_to_dicts(history_rows),
+        })
+    return result
+
+
+def _life_course_groups(conn, resident_id, timeline):
+    groups = []
+    rows = conn.execute("SELECT * FROM group_goals ORDER BY status, id DESC").fetchall()
+    for row in rows:
+        members = load_json_text(row["member_ids"], [])
+        member_ids = [int(member) for member in members if str(member).isdigit()]
+        if resident_id not in member_ids and int(row["leader_id"]) != resident_id:
+            continue
+        evidence = [
+            event["id"]
+            for event in timeline
+            if any(word in str(event.get("event_type") or "") for word in ("group", "collabor"))
+            or any(word in str(event.get("content") or "") for word in (str(row["name"]), str(row["shared_goal"])))
+        ]
+        groups.append({
+            "id": row["id"],
+            "name": row["name"],
+            "group_type": row["group_type"],
+            "leader_id": row["leader_id"],
+            "member_ids": member_ids,
+            "roles": load_json_text(row["roles"], {}),
+            "shared_goal": row["shared_goal"],
+            "progress": row["progress"],
+            "target_progress": row["target_progress"],
+            "status": row["status"],
+            "evidence_event_ids": evidence[:12],
+            "membership_history_available": False,
+        })
+    return groups
+
+
+def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, limit=240):
+    resident = get_resident(conn, resident_id)
+    if not resident:
+        raise HTTPException(status_code=404, detail="Agent 不存在")
+    ensure_social_system_tables(conn)
+    profile = conn.execute("SELECT * FROM agent_profiles WHERE resident_id = ?", (resident_id,)).fetchone()
+    goals = conn.execute(
+        "SELECT * FROM long_term_goals WHERE resident_id = ? ORDER BY status, deadline_day, id",
+        (resident_id,),
+    ).fetchall()
+    timeline = _life_course_timeline(conn, resident_id, from_day=from_day, to_day=to_day, limit=limit)
+    relationships = _life_course_relationships(conn, resident_id, timeline)
+    groups = _life_course_groups(conn, resident_id, timeline)
+    action_counts = {}
+    locations = set()
+    for item in timeline:
+        action = item.get("action")
+        if action and action != "memory":
+            action_counts[action] = action_counts.get(action, 0) + 1
+        if item.get("location"):
+            locations.add(item["location"])
+    current_profile = dict(profile) if profile else {}
+    current_state = {
+        "location": resident["location"],
+        "energy": current_profile.get("energy"),
+        "time_budget": current_profile.get("time_budget"),
+        "mood": current_profile.get("mood"),
+        "current_task": current_profile.get("current_task"),
+    }
+    important = [item for item in timeline if item.get("significance") in {"important", "turning_point"}]
+    return {
+        "analysis_version": "life-course-v1",
+        "resident": dict(resident),
+        "current_state": current_state,
+        "initial_goal": resident["goal"],
+        "goals": [dict(goal) for goal in goals],
+        "timeline": timeline,
+        "turning_points": sorted(important, key=lambda item: (-int(item.get("turning_point_score") or 0), int(item.get("day") or 0)))[:12],
+        "relationships": relationships,
+        "groups": groups,
+        "behavior_summary": {
+            "event_count": len(timeline),
+            "action_counts": action_counts,
+            "unique_spaces": sorted(locations),
+            "relationship_count": len(relationships),
+            "active_group_count": sum(1 for group in groups if group.get("status") == "active"),
+        },
+        "research_boundaries": {
+            "state_history_available": any(item.get("state_before") or item.get("state_after") for item in timeline if item.get("source") == "simulation_action_logs"),
+            "relationship_history_available": any(item.get("history_available") for item in relationships),
+            "group_membership_history_available": False,
+            "causal_links_available": False,
+            "message": "当前版本展示事件证据和时序关联，不将时序关联表述为因果关系。",
+        },
+        "evidence": [
+            _life_course_evidence("residents", resident_id),
+            *[_life_course_evidence("world_event_stream", item["id"]) for item in timeline if item.get("source") == "world_event_stream"],
+        ][:40],
+    }
+
+
+@app.get("/api/agents/{resident_id}/life-course/overview")
+def get_agent_life_course_overview(resident_id: int, from_day: int | None = None, to_day: int | None = None, limit: int = 240):
+    with get_connection() as conn:
+        return _build_life_course_overview(conn, resident_id, from_day=from_day, to_day=to_day, limit=limit)
+
+
+@app.get("/api/agents/{resident_id}/life-course/events")
+def get_agent_life_course_events(resident_id: int, from_day: int | None = None, to_day: int | None = None, limit: int = 240):
+    with get_connection() as conn:
+        overview = _build_life_course_overview(conn, resident_id, from_day=from_day, to_day=to_day, limit=limit)
+        return {"analysis_version": overview["analysis_version"], "events": overview["timeline"], "research_boundaries": overview["research_boundaries"]}
+
+
+@app.get("/api/agents/{resident_id}/life-course/turning-points")
+def get_agent_life_course_turning_points(resident_id: int, limit: int = 12):
+    with get_connection() as conn:
+        overview = _build_life_course_overview(conn, resident_id, limit=500)
+        return {"analysis_version": overview["analysis_version"], "turning_points": overview["turning_points"][:min(max(limit, 1), 30)]}
+
+
+@app.get("/api/agents/{resident_id}/life-course/relationships")
+def get_agent_life_course_relationships(resident_id: int):
+    with get_connection() as conn:
+        overview = _build_life_course_overview(conn, resident_id, limit=240)
+        return {
+            "analysis_version": overview["analysis_version"],
+            "relationships": overview["relationships"],
+            "history_available": overview["research_boundaries"]["relationship_history_available"],
+        }
+
+
+@app.get("/api/agents/{resident_id}/life-course/groups")
+def get_agent_life_course_groups(resident_id: int):
+    with get_connection() as conn:
+        overview = _build_life_course_overview(conn, resident_id, limit=240)
+        return {
+            "analysis_version": overview["analysis_version"],
+            "groups": overview["groups"],
+            "membership_history_available": overview["research_boundaries"]["group_membership_history_available"],
+        }
+
+
 @app.get("/api/agents/{resident_id}/social-graph")
 def get_agent_social_graph(resident_id: int):
     with get_connection() as conn:
@@ -5670,6 +6125,7 @@ def run_simulate_ai_day(progress=None):
         results = []
         fallback_agents = []
         for index, agent in enumerate(agents, start=1):
+            state_before = get_agent_module_state(conn, agent["id"])
             resident_label = f"{agent['name']}（{agent['role']}）"
             try:
                 report("agent_perceiving", f"{resident_label} 正在感知校园环境。", day=new_day, resident_id=agent["id"], agent_name=agent["name"], agent_index=index, total_agents=total_agents)
@@ -5721,7 +6177,8 @@ def run_simulate_ai_day(progress=None):
                 feedback = {}
 
             try:
-                record_simulation_log(conn, agent["id"], perception, decision_data, execution, feedback)
+                state_after = get_agent_module_state(conn, agent["id"])
+                record_simulation_log(conn, agent["id"], perception, decision_data, execution, feedback, state_before, state_after)
                 conn.commit()
                 report("agent_logged", f"{resident_label} 的决策日志已写入。", day=new_day, resident_id=agent["id"], agent_name=agent["name"], agent_index=index, total_agents=total_agents, action=execution["action"], success=execution.get("success", False))
             except Exception:
