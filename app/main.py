@@ -668,6 +668,82 @@ def recover_agents_for_new_day(conn, day):
     add_event(conn, day, "daily_recovery", "新的一天开始：所有 Agent 恢复部分精力，并重置每日时间预算。")
 
 
+def get_simulation_state_value(conn, key, default=""):
+    row = conn.execute("SELECT value FROM simulation_state WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_simulation_state_value(conn, key, value):
+    existing = conn.execute("SELECT 1 FROM simulation_state WHERE key = ?", (key,)).fetchone()
+    if existing:
+        conn.execute("UPDATE simulation_state SET value = ? WHERE key = ?", (str(value), key))
+    else:
+        conn.execute("INSERT INTO simulation_state (key, value) VALUES (?, ?)", (key, str(value)))
+
+
+def infer_runtime_day_anchor_date(conn, current_day, current_real_date):
+    rows = conn.execute(
+        """
+        SELECT DISTINCT substr(world_time, 1, 10) AS real_date
+        FROM world_ticks
+        WHERE day = ? AND world_time != ''
+        ORDER BY real_date ASC
+        """,
+        (current_day,),
+    ).fetchall()
+    dates = [row["real_date"] for row in rows if row["real_date"]]
+    return dates[0] if dates else current_real_date
+
+
+def sync_current_day_with_world_date(conn, world_time):
+    """Advance the simulation day when the real-world date crosses midnight."""
+    current_real_date = world_time.date().isoformat()
+    current_day = get_current_day(conn)
+    last_real_date = get_simulation_state_value(conn, "world_runtime_current_day_date", "")
+    if not last_real_date:
+        last_real_date = infer_runtime_day_anchor_date(conn, current_day, current_real_date)
+        set_simulation_state_value(conn, "world_runtime_current_day_date", last_real_date)
+    try:
+        last_date = datetime.fromisoformat(last_real_date).date()
+    except ValueError:
+        last_date = world_time.date()
+
+    elapsed_days = (world_time.date() - last_date).days
+    if elapsed_days <= 0:
+        if last_real_date != current_real_date:
+            set_simulation_state_value(conn, "world_runtime_current_day_date", current_real_date)
+        return {"advanced": False, "day": current_day, "elapsed_days": 0}
+
+    elapsed_days = min(elapsed_days, 7)
+    new_day = current_day + elapsed_days
+    set_simulation_state_value(conn, "current_day", new_day)
+    set_simulation_state_value(conn, "world_runtime_current_day_date", current_real_date)
+    for day in range(current_day + 1, new_day + 1):
+        recover_agents_for_new_day(conn, day)
+        values = dict(DEFAULT_ENV)
+        values.update({"semester_stage": "平时周", "event_name": "真实时间推进"})
+        values = derive_environment_from_real_time(values, world_time)
+        save_environment_values(conn, day, values)
+
+    append_world_event(
+        conn,
+        "world_day_rollover",
+        "世界日期已自动推进",
+        f"真实日期从 {last_date.isoformat()} 推进到 {current_real_date}，仿真日从第 {current_day} 天推进到第 {new_day} 天。",
+        day=new_day,
+        slot=world_slot_from_hour(world_time.hour),
+        payload={
+            "previous_day": current_day,
+            "new_day": new_day,
+            "elapsed_days": elapsed_days,
+            "last_real_date": last_date.isoformat(),
+            "current_real_date": current_real_date,
+        },
+        ensure_schema=False,
+    )
+    return {"advanced": True, "day": new_day, "previous_day": current_day, "elapsed_days": elapsed_days}
+
+
 
 
 CHENGDU_LATITUDE = 30.5728
@@ -1617,8 +1693,9 @@ def update_world_runtime_status(conn, status):
     return get_world_runtime(conn)
 
 
-def append_world_event(conn, event_type, title, content, tick_id=None, resident_id=None, location="", payload=None, day=None, slot=None):
-    ensure_world_runtime_tables(conn)
+def append_world_event(conn, event_type, title, content, tick_id=None, resident_id=None, location="", payload=None, day=None, slot=None, ensure_schema=True):
+    if ensure_schema:
+        ensure_world_runtime_tables(conn)
     now = get_world_now()
     day = day or get_current_day(conn)
     slot = slot or world_slot_from_hour(now.hour)
@@ -3792,7 +3869,8 @@ def advance_world_tick(reason="background"):
         with get_connection() as conn:
             runtime = get_world_runtime(conn)
             world_time = get_world_now()
-            day = get_current_day(conn)
+            day_sync = sync_current_day_with_world_date(conn, world_time)
+            day = day_sync["day"]
             slot = world_slot_from_hour(world_time.hour)
             ensure_result = ensure_current_action_plans(conn, world_time)
             env = sync_world_time_environment(conn, world_time)
@@ -3832,6 +3910,7 @@ def advance_world_tick(reason="background"):
                     "weather": env.get("weather"),
                     "weather_sync": weather_sync,
                     "external_sync": compact_external_sync_result(external_sync),
+                    "day_sync": day_sync,
                 },
                 day=day,
                 slot=slot,
@@ -4095,6 +4174,9 @@ def decode_world_event(row):
 
 
 def runtime_response(conn):
+    day_sync = sync_current_day_with_world_date(conn, get_world_now())
+    if day_sync.get("advanced"):
+        conn.commit()
     runtime = get_world_runtime(conn)
     latest_tick = conn.execute("SELECT * FROM world_ticks ORDER BY id DESC LIMIT 1").fetchone()
     latest_event = conn.execute("SELECT id FROM world_event_stream ORDER BY id DESC LIMIT 1").fetchone()
@@ -4106,6 +4188,7 @@ def runtime_response(conn):
         "daily_auto_model_budget": runtime["daily_auto_model_budget"],
         "remaining_auto_model_calls": max(0, int(runtime["daily_auto_model_budget"]) - int(runtime["auto_model_calls_used"])),
     }
+    runtime["day_sync"] = day_sync
     return runtime
 
 
@@ -4393,7 +4476,10 @@ def trigger_admin_world_event(payload: AdminWorldEventRequest, authorization: Op
 @app.get("/api/state")
 def get_state():
     with get_connection() as conn:
-        day = get_current_day(conn)
+        day_sync = sync_current_day_with_world_date(conn, get_world_now())
+        if day_sync.get("advanced"):
+            conn.commit()
+        day = day_sync["day"]
         residents = conn.execute("SELECT * FROM residents ORDER BY id").fetchall()
         events = conn.execute(
             "SELECT * FROM city_events ORDER BY id DESC LIMIT 80"
@@ -4414,7 +4500,10 @@ def get_state():
 @app.get("/api/world/observer-state")
 def get_world_observer_state():
     with get_connection() as conn:
-        day = get_current_day(conn)
+        day_sync = sync_current_day_with_world_date(conn, get_world_now())
+        if day_sync.get("advanced"):
+            conn.commit()
+        day = day_sync["day"]
         runtime = get_world_runtime(conn)
         residents = conn.execute(
             "SELECT id, name, role, location FROM residents ORDER BY id"
