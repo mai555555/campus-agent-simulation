@@ -22,7 +22,7 @@ data/
 *.sqlite3
 data/*.db
 data/*.sqlite*
-exports/research/
+exports/
 
 # IDE and OS
 .idea/

@@ -124,6 +124,18 @@ Agent 的 `residents.personality` 保留为人类可读描述，`agent_profiles.
 world_timezone = Asia/Shanghai
 ```
 
+### 仿真日与真实日期同步
+
+旧的 `/api/simulate/ai-day` 会在点击按钮时推进 `simulation_state.current_day`。World Runtime 进入持续运行模式后，`current_day` 不再只依赖这个旧入口，而是由真实日期自动推进：
+
+- 系统使用 `world_runtime.world_time` / `get_world_now()` 作为真实时间锚点。
+- `simulation_state.world_runtime_current_day_date` 保存当前仿真日对应的真实日期。
+- 当真实日期跨过 00:00 后，下一次 tick、`/api/state` 或 `/api/world/observer-state` 会自动把 `current_day` 增加对应天数。
+- 跨天时会为新的一天恢复 Agent 精力、重置时间预算、生成当天环境，并写入 `world_day_rollover` 事件。
+- 如果服务离线多天后恢复，系统最多一次补 7 天，避免异常时间跳跃把运行数据拉坏。
+
+因此，线上世界应该表现为“真实时间连续运行”：一天过去，仿真日也会进入下一天；旧的“模拟一天”入口只保留为 admin/debug 工具。
+
 每个计划窗口开始时，系统为 Agent 生成一个结构化计划。计划不是强制脚本，而是未来 8 小时的行动倾向。
 
 示例：
