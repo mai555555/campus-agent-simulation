@@ -5147,6 +5147,41 @@ def _life_course_groups(conn, resident_id, timeline):
     return groups
 
 
+def _life_course_episodes(timeline):
+    """Aggregate tick-level evidence into readable daily experience episodes."""
+    by_day = {}
+    for event in timeline:
+        day = int(event.get("day") or 0)
+        if day <= 0:
+            continue
+        episode = by_day.setdefault(day, {
+            "id": f"day-{day}",
+            "day": day,
+            "event_ids": [],
+            "actions": [],
+            "locations": [],
+            "evidence": [],
+            "event_count": 0,
+            "repeat_count": 0,
+        })
+        episode["event_ids"].append(event.get("id"))
+        episode["event_count"] += 1
+        episode["repeat_count"] += max(1, int(event.get("repeat_count") or 1))
+        if event.get("action") and event["action"] not in episode["actions"]:
+            episode["actions"].append(event["action"])
+        if event.get("location") and event["location"] not in episode["locations"]:
+            episode["locations"].append(event["location"])
+        episode["evidence"].extend(event.get("evidence") or [])
+    episodes = []
+    for episode in sorted(by_day.values(), key=lambda item: item["day"], reverse=True):
+        labels = [_life_course_action_label(action) for action in episode["actions"][:4]]
+        episode["title"] = f"第{episode['day']}天经历片段"
+        episode["summary"] = "、".join(labels) if labels else "校园日常观察"
+        episode["evidence"] = episode["evidence"][:20]
+        episodes.append(episode)
+    return episodes
+
+
 def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, limit=240):
     resident = get_resident(conn, resident_id)
     if not resident:
@@ -5158,6 +5193,7 @@ def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, l
         (resident_id,),
     ).fetchall()
     timeline = _life_course_timeline(conn, resident_id, from_day=from_day, to_day=to_day, limit=limit)
+    episodes = _life_course_episodes(timeline)
     relationships = _life_course_relationships(conn, resident_id, timeline)
     groups = _life_course_groups(conn, resident_id, timeline)
     action_counts = {}
@@ -5184,6 +5220,7 @@ def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, l
         "initial_goal": resident["goal"],
         "goals": [dict(goal) for goal in goals],
         "timeline": timeline,
+        "episodes": episodes,
         "turning_points": sorted(important, key=lambda item: (-int(item.get("turning_point_score") or 0), int(item.get("day") or 0)))[:12],
         "relationships": relationships,
         "groups": groups,
