@@ -552,6 +552,8 @@ CREATE INDEX IF NOT EXISTS idx_social_interaction_events_type ON social_interact
 CREATE INDEX IF NOT EXISTS idx_social_relation_interpretations_pair_day ON social_relation_interpretations(from_resident_id, to_resident_id, day);
 CREATE INDEX IF NOT EXISTS idx_social_relation_interpretations_label ON social_relation_interpretations(current_label);
 CREATE INDEX IF NOT EXISTS idx_social_beliefs_subject_day ON social_beliefs(subject_resident_id, day);
+CREATE INDEX IF NOT EXISTS idx_simulation_action_logs_resident_id_desc ON simulation_action_logs(resident_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_relationship_change_events_pair_id_desc ON relationship_change_events(from_resident_id, to_resident_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_goals_resident_horizon_status ON agent_goals(resident_id, horizon, status);
 CREATE INDEX IF NOT EXISTS idx_agent_goals_parent ON agent_goals(parent_goal_id);
 CREATE INDEX IF NOT EXISTS idx_goal_dependencies_goal ON goal_dependencies(goal_id, relationship_type);

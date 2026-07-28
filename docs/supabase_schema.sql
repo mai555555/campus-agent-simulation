@@ -753,6 +753,8 @@ create index if not exists idx_group_goals_status_deadline on group_goals(status
 create index if not exists idx_memories_resident_day on memories(resident_id, day);
 create index if not exists idx_simulation_action_logs_resident_day on simulation_action_logs(resident_id, day);
 create index if not exists idx_relationship_change_events_pair_day on relationship_change_events(from_resident_id, to_resident_id, day);
+create index if not exists idx_simulation_action_logs_resident_id_desc on simulation_action_logs(resident_id, id desc);
+create index if not exists idx_relationship_change_events_pair_id_desc on relationship_change_events(from_resident_id, to_resident_id, id desc);
 create index if not exists idx_agent_goals_resident_horizon_status on agent_goals(resident_id, horizon, status);
 create index if not exists idx_agent_goals_parent on agent_goals(parent_goal_id);
 create index if not exists idx_goal_dependencies_goal on goal_dependencies(goal_id, relationship_type);
