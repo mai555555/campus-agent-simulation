@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app.db import get_connection
+from app.db import get_connection, using_postgres
 from services.llm_service import ask_llm
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 logger = logging.getLogger(__name__)
@@ -152,10 +152,11 @@ def ensure_social_system_tables(conn):
     }.items():
         if column not in action_log_columns:
             conn.execute(f"ALTER TABLE simulation_action_logs ADD COLUMN {column} {column_type}")
+    relationship_id_type = "SERIAL PRIMARY KEY" if using_postgres() else "INTEGER PRIMARY KEY AUTOINCREMENT"
     conn.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS relationship_change_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {relationship_id_type},
             day INTEGER NOT NULL DEFAULT 1,
             tick_id INTEGER,
             event_id INTEGER,
