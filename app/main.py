@@ -4916,6 +4916,7 @@ def _life_course_timeline(conn, resident_id, from_day=None, to_day=None, limit=2
     events = []
     seen_action_keys = set()
     world_event_items = {}
+    memory_items = {}
 
     world_rows = conn.execute(
         f"""
@@ -5005,6 +5006,7 @@ def _life_course_timeline(conn, resident_id, from_day=None, to_day=None, limit=2
             "goal_completed": isinstance(goal_update, dict) and goal_update.get("status") == "completed",
             "memory_importance": 0,
             "spread_count": 0,
+            "repeat_count": 1,
         }
         events.append(_life_course_score_event(item))
 
@@ -5040,7 +5042,15 @@ def _life_course_timeline(conn, resident_id, from_day=None, to_day=None, limit=2
             "memory_importance": importance,
             "success": True,
             "spread_count": 0,
+            "repeat_count": 1,
         }
+        memory_key = (row["day"], source, row["content"] or "")
+        if memory_key in memory_items:
+            existing = memory_items[memory_key]
+            existing["repeat_count"] = int(existing.get("repeat_count") or 1) + 1
+            existing["evidence"].append(_life_course_evidence("memories", row["id"]))
+            continue
+        memory_items[memory_key] = item
         events.append(_life_course_score_event(item))
 
     events.sort(key=lambda item: (int(item.get("day") or 0), str(item.get("created_at") or ""), int(item.get("id") or 0)))
