@@ -50,6 +50,8 @@ THREE_MODULE_DIR = PROJECT_ROOT / "frontend" / "vendor" / "three"
 app.mount("/three", StaticFiles(directory=str(THREE_MODULE_DIR)), name="three")
 SIMULATION_JOBS = {}
 SIMULATION_JOBS_LOCK = Lock()
+SOCIAL_SCHEMA_LOCK = Lock()
+SOCIAL_SCHEMA_READY = False
 WORLD_RUNNER_LOCK = Lock()
 WORLD_RUNNER_THREAD = None
 WORLD_TICK_LOCK = Lock()
@@ -133,6 +135,17 @@ def ensure_agent_profile_table(conn):
 
 
 def ensure_social_system_tables(conn):
+    global SOCIAL_SCHEMA_READY
+    if SOCIAL_SCHEMA_READY:
+        return
+    with SOCIAL_SCHEMA_LOCK:
+        if SOCIAL_SCHEMA_READY:
+            return
+        _initialize_social_system_tables(conn)
+        SOCIAL_SCHEMA_READY = True
+
+
+def _initialize_social_system_tables(conn):
     ensure_agent_profile_table(conn)
     conn.executescript(SOCIAL_SYSTEM_SQL)
     conn.executescript(BEHAVIOR_SYSTEM_SQL)
@@ -883,7 +896,7 @@ def append_social_interaction_event(
     )
 
 
-def infer_emergent_relationship(conn, from_id, to_id, dynamics=None, score=None):
+def infer_emergent_relationship(conn, from_id, to_id, dynamics=None, score=None, history_rows=None):
     """Interpret an edge from accumulated evidence without declaring a fixed relationship type."""
     dynamics = dynamics or get_relationship_dynamics(conn, from_id, to_id)
     affinity = int(dynamics.get("affinity") or 50)
@@ -894,18 +907,19 @@ def infer_emergent_relationship(conn, from_id, to_id, dynamics=None, score=None)
     tension = int(dynamics.get("tension") or 0)
     interaction_count = int(dynamics.get("interaction_count") or 0)
     score = int(score if score is not None else get_relationship_score(conn, from_id, to_id))
-    history_rows = conn.execute(
-        """
-        SELECT interaction, reason, affinity_before, affinity_after, trust_before, trust_after,
-               cooperation_before, cooperation_after, competition_before, competition_after,
-               conflict_before, conflict_after, day, created_at
-        FROM relationship_change_events
-        WHERE from_resident_id = ? AND to_resident_id = ?
-        ORDER BY id DESC
-        LIMIT 12
-        """,
-        (from_id, to_id),
-    ).fetchall()
+    if history_rows is None:
+        history_rows = conn.execute(
+            """
+            SELECT interaction, reason, affinity_before, affinity_after, trust_before, trust_after,
+                   cooperation_before, cooperation_after, competition_before, competition_after,
+                   conflict_before, conflict_after, day, created_at
+            FROM relationship_change_events
+            WHERE from_resident_id = ? AND to_resident_id = ?
+            ORDER BY id DESC
+            LIMIT 12
+            """,
+            (from_id, to_id),
+        ).fetchall()
     interaction_counts = {}
     evidence = []
     for row in history_rows:
@@ -953,6 +967,35 @@ def infer_emergent_relationship(conn, from_id, to_id, dynamics=None, score=None)
         "perspective": "from_agent",
         "interpretation_boundary": "这是从互动证据和关系指标生成的当前解释，不是预设身份，也不是确定事实。",
     }
+
+
+def relationship_histories_by_target(conn, from_id, target_ids, per_target=12):
+    ids = sorted({int(target_id) for target_id in target_ids if target_id is not None})
+    if not ids:
+        return {}
+    placeholders = ",".join(["?"] * len(ids))
+    rows = conn.execute(
+        f"""
+        SELECT * FROM (
+            SELECT to_resident_id, interaction, reason, affinity_before, affinity_after,
+                   trust_before, trust_after, cooperation_before, cooperation_after,
+                   competition_before, competition_after, conflict_before, conflict_after,
+                   day, created_at,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY to_resident_id ORDER BY id DESC
+                   ) AS history_rank
+            FROM relationship_change_events
+            WHERE from_resident_id = ? AND to_resident_id IN ({placeholders})
+        ) ranked
+        WHERE history_rank <= ?
+        ORDER BY to_resident_id, history_rank
+        """,
+        (from_id, *ids, max(1, min(int(per_target), 20))),
+    ).fetchall()
+    grouped = {target_id: [] for target_id in ids}
+    for row in rows:
+        grouped.setdefault(int(row["to_resident_id"]), []).append(row)
+    return grouped
 
 
 def record_social_relation_interpretation(conn, from_id, to_id, tick_id=None, perspective="system_researcher"):
@@ -6436,50 +6479,105 @@ def get_agent_life_course_groups(resident_id: int):
         }
 
 
+def build_agent_social_graph(conn, resident_id, limit=10):
+    rows = conn.execute(
+        """
+        SELECT relationships.to_resident_id, residents.name, residents.role,
+               relationships.score, relationship_dynamics.affinity, relationship_dynamics.trust,
+               relationship_dynamics.cooperation, relationship_dynamics.competition,
+               relationship_dynamics.conflict, relationship_dynamics.tension,
+               relationship_dynamics.interaction_count
+        FROM relationships
+        JOIN residents ON residents.id = relationships.to_resident_id
+        LEFT JOIN relationship_dynamics
+          ON relationship_dynamics.from_resident_id = relationships.from_resident_id
+         AND relationship_dynamics.to_resident_id = relationships.to_resident_id
+        WHERE relationships.from_resident_id = ?
+        ORDER BY relationships.score DESC
+        LIMIT ?
+        """,
+        (resident_id, min(max(limit, 1), 20)),
+    ).fetchall()
+    histories = relationship_histories_by_target(
+        conn,
+        resident_id,
+        [row["to_resident_id"] for row in rows],
+    )
+    owner = get_resident(conn, resident_id)
+    return {
+        "nodes": [{"id": resident_id, "name": owner["name"], "role": owner["role"], "owner": True}]
+        + [{"id": row["to_resident_id"], "name": row["name"], "role": row["role"], "owner": False} for row in rows],
+        "links": [
+            {
+                "from": resident_id,
+                "to": row["to_resident_id"],
+                "score": row["score"],
+                "affinity": row["affinity"] if row["affinity"] is not None else 50,
+                "trust": row["trust"] if row["trust"] is not None else 50,
+                "cooperation": row["cooperation"] if row["cooperation"] is not None else 50,
+                "competition": row["competition"] if row["competition"] is not None else 0,
+                "conflict": row["conflict"] if row["conflict"] is not None else 0,
+                "tension": row["tension"] if row["tension"] is not None else 0,
+                "interaction_count": row["interaction_count"] if row["interaction_count"] is not None else 0,
+                "emergent_interpretation": infer_emergent_relationship(
+                    conn,
+                    resident_id,
+                    row["to_resident_id"],
+                    dict(row),
+                    row["score"],
+                    history_rows=histories.get(int(row["to_resident_id"]), []),
+                ),
+            }
+            for row in rows
+        ],
+    }
+
+
 @app.get("/api/agents/{resident_id}/social-graph")
-def get_agent_social_graph(resident_id: int):
+def get_agent_social_graph(resident_id: int, limit: int = 10):
     with get_connection() as conn:
         if not get_resident(conn, resident_id):
             raise HTTPException(status_code=404, detail="Agent 不存在")
         ensure_social_system_tables(conn)
-        rows = conn.execute(
-            """
-            SELECT relationships.to_resident_id, residents.name, residents.role,
-                   relationships.score, relationship_dynamics.affinity, relationship_dynamics.trust,
-                   relationship_dynamics.cooperation, relationship_dynamics.competition,
-                   relationship_dynamics.conflict, relationship_dynamics.tension,
-                   relationship_dynamics.interaction_count
-            FROM relationships
-            JOIN residents ON residents.id = relationships.to_resident_id
-            LEFT JOIN relationship_dynamics
-              ON relationship_dynamics.from_resident_id = relationships.from_resident_id
-             AND relationship_dynamics.to_resident_id = relationships.to_resident_id
-            WHERE relationships.from_resident_id = ?
-            ORDER BY relationships.score DESC
-            """,
-            (resident_id,),
-        ).fetchall()
-        owner = get_resident(conn, resident_id)
-        return {
-            "nodes": [{"id": resident_id, "name": owner["name"], "role": owner["role"], "owner": True}]
-            + [{"id": row["to_resident_id"], "name": row["name"], "role": row["role"], "owner": False} for row in rows],
-            "links": [
-                {
-                    "from": resident_id,
-                    "to": row["to_resident_id"],
-                    "score": row["score"],
-                    "affinity": row["affinity"] if row["affinity"] is not None else 50,
-                    "trust": row["trust"] if row["trust"] is not None else 50,
-                    "cooperation": row["cooperation"] if row["cooperation"] is not None else 50,
-                    "competition": row["competition"] if row["competition"] is not None else 0,
-                    "conflict": row["conflict"] if row["conflict"] is not None else 0,
-                    "tension": row["tension"] if row["tension"] is not None else 0,
-                    "interaction_count": row["interaction_count"] if row["interaction_count"] is not None else 0,
-                    "emergent_interpretation": infer_emergent_relationship(conn, resident_id, row["to_resident_id"], dict(row), row["score"]),
-                }
-                for row in rows
-            ],
-        }
+        return build_agent_social_graph(conn, resident_id, limit=limit)
+
+
+def fetch_agent_timeline(conn, resident_id, limit=30, offset=0):
+    rows = conn.execute(
+        """
+        SELECT day, decision, execution, created_at
+        FROM simulation_action_logs
+        WHERE resident_id = ?
+        ORDER BY id DESC LIMIT ? OFFSET ?
+        """,
+        (resident_id, min(max(limit, 1), 50), max(offset, 0)),
+    ).fetchall()
+    timeline = []
+    for row in rows:
+        decision = load_json_text(row["decision"], {})
+        execution = load_json_text(row["execution"], {})
+        if not isinstance(decision, dict):
+            decision = {}
+        if not isinstance(execution, dict):
+            execution = {}
+        result = execution.get("result", {})
+        runtime_decision = execution.get("runtime_decision", {})
+        if not isinstance(runtime_decision, dict):
+            runtime_decision = {}
+        timeline.append({
+            "day": row["day"],
+            "decision": {
+                "action": decision.get("action") or execution.get("action", ""),
+                "reason": decision.get("reason") or runtime_decision.get("reason", ""),
+            },
+            "execution": {
+                "result": {
+                    "description": result.get("description", "") if isinstance(result, dict) else str(result or ""),
+                },
+            },
+            "created_at": row["created_at"],
+        })
+    return timeline
 
 
 @app.get("/api/agents/{resident_id}/timeline")
@@ -6488,25 +6586,31 @@ def get_agent_timeline(resident_id: int, limit: int = 30, offset: int = 0):
         if not get_resident(conn, resident_id):
             raise HTTPException(status_code=404, detail="Agent 不存在")
         ensure_social_system_tables(conn)
-        rows = conn.execute(
-            """
-            SELECT day, decision, execution, environment_feedback, created_at
-            FROM simulation_action_logs
-            WHERE resident_id = ?
-            ORDER BY id DESC LIMIT ? OFFSET ?
-            """,
-            (resident_id, min(max(limit, 1), 100), max(offset, 0)),
-        ).fetchall()
-        return [
-            {
-                "day": row["day"],
-                "decision": load_json_text(row["decision"], {}),
-                "execution": load_json_text(row["execution"], {}),
-                "environment_feedback": load_json_text(row["environment_feedback"], {}),
-                "created_at": row["created_at"],
-            }
-            for row in rows
-        ]
+        return fetch_agent_timeline(conn, resident_id, limit=limit, offset=offset)
+
+
+def fetch_agent_simulation_logs(conn, resident_id, limit=12):
+    rows = conn.execute(
+        """
+        SELECT day, perception, retrieved_memories, decision, execution, environment_feedback, created_at
+        FROM simulation_action_logs
+        WHERE resident_id = ?
+        ORDER BY id DESC LIMIT ?
+        """,
+        (resident_id, min(max(limit, 1), 50)),
+    ).fetchall()
+    return [
+        {
+            "day": row["day"],
+            "perception": load_json_text(row["perception"], {}),
+            "retrieved_memories": load_json_text(row["retrieved_memories"], []),
+            "decision": load_json_text(row["decision"], {}),
+            "execution": load_json_text(row["execution"], {}),
+            "environment_feedback": load_json_text(row["environment_feedback"], {}),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
 
 
 @app.get("/api/agents/{resident_id}/simulation-logs")
@@ -6515,27 +6619,24 @@ def get_agent_simulation_logs(resident_id: int, limit: int = 12):
         if not get_resident(conn, resident_id):
             raise HTTPException(status_code=404, detail="Agent 不存在")
         ensure_social_system_tables(conn)
-        rows = conn.execute(
-            """
-            SELECT day, perception, retrieved_memories, decision, execution, environment_feedback, created_at
-            FROM simulation_action_logs
-            WHERE resident_id = ?
-            ORDER BY id DESC LIMIT ?
-            """,
-            (resident_id, min(max(limit, 1), 50)),
-        ).fetchall()
-        return [
-            {
-                "day": row["day"],
-                "perception": load_json_text(row["perception"], {}),
-                "retrieved_memories": load_json_text(row["retrieved_memories"], []),
-                "decision": load_json_text(row["decision"], {}),
-                "execution": load_json_text(row["execution"], {}),
-                "environment_feedback": load_json_text(row["environment_feedback"], {}),
-                "created_at": row["created_at"],
-            }
-            for row in rows
-        ]
+        return fetch_agent_simulation_logs(conn, resident_id, limit=limit)
+
+
+@app.get("/api/agents/{resident_id}/profile-activity")
+def get_agent_profile_activity(resident_id: int, timeline_limit: int = 20):
+    with get_connection() as conn:
+        if not get_resident(conn, resident_id):
+            raise HTTPException(status_code=404, detail="Agent 不存在")
+        ensure_social_system_tables(conn)
+        page_size = min(max(timeline_limit, 1), 40)
+        timeline_rows = fetch_agent_timeline(conn, resident_id, limit=page_size + 1, offset=0)
+        latest_logs = fetch_agent_simulation_logs(conn, resident_id, limit=1)
+        return {
+            "social_graph": build_agent_social_graph(conn, resident_id, limit=10),
+            "timeline": timeline_rows[:page_size],
+            "timeline_has_more": len(timeline_rows) > page_size,
+            "latest_simulation_log": latest_logs[0] if latest_logs else None,
+        }
 
 
 @app.get("/api/organizations")
