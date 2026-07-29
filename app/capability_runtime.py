@@ -288,9 +288,85 @@ def get_opportunity_access(conn, resident_id):
         (resident_id,),
     ).fetchall()
     result = []
+    organization_roles = []
+    if conn.execute("PRAGMA table_info(organization_role_assignments)").fetchall():
+        organization_roles = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT assignment.organization_id, role.role_key,
+                       organization.name AS organization_name
+                FROM organization_role_assignments assignment
+                JOIN organization_roles role ON role.id = assignment.role_id
+                JOIN campus_organizations organization
+                  ON organization.id = assignment.organization_id
+                WHERE assignment.resident_id = ?
+                  AND assignment.status = 'active' AND role.status = 'active'
+                ORDER BY assignment.organization_id
+                """,
+                (resident_id,),
+            ).fetchall()
+        ]
+    role_bonus = sum(
+        12 if role["role_key"] == "chair" else 6
+        for role in organization_roles
+    )
+    power_profile = None
+    if conn.execute("PRAGMA table_info(resident_power_profiles)").fetchall():
+        power_profile = conn.execute(
+            """
+            SELECT formal_authority, institutional_trust, procedural_access
+            FROM resident_power_profiles WHERE resident_id = ?
+            """,
+            (resident_id,),
+        ).fetchone()
     for row in rows:
         item = dict(row)
         item["source_detail"] = _json_value(item.get("source_detail"), {})
+        if organization_roles and item["opportunity_key"] in {
+            "institutional_services",
+            "social_referral",
+        }:
+            bonus = min(20, role_bonus)
+            item["access_level"] = _clamp(int(item["access_level"]) + bonus)
+            item["eligibility"] = (
+                "limited" if item["access_level"] < 20 else "eligible"
+            )
+            item["time_cost_multiplier"] = round(
+                max(0.72, float(item["time_cost_multiplier"]) - bonus * 0.004),
+                3,
+            )
+            item["source_detail"] = {
+                **item["source_detail"],
+                "organization_memberships": organization_roles,
+                "organization_access_bonus": bonus,
+            }
+        if power_profile and item["opportunity_key"] == "institutional_services":
+            power_bonus = _clamp(
+                (
+                    int(power_profile["formal_authority"])
+                    + int(power_profile["institutional_trust"])
+                    - 100
+                )
+                / 8,
+                -12,
+                18,
+            )
+            item["access_level"] = _clamp(int(item["access_level"]) + power_bonus)
+            item["eligibility"] = (
+                "limited" if item["access_level"] < 20 else "eligible"
+            )
+            item["time_cost_multiplier"] = round(
+                max(0.72, min(1.35, float(item["time_cost_multiplier"]) - power_bonus * 0.004)),
+                3,
+            )
+            item["source_detail"] = {
+                **item["source_detail"],
+                "institutional_power_bonus": power_bonus,
+                "formal_authority": int(power_profile["formal_authority"]),
+                "institutional_trust": int(power_profile["institutional_trust"]),
+                "procedural_access": int(power_profile["procedural_access"]),
+            }
         result.append(item)
     return result
 

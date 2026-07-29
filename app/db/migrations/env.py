@@ -10,6 +10,8 @@ from app.db.metadata import metadata
 from app.spatial import models as spatial_models  # noqa: F401
 from app import perception_models  # noqa: F401
 from app import capability_models  # noqa: F401
+from app.economy import models as economy_models  # noqa: F401
+from app.organizations import models as organization_models  # noqa: F401
 
 
 config = context.config

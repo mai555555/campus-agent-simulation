@@ -1,4 +1,16 @@
-﻿VALID_LOCATIONS = {
+﻿import math
+
+from app.economy.service import post_money_transfer
+from app.supply.service import settle_goods_trade, supply_runtime_available
+from app.market.service import (
+    evaluate_market_choice,
+    find_market_mechanism,
+    fulfill_market_goods_trade,
+    market_runtime_available,
+)
+
+
+VALID_LOCATIONS = {
     "宿舍区",
     "教学楼",
     "图书馆",
@@ -220,6 +232,39 @@ def buy_sell(conn, buyer_id, seller_id, item_name, quantity, unit_price):
     if quantity <= 0 or unit_price <= 0:
         raise ValueError("数量和单价必须大于 0")
 
+    market_evaluation = None
+    if market_runtime_available(conn):
+        mechanism = find_market_mechanism(
+            conn,
+            item_name=item_name,
+            provider_actor_key=f"resident:{seller_id}",
+            location=seller["location"],
+        )
+        if not mechanism:
+            raise ValueError("该商品没有有效市场报价")
+        market_evaluation = evaluate_market_choice(
+            conn,
+            resident_id=buyer_id,
+            mechanism_id=int(mechanism["id"]),
+            quantity=quantity,
+            action_type="buy_sell",
+        )
+        explicit_max = int(unit_price) * 100
+        market_evaluation["maximum_unit_price_minor"] = explicit_max
+        if (
+            market_evaluation["status"] in {"accepted", "price_rejected"}
+            and market_evaluation["total_unit_cost_minor"] <= explicit_max
+        ):
+            market_evaluation["status"] = "accepted"
+            market_evaluation["reason"] = "调用方最高出价覆盖系统报价"
+        elif market_evaluation["status"] == "accepted":
+            market_evaluation["status"] = "price_rejected"
+            market_evaluation["reason"] = "调用方最高出价低于系统报价"
+        if market_evaluation["status"] != "accepted":
+            raise ValueError(market_evaluation["reason"])
+        unit_price = int(
+            math.ceil(market_evaluation["total_unit_cost_minor"] / 100)
+        )
     total_price = quantity * unit_price
     if int(buyer["money"]) < total_price:
         raise ValueError("买家余额不足")
@@ -229,20 +274,68 @@ def buy_sell(conn, buyer_id, seller_id, item_name, quantity, unit_price):
         raise ValueError("卖家库存不足")
 
     day = get_current_day(conn)
-    conn.execute("UPDATE residents SET money = money - ? WHERE id = ?", (total_price, buyer_id))
-    conn.execute("UPDATE residents SET money = money + ? WHERE id = ?", (total_price, seller_id))
-    add_inventory(conn, buyer_id, item_name, quantity)
-    add_inventory(conn, seller_id, item_name, -quantity)
-    conn.execute(
+    managed_supply = supply_runtime_available(conn)
+    if not managed_supply:
+        add_inventory(conn, buyer_id, item_name, quantity)
+        add_inventory(conn, seller_id, item_name, -quantity)
+    transaction_cursor = conn.execute(
         """
         INSERT INTO transactions (buyer_id, seller_id, item_name, quantity, unit_price, total_price)
         VALUES (?, ?, ?, ?, ?, ?)
         """,
         (buyer_id, seller_id, item_name, quantity, unit_price, total_price),
     )
+    legacy_transaction_id = int(transaction_cursor.lastrowid)
+    if managed_supply:
+        if market_evaluation:
+            supply_trade = fulfill_market_goods_trade(
+                conn,
+                resident_id=buyer_id,
+                evaluation=market_evaluation,
+                action_execution_id=None,
+                source_type="legacy_transaction",
+                consume_immediately=False,
+            )
+        else:
+            supply_trade = settle_goods_trade(
+                conn,
+                transaction_key=f"trade:{legacy_transaction_id}:goods",
+                buyer_actor_key=f"resident:{buyer_id}",
+                seller_actor_key=f"resident:{seller_id}",
+                item_name=item_name,
+                quantity=quantity,
+                unit_price_minor=unit_price * 100,
+                source_type="legacy_transaction",
+                source_id=str(legacy_transaction_id),
+            )
+        ledger_transaction = {"id": supply_trade["ledger_transaction_id"]}
+    else:
+        ledger_transaction = post_money_transfer(
+            conn,
+            transaction_key=f"trade:{legacy_transaction_id}:money",
+            from_account_key=f"resident:{buyer_id}:cash",
+            to_account_key=f"resident:{seller_id}:cash",
+            amount_coins=total_price,
+            transaction_type="goods_trade",
+            source_type="legacy_transaction",
+            source_id=str(legacy_transaction_id),
+            description=(
+                f"{buyer['name']} 向 {seller['name']}购买 "
+                f"{quantity} 份 {item_name}"
+            ),
+            metadata={
+                "item_name": item_name,
+                "quantity": quantity,
+                "unit_price": unit_price,
+            },
+        )
     description = f"{buyer['name']} 向 {seller['name']} 购买 {quantity} 份 {item_name}，总价 {total_price} 校园币。"
     add_event(conn, day, "trade", description)
     add_memory(conn, buyer_id, day, description, importance=3, memory_type="episodic", tags=["交易", buyer["name"], seller["name"], item_name], source="buy_sell")
     add_memory(conn, seller_id, day, description, importance=3, memory_type="episodic", tags=["交易", buyer["name"], seller["name"], item_name], source="buy_sell")
     conn.commit()
-    return {"message": "交易成功", "description": description}
+    return {
+        "message": "交易成功",
+        "description": description,
+        "ledger_transaction_id": ledger_transaction["id"],
+    }

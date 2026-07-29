@@ -6,6 +6,7 @@ import random
 import re
 import requests
 import logging
+import math
 import os
 import time
 from queue import Queue
@@ -21,6 +22,44 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.db import get_connection, using_postgres
+from app.economy.router import router as economy_router
+from app.economy.service import post_money_transfer
+from app.organizations.router import router as organization_router
+from app.organizations.service import process_organization_runtime
+from app.supply.router import router as supply_router
+from app.supply.service import (
+    consumption_availability,
+    fulfill_runtime_consumption,
+    process_supply_runtime,
+    supply_runtime_available,
+)
+from app.labor.router import router as labor_router
+from app.labor.service import process_labor_runtime
+from app.budget.router import router as budget_router
+from app.budget.service import (
+    budget_runtime_available,
+    evaluate_action_choice,
+    fund_emergency_action,
+    process_budget_runtime,
+    record_action_choice,
+)
+from app.market.router import router as market_router
+from app.market.service import (
+    evaluate_market_choice,
+    find_market_mechanism,
+    fulfill_market_goods_trade,
+    market_runtime_available,
+    process_market_runtime,
+    record_market_demand,
+)
+from app.credit.router import router as credit_router
+from app.credit.service import process_credit_runtime
+from app.public_policy.router import router as public_policy_router
+from app.public_policy.service import process_public_policy_runtime
+from app.social_institutions.router import router as social_institution_router
+from app.social_institutions.service import process_social_institution_runtime
+from app.macro.router import router as macro_router
+from app.macro.service import process_macro_runtime
 from app.body_router import router as body_router
 from app.capability_router import router as capability_router
 from app.capability_runtime import (
@@ -67,6 +106,16 @@ app.include_router(spatial_router)
 app.include_router(body_router)
 app.include_router(perception_router)
 app.include_router(capability_router)
+app.include_router(economy_router)
+app.include_router(organization_router)
+app.include_router(supply_router)
+app.include_router(labor_router)
+app.include_router(budget_router)
+app.include_router(market_router)
+app.include_router(credit_router)
+app.include_router(public_policy_router)
+app.include_router(social_institution_router)
+app.include_router(macro_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -3177,6 +3226,8 @@ def evaluate_world_action_preconditions(conn, resident_id, action_type, location
     resources = rule.get("required_resources", {})
     state = action_resource_state(conn, resident_id)
     checks = []
+    budget_choice = None
+    market_choice = None
 
     def add_check(key, passed, actual, required, failure_code, reason):
         checks.append(
@@ -3235,19 +3286,113 @@ def evaluate_world_action_preconditions(conn, resident_id, action_type, location
                     f"预计等待 {resource['estimated_wait_minutes']} 分钟"
                 ),
             )
+    if action_type == "consume" and rule.get("rule_key") != "passive-runtime-poll":
+        supply = consumption_availability(conn, location)
+        if supply.get("managed"):
+            add_check(
+                "supply_available",
+                supply["available"],
+                supply,
+                "> 0 saleable units",
+                "goods_out_of_stock",
+                f"{location}当前可消费商品缺货",
+            )
+            if (
+                supply["available"]
+                and market_runtime_available(conn)
+            ):
+                mechanism = find_market_mechanism(
+                    conn,
+                    item_name=supply["item_name"],
+                    provider_actor_key=supply["provider_actor_key"],
+                    location=location,
+                )
+                if mechanism:
+                    market_choice = evaluate_market_choice(
+                        conn,
+                        resident_id=resident_id,
+                        mechanism_id=int(mechanism["id"]),
+                        action_type=action_type,
+                        world_time=world_time,
+                    )
+                    market_allowed = market_choice["status"] == "accepted"
+                    add_check(
+                        "market_offer",
+                        market_allowed,
+                        market_choice,
+                        "accepted market offer",
+                        f"market_{market_choice['status']}",
+                        (
+                            market_choice["reason"]
+                            + (
+                                f"，可替代为{market_choice['substitute']['item_name']}"
+                                if market_choice.get("substitute")
+                                else ""
+                            )
+                        ),
+                    )
+                    resources["money"] = int(
+                        math.ceil(
+                            market_choice["total_unit_cost_minor"]
+                            * market_choice["quantity"]
+                            / 100
+                        )
+                    )
     if rule.get("rule_key") != "passive-runtime-poll":
         checks.extend(body_action_checks(conn, resident_id, action_type))
         checks.extend(capability_action_checks(conn, resident_id, action_type))
+        if budget_runtime_available(conn):
+            profile = conn.execute(
+                "SELECT resident_id FROM household_budget_profiles WHERE resident_id = ?",
+                (resident_id,),
+            ).fetchone()
+            if profile:
+                budget_choice = evaluate_action_choice(
+                    conn,
+                    resident_id=resident_id,
+                    action_type=action_type,
+                    location=location,
+                    required_money_minor=int(resources.get("money", 0) or 0) * 100,
+                    required_time_minutes=int(rule.get("duration_minutes", 0) or 0),
+                    world_time=world_time,
+                )
+                add_check(
+                    "budget_disposable",
+                    budget_choice["decision"] != "rejected",
+                    budget_choice["disposable_minor"],
+                    budget_choice["required_money_minor"],
+                    "insufficient_disposable_budget",
+                    budget_choice["rationale"],
+                )
+                add_check(
+                    "budget_free_time",
+                    budget_choice["decision"] != "deferred",
+                    budget_choice["free_time_minutes"],
+                    budget_choice["required_time_minutes"],
+                    "insufficient_free_time",
+                    budget_choice["rationale"],
+                )
     for resource_key in ("energy", "time_budget", "money"):
         required = int(resources.get(resource_key, 0) or 0)
+        available = state[resource_key] >= required
+        if (
+            resource_key == "money"
+            and budget_choice
+            and budget_choice["emergency_override"]
+        ):
+            available = True
         add_check(
             f"resource_{resource_key}",
-            state[resource_key] >= required,
+            available,
             state[resource_key],
             required,
             f"insufficient_{resource_key}",
             f"{resource_key}不足，需要 {required}，当前 {state[resource_key]}",
         )
+    if budget_choice:
+        state = {**state, "budget_choice": budget_choice}
+    if market_choice:
+        state = {**state, "market_choice": market_choice}
     return checks, state
 
 
@@ -3324,6 +3469,24 @@ def begin_world_action_execution(
             world_time.isoformat(),
         ),
     )
+    if resources_before.get("budget_choice"):
+        record_action_choice(
+            conn,
+            action_execution_id=cursor.lastrowid,
+            resident_id=resident_id,
+            action_type=action_type,
+            location=location,
+            evaluation=resources_before["budget_choice"],
+            world_time=world_time,
+        )
+    if resources_before.get("market_choice"):
+        record_market_demand(
+            conn,
+            action_execution_id=cursor.lastrowid,
+            resident_id=resident_id,
+            evaluation=resources_before["market_choice"],
+            world_time=world_time,
+        )
     return {
         "id": cursor.lastrowid,
         "status": status,
@@ -3422,6 +3585,21 @@ def settle_world_action_resources(conn, action_execution, success):
         key: min(value, max(0, round(value * ratio)))
         for key, value in requested_costs.items()
     }
+    exact_money_minor = costs["money"] * 100
+    if action_execution["resources_before"].get("market_choice"):
+        market_choice = action_execution["resources_before"]["market_choice"]
+        exact_money_minor = (
+            int(market_choice["total_unit_cost_minor"])
+            * int(market_choice["quantity"])
+        )
+    if costs["money"] and success and action_execution["resources_before"].get("budget_choice"):
+        fund_emergency_action(
+            conn,
+            resident_id=resident_id,
+            amount_minor=exact_money_minor,
+            action_execution_id=action_execution["id"],
+            evaluation=action_execution["resources_before"]["budget_choice"],
+        )
     before = action_resource_state(conn, resident_id)
     conn.execute(
         """
@@ -3435,29 +3613,71 @@ def settle_world_action_resources(conn, action_execution, success):
             resident_id,
         ),
     )
+    supply_settlement = None
+    if (
+        costs["money"]
+        and success
+        and rule["action_type"] == "consume"
+        and supply_runtime_available(conn)
+        and action_execution["resources_before"].get("market_choice")
+    ):
+        supply_settlement = fulfill_market_goods_trade(
+            conn,
+            resident_id=resident_id,
+            evaluation=action_execution["resources_before"]["market_choice"],
+            action_execution_id=action_execution["id"],
+        )
+        ledger_transaction = {"id": supply_settlement["ledger_transaction_id"]}
+        transfer_target = supply_settlement["provider_actor_key"]
+    elif (
+        costs["money"]
+        and success
+        and rule["action_type"] == "consume"
+        and supply_runtime_available(conn)
+    ):
+        execution_row = conn.execute(
+            "SELECT location FROM world_action_executions WHERE id = ?",
+            (action_execution["id"],),
+        ).fetchone()
+        supply_settlement = fulfill_runtime_consumption(
+            conn,
+            resident_id,
+            execution_row["location"],
+            costs["money"] * 100,
+            action_execution["id"],
+        )
+        ledger_transaction = {"id": supply_settlement["ledger_transaction_id"]}
+        transfer_target = supply_settlement["provider_actor_key"]
+    elif costs["money"]:
+        ledger_transaction = post_money_transfer(
+            conn,
+            transaction_key=f"action-cost:{action_execution['id']}:money",
+            from_account_key=f"resident:{resident_id}:cash",
+            to_account_key="system:campus-services:cash",
+            amount_coins=costs["money"],
+            transaction_type="action_resource_cost",
+            source_type="world_action_execution",
+            source_id=str(action_execution["id"]),
+            action_execution_id=action_execution["id"],
+            description=f"{rule['action_type']} 行动资源成本",
+            metadata={"success": bool(success)},
+        )
+        transfer_target = "campus-services"
+    else:
+        ledger_transaction = None
+        transfer_target = ""
     if costs["money"]:
-        conn.execute(
-            "UPDATE residents SET money = money - ? WHERE id = ?",
-            (costs["money"], resident_id),
-        )
-        conn.execute(
-            """
-            UPDATE world_resource_accounts
-            SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP
-            WHERE account_key = 'campus-services'
-            """,
-            (costs["money"],),
-        )
         conn.execute(
             """
             INSERT INTO world_resource_transfers
             (action_execution_id, from_type, from_id, to_account_key,
              resource_type, amount, reason)
-            VALUES (?, 'resident', ?, 'campus-services', 'money', ?, ?)
+            VALUES (?, 'resident', ?, ?, 'money', ?, ?)
             """,
             (
                 action_execution["id"],
                 str(resident_id),
+                transfer_target,
                 costs["money"],
                 f"{rule['action_type']} 行动资源成本",
             ),
@@ -3507,6 +3727,10 @@ def settle_world_action_resources(conn, action_execution, success):
         "costs": costs,
         "direct_effects": applied_effects,
         "body_effects": body_effects,
+        "supply_settlement": supply_settlement,
+        "ledger_transaction_id": (
+            ledger_transaction["id"] if ledger_transaction else None
+        ),
     }
 
 
@@ -6723,6 +6947,53 @@ def advance_world_tick(reason="background"):
                 slot,
                 parent_event_id=start_event["id"],
             )
+            supply_updates = process_supply_runtime(conn, world_time)
+            market_updates = process_market_runtime(conn, world_time)
+            labor_updates = process_labor_runtime(conn, world_time)
+            credit_updates = process_credit_runtime(conn, world_time)
+            budget_updates = process_budget_runtime(conn, world_time)
+            public_policy_updates = process_public_policy_runtime(conn, world_time)
+            organization_updates = process_organization_runtime(conn, world_time)
+            organization_events = []
+            for proposal_id in organization_updates["executed"]:
+                proposal = conn.execute(
+                    """
+                    SELECT proposal.*, organization.name AS organization_name
+                    FROM organization_proposals proposal
+                    JOIN campus_organizations organization
+                      ON organization.id = proposal.organization_id
+                    WHERE proposal.id = ?
+                    """,
+                    (proposal_id,),
+                ).fetchone()
+                if not proposal:
+                    continue
+                organization_events.append(
+                    append_world_event(
+                        conn,
+                        "organization_collective_action",
+                        f"{proposal['organization_name']}执行集体行动",
+                        proposal["title"],
+                        tick_id=tick_id,
+                        payload={
+                            "organization_id": proposal["organization_id"],
+                            "proposal_id": proposal_id,
+                            "proposal_type": proposal["proposal_type"],
+                            "requested_budget_minor": proposal["requested_budget_minor"],
+                            "ledger_transaction_id": proposal["ledger_transaction_id"],
+                        },
+                        day=day,
+                        slot=slot,
+                        source_type="organization_proposal",
+                        source_id=proposal_id,
+                        parent_event_id=start_event["id"],
+                        rule_version="organization-runtime-v1",
+                    )
+                )
+            social_institution_updates = process_social_institution_runtime(
+                conn, world_time
+            )
+            macro_updates = process_macro_runtime(conn, world_time)
             conn.commit()
             selected_agents, next_cursor, focused_set = select_world_tick_agents(conn, runtime)
             results = []
@@ -6773,6 +7044,16 @@ def advance_world_tick(reason="background"):
                         "completed_count": len(multiscale_updates["completed"]),
                         "failed_count": len(multiscale_updates["failed"]),
                     },
+                    "organization_updates": organization_updates,
+                    "supply_updates": supply_updates,
+                    "market_updates": market_updates,
+                    "labor_updates": labor_updates,
+                    "credit_updates": credit_updates,
+                    "budget_updates": budget_updates,
+                    "public_policy_updates": public_policy_updates,
+                    "social_institution_updates": social_institution_updates,
+                    "macro_updates": macro_updates,
+                    "organization_event_count": len(organization_events),
                     "spatial_movements": {
                         "advanced_count": len(movement_results),
                         "arrived_count": sum(
@@ -6820,6 +7101,16 @@ def advance_world_tick(reason="background"):
                 "failed_agents": failed,
                 "events": [start_event, finish_event],
                 "multiscale_updates": multiscale_updates,
+                "organization_updates": organization_updates,
+                "supply_updates": supply_updates,
+                "market_updates": market_updates,
+                "labor_updates": labor_updates,
+                "credit_updates": credit_updates,
+                "budget_updates": budget_updates,
+                "public_policy_updates": public_policy_updates,
+                "social_institution_updates": social_institution_updates,
+                "macro_updates": macro_updates,
+                "organization_events": organization_events,
                 "spatial_movements": movement_results,
                 "body_states": body_states,
                 "local_observations": local_observations,
@@ -7110,12 +7401,264 @@ CAPABILITY_SNAPSHOT_STATE_TABLES = {
     "agent_opportunity_access": "id",
 }
 
+ECONOMY_SNAPSHOT_STATE_TABLES = {
+    "economic_actors": "id",
+    "ledger_accounts": "id",
+    "ledger_transactions": "id",
+    "ledger_entries": "id",
+}
+
+ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES = {
+    "ledger_authorization_rules": "id",
+    "ledger_authorized_operations": "transaction_id",
+    "ledger_reversals": "original_transaction_id",
+    "ledger_audit_events": "id",
+}
+
+ORGANIZATION_SNAPSHOT_STATE_TABLES = {
+    "organization_runtime_profiles": "organization_id",
+    "organization_roles": "id",
+    "organization_role_assignments": "organization_id, resident_id",
+    "organization_proposals": "id",
+    "organization_votes": "proposal_id, resident_id",
+    "organization_commitments": "id",
+    "organization_relationships": "from_organization_id, to_organization_id",
+    "organization_events": "id",
+}
+
+SUPPLY_SNAPSHOT_STATE_TABLES = {
+    "catalog_items": "id",
+    "inventory_accounts": "id",
+    "production_recipes": "id",
+    "production_recipe_inputs": "recipe_id, item_id",
+    "production_batches": "id",
+    "inventory_movements": "id",
+    "service_offerings": "id",
+    "service_deliveries": "id",
+}
+
+LABOR_SNAPSHOT_STATE_TABLES = {
+    "labor_positions": "id",
+    "employment_contracts": "id",
+    "labor_shifts": "id",
+    "income_programs": "id",
+    "income_payments": "id",
+    "expense_obligations": "id",
+}
+
+BUDGET_SNAPSHOT_STATE_TABLES = {
+    "household_budget_profiles": "resident_id",
+    "household_budget_snapshots": "id",
+    "savings_transfers": "id",
+    "choice_evaluations": "id",
+}
+
+MARKET_SNAPSHOT_STATE_TABLES = {
+    "market_mechanisms": "id",
+    "market_price_snapshots": "id",
+    "market_demand_signals": "id",
+    "market_friction_events": "id",
+}
+
+CREDIT_SNAPSHOT_STATE_TABLES = {
+    "savings_goals": "id",
+    "household_risk_profiles": "resident_id",
+    "economic_shocks": "id",
+    "risk_pool_claims": "id",
+    "credit_products": "id",
+    "credit_profiles": "resident_id",
+    "credit_contracts": "id",
+    "credit_installments": "id",
+    "credit_payments": "id",
+    "credit_events": "id",
+}
+
+PUBLIC_POLICY_SNAPSHOT_STATE_TABLES = {
+    "public_services": "id",
+    "public_service_operations": "id",
+    "public_service_usages": "id",
+    "externality_events": "id",
+    "externality_exposures": "id",
+    "policy_instruments": "id",
+    "policy_benefits": "id",
+    "policy_outcome_snapshots": "id",
+}
+
+SOCIAL_INSTITUTION_SNAPSHOT_STATE_TABLES = {
+    "communication_channels": "id",
+    "information_claims": "id",
+    "information_versions": "id",
+    "information_transmissions": "id",
+    "information_exposures": "id",
+    "information_beliefs": "resident_id, claim_id",
+    "institutional_rules": "id",
+    "institutional_cases": "id",
+    "institutional_decisions": "id",
+    "resident_power_profiles": "resident_id",
+    "institutional_trust_events": "id",
+}
+MACRO_SNAPSHOT_STATE_TABLES = {
+    "macro_metric_definitions": "id",
+    "macro_snapshots": "id",
+    "macro_metric_values": "id",
+    "macro_metric_components": "id",
+    "macro_reconciliation_checks": "id",
+}
+
 
 def snapshot_table_exists(conn, table_name):
     return bool(conn.execute(f"PRAGMA table_info({table_name})").fetchall())
 
 
 def snapshot_state_tables(conn):
+    if all(
+        snapshot_table_exists(conn, table_name)
+        for table_name in {
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+            **SUPPLY_SNAPSHOT_STATE_TABLES,
+            **LABOR_SNAPSHOT_STATE_TABLES,
+            **BUDGET_SNAPSHOT_STATE_TABLES,
+            **MARKET_SNAPSHOT_STATE_TABLES,
+            **CREDIT_SNAPSHOT_STATE_TABLES,
+            **PUBLIC_POLICY_SNAPSHOT_STATE_TABLES,
+            **SOCIAL_INSTITUTION_SNAPSHOT_STATE_TABLES,
+            **MACRO_SNAPSHOT_STATE_TABLES,
+        }
+    ):
+        return {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+            **SUPPLY_SNAPSHOT_STATE_TABLES,
+            **LABOR_SNAPSHOT_STATE_TABLES,
+            **BUDGET_SNAPSHOT_STATE_TABLES,
+            **MARKET_SNAPSHOT_STATE_TABLES,
+            **CREDIT_SNAPSHOT_STATE_TABLES,
+            **PUBLIC_POLICY_SNAPSHOT_STATE_TABLES,
+            **SOCIAL_INSTITUTION_SNAPSHOT_STATE_TABLES,
+            **MACRO_SNAPSHOT_STATE_TABLES,
+        }
+    if all(
+        snapshot_table_exists(conn, table_name)
+        for table_name in {
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+            **SUPPLY_SNAPSHOT_STATE_TABLES,
+            **LABOR_SNAPSHOT_STATE_TABLES,
+        }
+    ):
+        return {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+            **SUPPLY_SNAPSHOT_STATE_TABLES,
+            **LABOR_SNAPSHOT_STATE_TABLES,
+        }
+    if all(
+        snapshot_table_exists(conn, table_name)
+        for table_name in {
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+            **SUPPLY_SNAPSHOT_STATE_TABLES,
+        }
+    ):
+        return {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+            **SUPPLY_SNAPSHOT_STATE_TABLES,
+        }
+    if all(
+        snapshot_table_exists(conn, table_name)
+        for table_name in {
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+        }
+    ):
+        return {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+        }
+    if all(
+        snapshot_table_exists(conn, table_name)
+        for table_name in {
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+        }
+    ):
+        return {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+        }
+    if all(
+        snapshot_table_exists(conn, table_name)
+        for table_name in {
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+        }
+    ):
+        return {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+        }
     if all(
         snapshot_table_exists(conn, table_name)
         for table_name in {
@@ -7208,29 +7751,70 @@ def create_world_snapshot_record(
     tick_row = conn.execute("SELECT id FROM world_ticks ORDER BY id DESC LIMIT 1").fetchone()
     state = capture_objective_world_state(conn)
     schema_version = (
-        "world-snapshot-v8-capability"
-        if all(table in state for table in CAPABILITY_SNAPSHOT_STATE_TABLES)
+        "world-snapshot-v16-household-credit"
+        if all(table in state for table in CREDIT_SNAPSHOT_STATE_TABLES)
         else (
-            "world-snapshot-v7-perception"
-            if all(table in state for table in PERCEPTION_SNAPSHOT_STATE_TABLES)
+            "world-snapshot-v15-market-pricing"
+            if all(table in state for table in MARKET_SNAPSHOT_STATE_TABLES)
             else (
-                "world-snapshot-v6-body"
-                if all(table in state for table in BODY_SNAPSHOT_STATE_TABLES)
+                "world-snapshot-v14-budget-choice"
+                if all(table in state for table in BUDGET_SNAPSHOT_STATE_TABLES)
                 else (
-                    "world-snapshot-v5-admission"
-                    if all(table in state for table in SPATIAL_SNAPSHOT_STATE_TABLES)
+                    "world-snapshot-v13-labor-runtime"
+                    if all(table in state for table in LABOR_SNAPSHOT_STATE_TABLES)
                     else (
-                        "world-snapshot-v4-spatial"
-                        if all(
-                            table in state
-                            for table in SPATIAL_FOUNDATION_SNAPSHOT_TABLES
+                        "world-snapshot-v12-supply-runtime"
+                        if all(table in state for table in SUPPLY_SNAPSHOT_STATE_TABLES)
+                        else (
+                            "world-snapshot-v11-organization-runtime"
+                            if all(table in state for table in ORGANIZATION_SNAPSHOT_STATE_TABLES)
+                            else (
+                                "world-snapshot-v10-ledger-controls"
+                                if all(table in state for table in ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES)
+                                else (
+                                    "world-snapshot-v9-economy"
+                                    if all(table in state for table in ECONOMY_SNAPSHOT_STATE_TABLES)
+                                    else (
+                                        "world-snapshot-v8-capability"
+                                        if all(table in state for table in CAPABILITY_SNAPSHOT_STATE_TABLES)
+                                        else (
+                                            "world-snapshot-v7-perception"
+                                            if all(table in state for table in PERCEPTION_SNAPSHOT_STATE_TABLES)
+                                            else (
+                                                "world-snapshot-v6-body"
+                                                if all(table in state for table in BODY_SNAPSHOT_STATE_TABLES)
+                                                else (
+                                                    "world-snapshot-v5-admission"
+                                                    if all(
+                                                        table in state
+                                                        for table in SPATIAL_SNAPSHOT_STATE_TABLES
+                                                    )
+                                                    else (
+                                                        "world-snapshot-v4-spatial"
+                                                        if all(
+                                                            table in state
+                                                            for table in SPATIAL_FOUNDATION_SNAPSHOT_TABLES
+                                                        )
+                                                        else "world-snapshot-v3"
+                                                    )
+                                                )
+                                            )
+                                        )
+                                    )
+                                )
+                            )
                         )
-                        else "world-snapshot-v3"
                     )
                 )
             )
         )
     )
+    if all(table in state for table in PUBLIC_POLICY_SNAPSHOT_STATE_TABLES):
+        schema_version = "world-snapshot-v17-public-policy"
+    if all(table in state for table in SOCIAL_INSTITUTION_SNAPSHOT_STATE_TABLES):
+        schema_version = "world-snapshot-v18-social-institutions"
+    if all(table in state for table in MACRO_SNAPSHOT_STATE_TABLES):
+        schema_version = "world-snapshot-v19-macro-reconciliation"
     state_json = canonical_json(state)
     event_cursor = int(event_row["value"] or 0)
     effective_branch_key = branch_key or runtime.get("active_branch_key") or "main"
@@ -7314,7 +7898,161 @@ def snapshot_row_or_error(conn, snapshot_id):
     state = load_json_text(row["state_json"], {})
     if not isinstance(state, dict):
         raise ValueError("世界快照状态格式无效")
-    if row["schema_version"] == "world-snapshot-v8-capability":
+    if row["schema_version"] == "world-snapshot-v19-macro-reconciliation":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+            **SUPPLY_SNAPSHOT_STATE_TABLES,
+            **LABOR_SNAPSHOT_STATE_TABLES,
+            **BUDGET_SNAPSHOT_STATE_TABLES,
+            **MARKET_SNAPSHOT_STATE_TABLES,
+            **CREDIT_SNAPSHOT_STATE_TABLES,
+            **PUBLIC_POLICY_SNAPSHOT_STATE_TABLES,
+            **SOCIAL_INSTITUTION_SNAPSHOT_STATE_TABLES,
+            **MACRO_SNAPSHOT_STATE_TABLES,
+        }
+    elif row["schema_version"] == "world-snapshot-v18-social-institutions":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+            **SUPPLY_SNAPSHOT_STATE_TABLES,
+            **LABOR_SNAPSHOT_STATE_TABLES,
+            **BUDGET_SNAPSHOT_STATE_TABLES,
+            **MARKET_SNAPSHOT_STATE_TABLES,
+            **CREDIT_SNAPSHOT_STATE_TABLES,
+            **PUBLIC_POLICY_SNAPSHOT_STATE_TABLES,
+            **SOCIAL_INSTITUTION_SNAPSHOT_STATE_TABLES,
+        }
+    elif row["schema_version"] == "world-snapshot-v17-public-policy":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+            **SUPPLY_SNAPSHOT_STATE_TABLES,
+            **LABOR_SNAPSHOT_STATE_TABLES,
+            **BUDGET_SNAPSHOT_STATE_TABLES,
+            **MARKET_SNAPSHOT_STATE_TABLES,
+            **CREDIT_SNAPSHOT_STATE_TABLES,
+            **PUBLIC_POLICY_SNAPSHOT_STATE_TABLES,
+        }
+    elif row["schema_version"] == "world-snapshot-v16-household-credit":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+            **SUPPLY_SNAPSHOT_STATE_TABLES,
+            **LABOR_SNAPSHOT_STATE_TABLES,
+            **BUDGET_SNAPSHOT_STATE_TABLES,
+            **MARKET_SNAPSHOT_STATE_TABLES,
+            **CREDIT_SNAPSHOT_STATE_TABLES,
+        }
+    elif row["schema_version"] == "world-snapshot-v15-market-pricing":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+            **SUPPLY_SNAPSHOT_STATE_TABLES,
+            **LABOR_SNAPSHOT_STATE_TABLES,
+            **BUDGET_SNAPSHOT_STATE_TABLES,
+            **MARKET_SNAPSHOT_STATE_TABLES,
+        }
+    elif row["schema_version"] == "world-snapshot-v14-budget-choice":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+            **SUPPLY_SNAPSHOT_STATE_TABLES,
+            **LABOR_SNAPSHOT_STATE_TABLES,
+            **BUDGET_SNAPSHOT_STATE_TABLES,
+        }
+    elif row["schema_version"] == "world-snapshot-v13-labor-runtime":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+            **SUPPLY_SNAPSHOT_STATE_TABLES,
+            **LABOR_SNAPSHOT_STATE_TABLES,
+        }
+    elif row["schema_version"] == "world-snapshot-v12-supply-runtime":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+            **SUPPLY_SNAPSHOT_STATE_TABLES,
+        }
+    elif row["schema_version"] == "world-snapshot-v11-organization-runtime":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+        }
+    elif row["schema_version"] == "world-snapshot-v10-ledger-controls":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+        }
+    elif row["schema_version"] == "world-snapshot-v9-economy":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+        }
+    elif row["schema_version"] == "world-snapshot-v8-capability":
         expected_tables = {
             **SNAPSHOT_STATE_TABLES,
             **SPATIAL_SNAPSHOT_STATE_TABLES,
