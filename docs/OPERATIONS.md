@@ -8,6 +8,7 @@
 LLM_API_KEY=你的API_KEY
 LLM_API_URL=https://api.tourmaster.ch/v1beta/models/gemini-3.1-flash-lite:generateContent
 DATABASE_URL=
+DB_PATH=data/city.db
 ADMIN_TOKEN=本地_admin_token
 ```
 
@@ -33,6 +34,22 @@ ADMIN_TOKEN=本地_admin_token
 
 `scripts/init_db.py` 是旧城市示例初始化脚本，会写入“虚拟成都”示例居民；当前校园主线通常不应使用它。
 
+数据库结构升级使用以下固定顺序：
+
+```bash
+python scripts/init_campus_safe.py
+python scripts/prepare_legacy_schema.py
+python scripts/migrate_db.py
+python scripts/seed_spatial_foundation.py
+python scripts/migrate_db.py --check
+```
+
+- `prepare_legacy_schema.py` 只补齐 Alembic 基线要求的旧表，不清空业务数据。
+- `migrate_db.py` 首次会验证完整旧 schema 并 stamp 基线，随后执行 `upgrade head`。
+- `seed_spatial_foundation.py` 幂等写入校园拓扑，并为尚无空间状态的居民建立兼容初始状态。
+- `--check` 只读取当前 revision；未到最新版本时以非零状态退出。
+- 新增空间表及后续结构变化必须通过 Alembic migration，不再继续扩展启动时建表逻辑。
+
 ## 本地运行
 
 ```bash
@@ -41,6 +58,9 @@ source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 python scripts/init_campus_safe.py
+python scripts/prepare_legacy_schema.py
+python scripts/migrate_db.py
+python scripts/seed_spatial_foundation.py
 uvicorn app.main:app --reload
 ```
 
@@ -53,6 +73,17 @@ World Runtime v1 让校园世界从“点击模拟一天”升级为后台 tick 
 常用接口：
 
 - `GET /api/world/runtime`：运行状态、世界时间、最新 tick、模型预算。
+- `GET /api/spatial/scene`：米制空间节点与可通行连接。
+- `GET /api/spatial/agents`：全部居民当前坐标、路线、进度和移动能力。
+- `GET /api/spatial/resources`：空间席位、窗口、服务能力与当前可用量。
+- `GET /api/spatial/admission-queue`：当前 FIFO 等待队列、位次、耐心和预计等待时间。
+- `GET /api/body-states`：全部居民当前身体、注意力与恢复状态，以及达到阈值的告警。
+- `GET /api/agents/{id}/body-state`：单个居民的完整身体状态。
+- `GET /api/agents/{id}/perception-evidence`：单个居民最近的局部观察、信念、空间记忆和实际接收消息。
+- `GET /api/perception/observations`：按 Agent 或 tick 查询局部观察研究证据。
+- `GET /api/agents/{id}/trajectory`：按实验运行和 tick 查询不可变移动轨迹。
+- `POST /api/agents/{id}/movement/plan`：预览当前环境下的最低成本路线。
+- `POST /api/agents/{id}/movement/pause`、`resume`：暂停或恢复在途移动。
 - `GET /api/world/events?after_id=0&limit=20`：统一实时事件流。
 - `POST /api/world/observer-sessions`：记录观察者关注的 Agent 或地点。
 - `POST /api/admin/world/start`：启动后台运行。
@@ -103,6 +134,10 @@ curl http://127.0.0.1:8000/api/world/update-runs
 
 v3 真实感规则由 `campus_schedule_rules` 和 `world_causal_weights` 驱动。前者定义角色、动作、地点、时间段和随机噪声，例如上课、用餐、排队、夜间休息、社团活动；后者定义天气、考试压力、活动热度、资源压力和人流如何影响地点/动作权重。自主循环支持 `attend_class`、`queue`、`consume`、`rest`、`club_activity`、`conflict`、`collaborate`、`late`、`request_leave` 等动作。
 
+身体状态由 world tick 按实际经过时间推进。饥饿、疲劳、睡眠债、压力、注意力、社交能量、健康和天气暴露会受到位置、移动、等待、天气和行动影响；吃饭、休息和反思分别恢复不同状态。高疲劳、极度饥饿、低健康或低注意力会形成结构化行动拒绝原因，疲劳、饥饿和健康也会降低路线规划与移动 tick 使用的实际步速。`agent_profiles.energy` 仅保留为兼容摘要，身体真值以 `agent_body_states` 为准。
+
+有限可观测性由三层数据组成：`agent_observations` 保存不可变局部证据，`agent_belief_states` 保存 Agent 当前解释，`agent_spatial_memories` 保存带地点的主观经历。视觉、听觉和亲历证据由坐标、感知半径和来源事件计算；未进入感知范围且未被定向传递的消息不会出现在 Agent 决策上下文。观察者聚焦只生成界面侧 `observer_model_detail`，不会提高行动扰动概率、写入 Agent 记忆或向 Agent 暴露“正在被观察”。
+
 研究校准可以先手动录入观测值，再生成偏差报告：
 
 ```bash
@@ -131,7 +166,7 @@ python scripts/init_campus.py
 
 ## PostgreSQL
 
-设置 `DATABASE_URL` 后，`app/db.py` 会使用 `psycopg` 连接 PostgreSQL。
+设置 `DATABASE_URL` 后，`app/db` 兼容连接层会使用 `psycopg`，Alembic 和新增空间模块使用 SQLAlchemy 的 psycopg 方言。
 
 示例：
 
@@ -174,20 +209,23 @@ docker run --rm -p 8000:8000 \
 
 ```bash
 python scripts/init_campus.py
+python scripts/prepare_legacy_schema.py
+python scripts/migrate_db.py
+python scripts/seed_spatial_foundation.py
 ```
 
-这会生成一个全新的校园世界。若要容器启动时连接持久化 PostgreSQL，并避免每次构建重置线上数据，建议将初始化改为启动阶段的 `scripts/init_campus_safe.py`，或由部署平台单独运行一次安全初始化。
+这会生成一个全新的校园世界并升级到最新 migration。持久化 PostgreSQL 部署应使用 Render 的安全初始化流程，避免重置线上数据。
 
 ## Render
 
 `render.yaml` 当前配置：
 
 ```yaml
-buildCommand: pip install -r requirements.txt && python scripts/init_campus_safe.py
+buildCommand: pip install -r requirements.txt && python scripts/init_campus_safe.py && python scripts/prepare_legacy_schema.py && python scripts/migrate_db.py && python scripts/seed_spatial_foundation.py
 startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
 ```
 
-安全初始化会保留已有校园数据，适合当前的持久化部署。首次部署会写入种子数据，后续构建会跳过初始化。
+安全初始化会保留已有校园数据，随后补齐基线结构、执行 migration 并幂等补齐空间拓扑。首次部署会写入种子数据，后续构建只执行幂等结构升级和缺失空间状态回填。
 
 需要配置的环境变量：
 

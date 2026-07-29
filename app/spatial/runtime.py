@@ -1,0 +1,861 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+from math import dist
+
+from app.spatial.planner import RouteNotFoundError, edge_travel_minutes, plan_route
+
+
+ACTIVE_MOVEMENT_STATUSES = {"moving", "replanning", "waiting"}
+
+
+class SpatialAdmissionError(ValueError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+def _json_value(value, fallback):
+    if value is None:
+        return fallback
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _iso_datetime(value):
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def spatial_runtime_available(conn):
+    return bool(conn.execute("PRAGMA table_info(agent_spatial_states)").fetchall())
+
+
+def effective_movement_speed(base_speed_m_per_min, body_state=None):
+    body = body_state or {}
+    fatigue = float(body.get("fatigue") or 0)
+    hunger = float(body.get("hunger") or 0)
+    health = float(body.get("health") if body.get("health") is not None else 100)
+    factor = 1.0
+    factor -= max(0.0, fatigue - 40.0) * 0.006
+    factor -= max(0.0, hunger - 70.0) * 0.003
+    if health < 60:
+        factor *= max(0.65, health / 60.0)
+    factor = max(0.45, min(1.0, factor))
+    return round(float(base_speed_m_per_min) * factor, 3)
+
+
+def _load_nodes(conn):
+    nodes = []
+    for row in conn.execute("SELECT * FROM spatial_nodes ORDER BY id").fetchall():
+        item = dict(row)
+        item["properties"] = _json_value(item.get("properties"), {})
+        nodes.append(item)
+    return nodes
+
+
+def _load_edges(conn):
+    edges = []
+    for row in conn.execute("SELECT * FROM spatial_edges ORDER BY id").fetchall():
+        item = dict(row)
+        item["properties"] = _json_value(item.get("properties"), {})
+        edges.append(item)
+    return edges
+
+
+def _destination_node(nodes, destination):
+    for node in nodes:
+        properties = node.get("properties") or {}
+        if (
+            node.get("code") == destination
+            or node.get("name") == destination
+            or properties.get("location") == destination
+        ):
+            return node
+    return None
+
+
+def _check_destination_admission(conn, target_node, world_time, resident_id):
+    location = target_node.get("properties", {}).get("location") or target_node["name"]
+    space = conn.execute(
+        """
+        SELECT capacity, open_hour, close_hour, status
+        FROM campus_spaces WHERE location = ?
+        """,
+        (location,),
+    ).fetchone()
+    if not space:
+        return {"allowed": True, "location": location}
+    hour = world_time.hour
+    open_hour = int(space["open_hour"])
+    close_hour = int(space["close_hour"])
+    within_hours = (
+        open_hour <= hour < close_hour
+        if close_hour != 24
+        else hour >= open_hour
+    )
+    if space["status"] != "开放" or not within_hours:
+        return {
+            "allowed": False,
+            "code": "location_closed",
+            "reason": f"{location}当前未开放",
+            "location": location,
+        }
+    occupancy = conn.execute(
+        """
+        SELECT COUNT(*) AS value
+        FROM agent_spatial_states
+        WHERE current_node_id = ? AND resident_id != ?
+          AND movement_status NOT IN ('moving', 'replanning')
+        """,
+        (target_node["id"], resident_id),
+    ).fetchone()["value"]
+    capacity = int(space["capacity"])
+    if int(occupancy) >= capacity:
+        return {
+            "allowed": False,
+            "code": "space_full",
+            "reason": f"{location}当前满员",
+            "location": location,
+            "occupancy": int(occupancy),
+            "capacity": capacity,
+        }
+    return {
+        "allowed": True,
+        "location": location,
+        "occupancy": int(occupancy),
+        "capacity": capacity,
+    }
+
+
+def _primary_resource(conn, node_id):
+    row = conn.execute(
+        """
+        SELECT * FROM spatial_resources
+        WHERE node_id = ? AND status = 'available'
+        ORDER BY id LIMIT 1
+        """,
+        (node_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _suggested_alternatives(location):
+    return {
+        "图书馆": ["教学楼", "宿舍区"],
+        "食堂": ["商业街", "宿舍区"],
+        "教学楼": ["图书馆", "宿舍区"],
+        "商业街": ["食堂", "宿舍区"],
+        "校务处": ["教学楼"],
+        "操场": ["宿舍区", "教学楼"],
+    }.get(location, ["宿舍区"])
+
+
+def _ensure_admission_queue(
+    conn,
+    state,
+    admission,
+    world_time,
+    tick_number,
+    branch_key,
+):
+    existing = conn.execute(
+        "SELECT * FROM spatial_admission_queue WHERE resident_id = ?",
+        (state["resident_id"],),
+    ).fetchone()
+    if existing:
+        return dict(existing)
+    resource = _primary_resource(conn, state["target_node_id"])
+    ahead = conn.execute(
+        """
+        SELECT COUNT(*) AS value FROM spatial_admission_queue
+        WHERE node_id = ? AND status = 'waiting'
+        """,
+        (state["target_node_id"],),
+    ).fetchone()["value"]
+    position = int(ahead) + 1
+    service_rate = float(resource["service_rate_per_hour"]) if resource else 1.0
+    estimated_wait = round(position / service_rate * 60.0, 2)
+    patience = float(10 + (int(state["resident_id"]) * 7) % 21)
+    cursor = conn.execute(
+        """
+        INSERT INTO spatial_admission_queue
+        (resident_id, node_id, resource_id, requested_at, queue_position,
+         patience_minutes, estimated_wait_minutes, reason_code, branch_key,
+         requested_tick, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting')
+        """,
+        (
+            state["resident_id"],
+            state["target_node_id"],
+            resource["id"] if resource else None,
+            world_time.isoformat(),
+            position,
+            patience,
+            estimated_wait,
+            admission["code"],
+            branch_key,
+            tick_number,
+        ),
+    )
+    return {
+        "id": cursor.lastrowid,
+        "resident_id": state["resident_id"],
+        "node_id": state["target_node_id"],
+        "resource_id": resource["id"] if resource else None,
+        "requested_at": world_time.isoformat(),
+        "queue_position": position,
+        "patience_minutes": patience,
+        "estimated_wait_minutes": estimated_wait,
+        "reason_code": admission["code"],
+        "branch_key": branch_key,
+        "requested_tick": tick_number,
+        "status": "waiting",
+    }
+
+
+def _waiting_has_expired(queue, world_time):
+    requested_at = _iso_datetime(queue.get("requested_at"))
+    if not requested_at:
+        return False, 0.0
+    waited = max(0.0, (world_time - requested_at).total_seconds() / 60.0)
+    return waited >= float(queue["patience_minutes"]), waited
+
+
+def _movement_context(conn, resident_id):
+    row = conn.execute(
+        """
+        SELECT s.*, c.base_speed_m_per_min, c.accessibility_needs,
+               body.hunger, body.fatigue, body.health,
+               r.name AS resident_name, r.location AS legacy_location
+        FROM agent_spatial_states s
+        JOIN agent_spatial_capabilities c ON c.resident_id = s.resident_id
+        JOIN residents r ON r.id = s.resident_id
+        LEFT JOIN agent_body_states body ON body.resident_id = s.resident_id
+        WHERE s.resident_id = ?
+        """,
+        (resident_id,),
+    ).fetchone()
+    if not row:
+        raise ValueError("Agent 空间状态或移动能力尚未初始化")
+    item = dict(row)
+    item["path"] = _json_value(item.get("path"), [])
+    item["accessibility_needs"] = _json_value(
+        item.get("accessibility_needs"),
+        {},
+    )
+    item["effective_speed_m_per_min"] = effective_movement_speed(
+        item["base_speed_m_per_min"],
+        item,
+    )
+    return item
+
+
+def get_active_movement(conn, resident_id):
+    if not spatial_runtime_available(conn):
+        return None
+    row = conn.execute(
+        """
+        SELECT resident_id, movement_status, target_node_id, progress,
+               remaining_distance_meters, estimated_arrival_at
+        FROM agent_spatial_states
+        WHERE resident_id = ?
+        """,
+        (resident_id,),
+    ).fetchone()
+    if not row or row["movement_status"] not in ACTIVE_MOVEMENT_STATUSES:
+        return None
+    return dict(row)
+
+
+def preview_route(conn, resident_id, destination):
+    if not spatial_runtime_available(conn):
+        raise ValueError("空间运行时尚未初始化")
+    context = _movement_context(conn, resident_id)
+    nodes = _load_nodes(conn)
+    target = _destination_node(nodes, destination)
+    if not target:
+        raise ValueError("地点不存在")
+    route = plan_route(
+        nodes,
+        _load_edges(conn),
+        context["current_node_id"],
+        target["id"],
+        context["effective_speed_m_per_min"],
+        context["accessibility_needs"],
+    )
+    return {
+        **route,
+        "resident_id": resident_id,
+        "origin_node_id": int(context["current_node_id"]),
+        "target_node_id": int(target["id"]),
+        "destination": target["name"],
+        "base_speed_m_per_min": float(context["base_speed_m_per_min"]),
+        "effective_speed_m_per_min": context["effective_speed_m_per_min"],
+    }
+
+
+def check_action_resource(conn, location, action):
+    if not spatial_runtime_available(conn):
+        return {"required": False, "available": True}
+    node = _destination_node(_load_nodes(conn), location)
+    if not node:
+        return {"required": False, "available": True}
+    for row in conn.execute(
+        "SELECT * FROM spatial_resources WHERE node_id = ? ORDER BY id",
+        (node["id"],),
+    ).fetchall():
+        resource = dict(row)
+        properties = _json_value(resource.get("properties"), {})
+        if action not in properties.get("actions", []):
+            continue
+        available = (
+            resource["status"] == "available"
+            and int(resource["available_units"]) > 0
+        )
+        waiting = conn.execute(
+            """
+            SELECT COUNT(*) AS value FROM spatial_admission_queue
+            WHERE resource_id = ? AND status = 'waiting'
+            """,
+            (resource["id"],),
+        ).fetchone()["value"]
+        estimated_wait = (
+            (int(waiting) + 1)
+            / float(resource["service_rate_per_hour"])
+            * 60.0
+        )
+        return {
+            "required": True,
+            "available": available,
+            "resource_id": int(resource["id"]),
+            "resource_key": resource["resource_key"],
+            "resource_name": resource["name"],
+            "available_units": int(resource["available_units"]),
+            "queue_length": int(waiting),
+            "estimated_wait_minutes": round(estimated_wait, 2),
+        }
+    return {"required": False, "available": True}
+
+
+def start_spatial_movement(
+    conn,
+    resident_id,
+    destination,
+    world_time=None,
+    replan_reason="",
+    force_replan=False,
+):
+    if not spatial_runtime_available(conn):
+        return None
+    now = world_time or datetime.now(timezone.utc)
+    context = _movement_context(conn, resident_id)
+    nodes = _load_nodes(conn)
+    target = _destination_node(nodes, destination)
+    if not target:
+        raise ValueError("地点不存在")
+    admission = _check_destination_admission(conn, target, now, resident_id)
+    if not admission["allowed"] and admission["code"] != "space_full":
+        raise SpatialAdmissionError(admission["code"], admission["reason"])
+    if (
+        context["movement_status"] in ACTIVE_MOVEMENT_STATUSES
+        and int(context["target_node_id"] or 0) == int(target["id"])
+        and not force_replan
+    ):
+        return {
+            "message": "已经在前往该地点",
+            "movement_status": context["movement_status"],
+            "resident_id": resident_id,
+            "target_node_id": int(target["id"]),
+            "destination": target["name"],
+            "progress": float(context["progress"]),
+        }
+
+    route = plan_route(
+        nodes,
+        _load_edges(conn),
+        context["current_node_id"],
+        target["id"],
+        context["effective_speed_m_per_min"],
+        context["accessibility_needs"],
+    )
+    if not route["edge_ids"]:
+        return {
+            "message": "Agent 已在目标地点",
+            "movement_status": "idle",
+            "resident_id": resident_id,
+            "target_node_id": int(target["id"]),
+            "destination": target["name"],
+            "progress": 1.0,
+            "route": route,
+        }
+
+    estimated_arrival = now + timedelta(minutes=route["cost_minutes"])
+    replan_count = int(context.get("replan_count") or 0)
+    if force_replan or context["movement_status"] in ACTIVE_MOVEMENT_STATUSES:
+        replan_count += 1
+    conn.execute(
+        """
+        UPDATE agent_spatial_states
+        SET origin_node_id = current_node_id,
+            target_node_id = ?,
+            x = (SELECT x FROM spatial_nodes WHERE id = current_node_id),
+            y = (SELECT y FROM spatial_nodes WHERE id = current_node_id),
+            z = (SELECT z FROM spatial_nodes WHERE id = current_node_id),
+            movement_status = 'moving',
+            path = ?,
+            path_index = 0,
+            progress = 0,
+            route_distance_meters = ?,
+            remaining_distance_meters = ?,
+            planned_at = ?,
+            started_at = ?,
+            last_progress_at = ?,
+            estimated_arrival_at = ?,
+            replan_count = ?,
+            last_replan_reason = ?,
+            interrupted_reason = '',
+            version = version + 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE resident_id = ?
+        """,
+        (
+            target["id"],
+            json.dumps(route["node_ids"]),
+            route["distance_meters"],
+            route["distance_meters"],
+            now.isoformat(),
+            now.isoformat(),
+            now.isoformat(),
+            estimated_arrival.isoformat(),
+            replan_count,
+            replan_reason[:240],
+            resident_id,
+        ),
+    )
+    return {
+        "message": "已开始移动",
+        "movement_status": "moving",
+        "resident_id": resident_id,
+        "origin_node_id": int(context["current_node_id"]),
+        "target_node_id": int(target["id"]),
+        "destination": target["name"],
+        "estimated_arrival_at": estimated_arrival.isoformat(),
+        "base_speed_m_per_min": float(context["base_speed_m_per_min"]),
+        "effective_speed_m_per_min": context["effective_speed_m_per_min"],
+        "route": route,
+        "description": (
+            f"{context['resident_name']} 开始从 {context['legacy_location']} "
+            f"前往 {target['name']}，路线约 {route['distance_meters']:.0f} 米，"
+            f"预计 {route['cost_minutes']:.1f} 分钟。"
+        ),
+    }
+
+
+def pause_spatial_movement(conn, resident_id, reason="manual_pause"):
+    movement = get_active_movement(conn, resident_id)
+    if not movement:
+        raise ValueError("Agent 当前不在移动中")
+    conn.execute(
+        """
+        UPDATE agent_spatial_states
+        SET movement_status = 'paused', interrupted_reason = ?,
+            version = version + 1, updated_at = CURRENT_TIMESTAMP
+        WHERE resident_id = ?
+        """,
+        (reason[:240], resident_id),
+    )
+    return {"resident_id": resident_id, "movement_status": "paused", "reason": reason}
+
+
+def resume_spatial_movement(conn, resident_id, world_time=None):
+    now = world_time or datetime.now(timezone.utc)
+    row = conn.execute(
+        """
+        SELECT movement_status, target_node_id
+        FROM agent_spatial_states WHERE resident_id = ?
+        """,
+        (resident_id,),
+    ).fetchone()
+    if not row or row["movement_status"] != "paused" or not row["target_node_id"]:
+        raise ValueError("Agent 没有可恢复的暂停路线")
+    conn.execute(
+        """
+        UPDATE agent_spatial_states
+        SET movement_status = 'moving', last_progress_at = ?,
+            interrupted_reason = '', version = version + 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE resident_id = ?
+        """,
+        (now.isoformat(), resident_id),
+    )
+    return {"resident_id": resident_id, "movement_status": "moving"}
+
+
+def _edge_lookup(edges):
+    lookup = {}
+    for edge in edges:
+        key = (int(edge["from_node_id"]), int(edge["to_node_id"]))
+        lookup[key] = edge
+        if edge.get("bidirectional"):
+            lookup[(key[1], key[0])] = edge
+    return lookup
+
+
+def _ensure_runtime_experiment(conn, branch_key):
+    row = conn.execute(
+        """
+        SELECT id FROM experiment_runs
+        WHERE branch_key = ? AND status = 'running'
+        ORDER BY id DESC LIMIT 1
+        """,
+        (branch_key,),
+    ).fetchone()
+    if row:
+        return int(row["id"])
+    run_id = f"world-runtime-{branch_key}"
+    existing = conn.execute(
+        "SELECT id FROM experiment_runs WHERE run_id = ?",
+        (run_id,),
+    ).fetchone()
+    if existing:
+        conn.execute(
+            "UPDATE experiment_runs SET status = 'running' WHERE id = ?",
+            (existing["id"],),
+        )
+        return int(existing["id"])
+    cursor = conn.execute(
+        """
+        INSERT INTO experiment_runs
+        (run_id, experiment_name, control_or_treatment, branch_key, status,
+         world_rules_version, metadata_json)
+        VALUES (?, 'Autonomous campus runtime', 'natural', ?, 'running',
+                'world-runtime-v4-spatial', ?)
+        """,
+        (
+            run_id,
+            branch_key,
+            json.dumps({"source": "continuous_spatial_movement"}),
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def _record_trajectory(
+    conn,
+    experiment_run_id,
+    branch_key,
+    tick_number,
+    state,
+    movement_status,
+    metadata,
+):
+    conn.execute(
+        """
+        INSERT INTO agent_trajectories
+        (experiment_run_id, branch_key, tick_number, resident_id, node_id,
+         x, y, z, movement_status, metadata)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            experiment_run_id,
+            branch_key,
+            tick_number,
+            state["resident_id"],
+            state["current_node_id"],
+            state["x"],
+            state["y"],
+            state["z"],
+            movement_status,
+            json.dumps(metadata),
+        ),
+    )
+
+
+def advance_active_movements(conn, world_time, tick_number):
+    if not spatial_runtime_available(conn):
+        return []
+    rows = conn.execute(
+        """
+        SELECT s.*, c.base_speed_m_per_min, c.accessibility_needs,
+               body.hunger, body.fatigue, body.health,
+               r.name AS resident_name
+        FROM agent_spatial_states s
+        JOIN agent_spatial_capabilities c ON c.resident_id = s.resident_id
+        JOIN residents r ON r.id = s.resident_id
+        LEFT JOIN agent_body_states body ON body.resident_id = s.resident_id
+        WHERE s.movement_status IN ('moving', 'replanning', 'waiting')
+        ORDER BY s.resident_id
+        """
+    ).fetchall()
+    if not rows:
+        return []
+    nodes = _load_nodes(conn)
+    node_by_id = {int(node["id"]): node for node in nodes}
+    edges = _load_edges(conn)
+    edge_by_nodes = _edge_lookup(edges)
+    branch_row = conn.execute(
+        "SELECT active_branch_key FROM world_runtime WHERE id = 1"
+    ).fetchone()
+    branch_key = branch_row["active_branch_key"] if branch_row else "main"
+    experiment_run_id = _ensure_runtime_experiment(conn, branch_key or "main")
+    results = []
+
+    for raw_row in rows:
+        state = dict(raw_row)
+        effective_speed = effective_movement_speed(
+            state["base_speed_m_per_min"],
+            state,
+        )
+        path = _json_value(state.get("path"), [])
+        last_progress = _iso_datetime(state.get("last_progress_at")) or world_time
+        elapsed_minutes = max(
+            0.0,
+            (world_time - last_progress).total_seconds() / 60.0,
+        )
+        index = int(state.get("path_index") or 0)
+        time_left = elapsed_minutes
+        traveled = 0.0
+        replan_reason = ""
+        admission_denied = None
+        abandoned = None
+
+        while time_left > 0 and index < len(path) - 1:
+            from_id = int(path[index])
+            to_id = int(path[index + 1])
+            edge = edge_by_nodes.get((from_id, to_id))
+            if not edge or edge.get("status") != "open":
+                replan_reason = "route_edge_closed_or_missing"
+                break
+            target_node = node_by_id[to_id]
+            if to_id == int(state["target_node_id"]):
+                admission = _check_destination_admission(
+                    conn,
+                    target_node,
+                    world_time,
+                    state["resident_id"],
+                )
+                if not admission["allowed"]:
+                    admission_denied = admission
+                    break
+            remaining_segment = dist(
+                (float(state["x"]), float(state["y"]), float(state["z"])),
+                (
+                    float(target_node["x"]),
+                    float(target_node["y"]),
+                    float(target_node["z"]),
+                ),
+            )
+            edge_minutes = edge_travel_minutes(
+                {**edge, "distance_meters": remaining_segment},
+                effective_speed,
+            )
+            if edge_minutes <= time_left + 1e-9:
+                state["x"] = float(target_node["x"])
+                state["y"] = float(target_node["y"])
+                state["z"] = float(target_node["z"])
+                state["current_node_id"] = to_id
+                index += 1
+                time_left -= edge_minutes
+                traveled += remaining_segment
+                continue
+            ratio = time_left / edge_minutes if edge_minutes else 1.0
+            state["x"] += (float(target_node["x"]) - float(state["x"])) * ratio
+            state["y"] += (float(target_node["y"]) - float(state["y"])) * ratio
+            state["z"] += (float(target_node["z"]) - float(state["z"])) * ratio
+            traveled += remaining_segment * ratio
+            time_left = 0
+
+        if replan_reason:
+            result = start_spatial_movement(
+                conn,
+                state["resident_id"],
+                node_by_id[int(state["target_node_id"])]["code"],
+                world_time=world_time,
+                replan_reason=replan_reason,
+                force_replan=True,
+            )
+            result["event_type"] = "spatial_route_replanned"
+            results.append(result)
+            continue
+
+        if admission_denied:
+            queue = _ensure_admission_queue(
+                conn,
+                state,
+                admission_denied,
+                world_time,
+                tick_number,
+                branch_key or "main",
+            )
+            expired, waited_minutes = _waiting_has_expired(queue, world_time)
+            if expired:
+                abandoned = {
+                    "queue_position": int(queue["queue_position"]),
+                    "waited_minutes": round(waited_minutes, 2),
+                    "patience_minutes": float(queue["patience_minutes"]),
+                    "suggested_alternatives": _suggested_alternatives(
+                        admission_denied["location"]
+                    ),
+                }
+                conn.execute(
+                    "DELETE FROM spatial_admission_queue WHERE resident_id = ?",
+                    (state["resident_id"],),
+                )
+                conn.execute(
+                    """
+                    UPDATE agent_spatial_states
+                    SET movement_status = 'interrupted', target_node_id = NULL,
+                        path = '[]', path_index = 0, progress = 0,
+                        route_distance_meters = 0, remaining_distance_meters = 0,
+                        interrupted_reason = 'admission_patience_exhausted',
+                        last_progress_at = ?, updated_tick = ?,
+                        version = version + 1, updated_at = CURRENT_TIMESTAMP
+                    WHERE resident_id = ?
+                    """,
+                    (
+                        world_time.isoformat(),
+                        tick_number,
+                        state["resident_id"],
+                    ),
+                )
+                results.append(
+                    {
+                        "resident_id": int(state["resident_id"]),
+                        "resident_name": state["resident_name"],
+                        "movement_status": "interrupted",
+                        "event_type": "spatial_admission_abandoned",
+                        "current_node_id": int(state["current_node_id"]),
+                        "target_node_id": int(state["target_node_id"]),
+                        "progress": float(state.get("progress") or 0),
+                        "remaining_distance_meters": 0.0,
+                        "distance_traveled_meters": round(traveled, 3),
+                        "x": state["x"],
+                        "y": state["y"],
+                        "z": state["z"],
+                        "admission": admission_denied,
+                        "queue": abandoned,
+                    }
+                )
+                continue
+            admission_denied = {**admission_denied, "queue": queue}
+        else:
+            conn.execute(
+                "DELETE FROM spatial_admission_queue WHERE resident_id = ?",
+                (state["resident_id"],),
+            )
+
+        remaining = max(
+            0.0,
+            float(state.get("remaining_distance_meters") or 0) - traveled,
+        )
+        route_distance = float(state.get("route_distance_meters") or 0)
+        progress = (
+            min(1.0, max(0.0, 1.0 - remaining / route_distance))
+            if route_distance
+            else 1.0
+        )
+        arrived = index >= len(path) - 1
+        movement_status = (
+            "waiting"
+            if admission_denied
+            else ("arrived" if arrived else "moving")
+        )
+        target_node = node_by_id.get(int(state["target_node_id"] or 0))
+        conn.execute(
+            """
+            UPDATE agent_spatial_states
+            SET current_node_id = ?, x = ?, y = ?, z = ?, path_index = ?,
+                progress = ?, remaining_distance_meters = ?,
+                movement_status = ?, last_progress_at = ?, updated_tick = ?,
+                version = version + 1, updated_at = CURRENT_TIMESTAMP
+            WHERE resident_id = ?
+            """,
+            (
+                state["current_node_id"],
+                state["x"],
+                state["y"],
+                state["z"],
+                index,
+                progress,
+                remaining,
+                movement_status,
+                world_time.isoformat(),
+                tick_number,
+                state["resident_id"],
+            ),
+        )
+        if arrived and target_node:
+            location = (
+                target_node.get("properties", {}).get("location")
+                or target_node["name"]
+            )
+            conn.execute(
+                "UPDATE residents SET location = ? WHERE id = ?",
+                (location, state["resident_id"]),
+            )
+        state.update(
+            {
+                "path_index": index,
+                "progress": progress,
+                "remaining_distance_meters": remaining,
+            }
+        )
+        _record_trajectory(
+            conn,
+            experiment_run_id,
+            branch_key or "main",
+            tick_number,
+            state,
+            movement_status,
+            {
+                "elapsed_minutes": round(elapsed_minutes, 4),
+                "distance_traveled_meters": round(traveled, 3),
+                "base_speed_m_per_min": float(state["base_speed_m_per_min"]),
+                "effective_speed_m_per_min": effective_speed,
+                "target_node_id": state["target_node_id"],
+                "route_distance_meters": route_distance,
+                "admission": admission_denied or {"allowed": True},
+            },
+        )
+        results.append(
+            {
+                "resident_id": int(state["resident_id"]),
+                "resident_name": state["resident_name"],
+                "movement_status": movement_status,
+                "event_type": (
+                    "spatial_admission_waiting"
+                    if admission_denied
+                    else (
+                    "spatial_agent_arrived"
+                    if arrived
+                    else "spatial_agent_movement_progress"
+                    )
+                ),
+                "current_node_id": int(state["current_node_id"]),
+                "target_node_id": int(state["target_node_id"]),
+                "progress": round(progress, 4),
+                "remaining_distance_meters": round(remaining, 3),
+                "distance_traveled_meters": round(traveled, 3),
+                "base_speed_m_per_min": float(state["base_speed_m_per_min"]),
+                "effective_speed_m_per_min": effective_speed,
+                "x": state["x"],
+                "y": state["y"],
+                "z": state["z"],
+                "admission": admission_denied or {"allowed": True},
+            }
+        )
+    return results

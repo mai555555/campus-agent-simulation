@@ -158,3 +158,16 @@ def execute_script(sql: str) -> None:
     with get_connection() as conn:
         conn.executescript(sql)
         conn.commit()
+
+
+from app.db.engine import create_database_engine, get_database_url  # noqa: E402
+
+__all__ = [
+    "DB_PATH",
+    "PostgresConnection",
+    "create_database_engine",
+    "execute_script",
+    "get_connection",
+    "get_database_url",
+    "using_postgres",
+]

@@ -21,6 +21,30 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.db import get_connection, using_postgres
+from app.body_router import router as body_router
+from app.capability_router import router as capability_router
+from app.capability_runtime import (
+    capability_action_checks,
+    individualize_action_rule,
+)
+from app.body_runtime import (
+    advance_body_states,
+    apply_action_body_effects,
+    body_action_checks,
+)
+from app.perception_router import router as perception_router
+from app.perception_runtime import (
+    capture_tick_observations,
+    get_agent_cognitive_context,
+    spatial_memory_location_factors,
+)
+from app.spatial.router import router as spatial_router
+from app.spatial.runtime import (
+    ACTIVE_MOVEMENT_STATUSES,
+    advance_active_movements,
+    check_action_resource,
+    spatial_runtime_available,
+)
 from services.llm_service import ask_llm, is_llm_configured
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 logger = logging.getLogger(__name__)
@@ -39,6 +63,10 @@ from tools.city_tools import (
 )
 
 app = FastAPI(title="校园封闭世界 AI-Agent 沙盘系统", version="0.2.0")
+app.include_router(spatial_router)
+app.include_router(body_router)
+app.include_router(perception_router)
+app.include_router(capability_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -1526,7 +1554,21 @@ def update_agent_profile_after_action(conn, resident_id, action, reason, success
         """,
         (new_energy, new_time_budget, new_mood, task_label, json.dumps(perception, ensure_ascii=False), resident_id),
     )
-    return {"energy_cost": int(cost["energy"]), "time_cost": int(cost["time"]), "energy_remaining": new_energy, "time_budget_remaining": new_time_budget}
+    body_effects = apply_action_body_effects(
+        conn,
+        resident_id,
+        action,
+        success=success,
+    )
+    if body_effects:
+        new_energy = body_effects["energy"]
+    return {
+        "energy_cost": int(cost["energy"]),
+        "time_cost": int(cost["time"]),
+        "energy_remaining": new_energy,
+        "time_budget_remaining": new_time_budget,
+        "body_effects": body_effects,
+    }
 
 
 def recover_agents_for_new_day(conn, day):
@@ -3179,6 +3221,23 @@ def evaluate_world_action_preconditions(conn, resident_id, action_type, location
             "space_full",
             f"{location}当前没有可用容量",
         )
+    if action_type != "move" and location in VALID_LOCATIONS:
+        resource = check_action_resource(conn, location, action_type)
+        if resource["required"]:
+            add_check(
+                "spatial_resource_available",
+                resource["available"],
+                resource,
+                "> 0 available units",
+                "resource_unavailable",
+                (
+                    f"{location}的{resource['resource_name']}当前不可用，"
+                    f"预计等待 {resource['estimated_wait_minutes']} 分钟"
+                ),
+            )
+    if rule.get("rule_key") != "passive-runtime-poll":
+        checks.extend(body_action_checks(conn, resident_id, action_type))
+        checks.extend(capability_action_checks(conn, resident_id, action_type))
     for resource_key in ("energy", "time_budget", "money"):
         required = int(resources.get(resource_key, 0) or 0)
         add_check(
@@ -3217,9 +3276,16 @@ def begin_world_action_execution(
             "direct_effects": [],
             "delayed_effects": [],
         }
+    else:
+        rule = individualize_action_rule(conn, resident_id, rule, action_type)
     checks, resources_before = evaluate_world_action_preconditions(
         conn, resident_id, action_type, location, rule, world_time
     )
+    if rule.get("individualization"):
+        resources_before = {
+            **resources_before,
+            "capability_adjustment": rule["individualization"],
+        }
     failed_check = next((check for check in checks if not check["passed"]), None)
     roll = deterministic_action_roll(conn, tick_id, resident_id, action_type, location)
     probability = float(rule.get("success_probability", 1.0))
@@ -3400,6 +3466,24 @@ def settle_world_action_resources(conn, action_execution, success):
     if success:
         for effect in rule.get("direct_effects", []):
             applied_effects.append(apply_structured_world_effect(conn, resident_id, effect))
+    body_effects = None
+    if action_execution.get("settlement_mode") != "passive":
+        body_effects = apply_action_body_effects(
+            conn,
+            resident_id,
+            rule["action_type"],
+            success=success,
+        )
+        if body_effects:
+            applied_effects.append(
+                {
+                    "target_type": "agent_body_state",
+                    "state_key": "body",
+                    "operation": "transition",
+                    "before": body_effects["before"],
+                    "after": body_effects["after"],
+                }
+            )
     after = action_resource_state(conn, resident_id)
     conn.execute(
         """
@@ -3417,7 +3501,13 @@ def settle_world_action_resources(conn, action_execution, success):
             action_execution["id"],
         ),
     )
-    return {"before": before, "after": after, "costs": costs, "direct_effects": applied_effects}
+    return {
+        "before": before,
+        "after": after,
+        "costs": costs,
+        "direct_effects": applied_effects,
+        "body_effects": body_effects,
+    }
 
 
 def finalize_rejected_action_execution(conn, action_execution):
@@ -4080,6 +4170,16 @@ def location_options_for_context(role, hour, weather="", current_location="", co
     if conn and env:
         base = [
             (location, weight * causal_multiplier_for_target(conn, env, "location", location))
+            for location, weight in base
+        ]
+    if conn and agent and agent.get("id"):
+        memory_factors = spatial_memory_location_factors(
+            conn,
+            agent["id"],
+            branch_key=active_world_branch_key(conn),
+        )
+        base = [
+            (location, weight * memory_factors.get(location, 1.0))
             for location, weight in base
         ]
     open_options = [(location, weight) for location, weight in base if is_location_open_at_hour(location, hour)]
@@ -5439,7 +5539,6 @@ Agent：{agent['name']}，{agent['role']}
         detail = re.sub(r"\s+", " ", raw).strip().strip('"“”')[:160]
         if not detail:
             raise ValueError("empty observer detail")
-        add_memory(conn, agent["id"], day, detail, importance=3, source="observer_llm")
         detail_event = append_world_event(
             conn,
             "observer_model_detail",
@@ -5472,16 +5571,12 @@ Agent：{agent['name']}，{agent['role']}
 def build_runtime_perception(conn, agent, world_time, day, slot, plan, step, observed):
     env = dict(get_campus_environment(conn, day))
     branch_key = active_world_branch_key(conn)
-    recent_events = conn.execute(
-        """
-        SELECT event_type, resident_id, location, title, content, created_at
-        FROM world_event_stream
-        WHERE day = ? AND branch_key = ?
-        ORDER BY id DESC
-        LIMIT 8
-        """,
-        (day, branch_key),
-    ).fetchall()
+    cognitive_context = get_agent_cognitive_context(
+        conn,
+        agent["id"],
+        branch_key=branch_key,
+        limit=8,
+    )
     location_counts = {
         row["location"]: row["count"]
         for row in conn.execute("SELECT location, COUNT(*) AS count FROM residents GROUP BY location").fetchall()
@@ -5491,7 +5586,13 @@ def build_runtime_perception(conn, agent, world_time, day, slot, plan, step, obs
     realistic_options = [
         location
         for location, _ in location_options_for_context(
-            agent["role"], hour, env.get("weather"), agent["location"], conn=conn, env=env, agent=agent
+            agent["role"],
+            hour,
+            env.get("weather"),
+            agent["location"],
+            conn=None,
+            env=None,
+            agent=agent,
         )
     ]
     schedule_rules = active_schedule_rules(conn, agent["role"], hour, env)
@@ -5510,7 +5611,6 @@ def build_runtime_perception(conn, agent, world_time, day, slot, plan, step, obs
     return {
         "world_time": world_time.isoformat(),
         "slot": slot,
-        "observed": observed,
         "agent_location": agent["location"],
         "agent_profile": {
             "personality": agent.get("personality", ""),
@@ -5544,17 +5644,19 @@ def build_runtime_perception(conn, agent, world_time, day, slot, plan, step, obs
             "weather": env.get("weather"),
             "temperature": env.get("temperature"),
             "time_slot": env.get("time_slot"),
-            "campus_flow": env.get("campus_flow"),
-            "campus_mood": env.get("campus_mood"),
-            "exam_pressure": env.get("exam_pressure"),
-            "resource_pressure": env.get("resource_pressure"),
-            "activity_heat": env.get("activity_heat"),
             "rainfall": env.get("rainfall"),
         },
         "plan_intent": plan.get("intent", ""),
         "goal_chain": plan.get("goal_chain", {}),
         "plan_step": step,
-        "recent_events": rows_to_dicts(recent_events),
+        "local_observations": cognitive_context["observations"],
+        "beliefs": cognitive_context["beliefs"],
+        "spatial_memories": cognitive_context["spatial_memories"],
+        "received_information": cognitive_context["received_information"],
+        "information_boundary": (
+            "仅包含亲历、自身状态、局部观察、已接收消息和由这些证据形成的信念；"
+            "不包含校园全局事件或系统聚合真相。"
+        ),
     }
 
 
@@ -5646,7 +5748,7 @@ def apply_realism_constraints_to_decision(conn, agent, decision, perception, wor
         destination = "宿舍区" if is_location_open_at_hour("宿舍区", hour) else agent["location"]
         notes.append("校务处未开放，请假改为整理申请理由")
 
-    if random.random() < (0.08 if perception.get("observed") else 0.04):
+    if random.random() < 0.04:
         alternate = realistic_location_for_context(role, hour, weather, current_location=agent["location"])
         if alternate != destination:
             notes.append(f"受到临时状态扰动，短暂偏离计划到{alternate}")
@@ -5824,7 +5926,7 @@ def apply_runtime_social_effect(conn, agent, action, location, day):
 
 def describe_runtime_action(conn, agent, action, destination, goal, day, observed=False):
     social_effect = None
-    importance = 2 if observed else 1
+    importance = 1
     if action == "attend_class":
         content = f"{agent['name']} 在{destination}参与课程活动，围绕「{goal}」记录课堂进展。"
         event_type = "world_agent_attend_class"
@@ -5884,6 +5986,29 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
     action = str(decision.get("action") or "observe")
     destination = str(decision.get("location") or agent["location"])
     goal = str(decision.get("goal") or plan.get("intent") or "观察校园环境")
+    destination_actions = {
+        "attend_class",
+        "queue",
+        "consume",
+        "rest",
+        "club_activity",
+        "request_leave",
+        "collaborate",
+        "conflict",
+        "late",
+    }
+    if (
+        action in destination_actions
+        and destination in VALID_LOCATIONS
+        and destination != agent["location"]
+        and spatial_runtime_available(conn)
+    ):
+        decision["deferred_action"] = action
+        decision["reason"] = (
+            f"先前往{destination}，到达后再执行 {action}。"
+        )
+        action = "move"
+        decision["action"] = action
     title = f"{agent['name']}正在{destination}行动"
 
     try:
@@ -5984,7 +6109,7 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
         if action == "move" and destination in VALID_LOCATIONS and destination != agent["location"]:
             result = move_resident(conn, agent["id"], destination, commit=False)
             content = result["description"]
-        elif action in {"attend_class", "queue", "consume", "rest", "club_activity", "request_leave", "collaborate", "conflict", "late"} and destination in VALID_LOCATIONS and destination != agent["location"]:
+        elif action in destination_actions and destination in VALID_LOCATIONS and destination != agent["location"]:
             move_resident(conn, agent["id"], destination, commit=False)
             agent = dict(agent)
             agent["location"] = destination
@@ -6282,32 +6407,49 @@ def maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=None, 
 
 
 def select_world_tick_agents(conn, runtime):
+    movement_join = ""
+    movement_column = "'idle' AS movement_status"
+    if spatial_runtime_available(conn):
+        movement_join = (
+            "LEFT JOIN agent_spatial_states spatial "
+            "ON spatial.resident_id = r.id"
+        )
+        movement_column = "COALESCE(spatial.movement_status, 'idle') AS movement_status"
     agents = [
         dict(row)
         for row in conn.execute(
-            """
-            SELECT r.id, r.name, r.role, r.personality, r.goal, r.money, r.location, p.strategy
+            f"""
+            SELECT r.id, r.name, r.role, r.personality, r.goal, r.money,
+                   r.location, p.strategy, {movement_column}
             FROM residents r
             LEFT JOIN agent_profiles p ON p.resident_id = r.id
+            {movement_join}
             ORDER BY r.id
             """
         ).fetchall()
     ]
     if not agents:
         return [], int(runtime.get("current_agent_cursor", 0) or 0), set()
+    eligible_agents = [
+        agent
+        for agent in agents
+        if agent["movement_status"] not in ACTIVE_MOVEMENT_STATUSES
+    ]
+    if not eligible_agents:
+        return [], int(runtime.get("current_agent_cursor", 0) or 0), set()
     focused_agent_ids, _ = get_recent_observer_focus(conn)
     focused_set = set(focused_agent_ids)
-    agent_by_id = {agent["id"]: agent for agent in agents}
+    agent_by_id = {agent["id"]: agent for agent in eligible_agents}
     selected = [agent_by_id[agent_id] for agent_id in focused_agent_ids if agent_id in agent_by_id]
     per_tick = max(1, int(runtime.get("agents_per_tick", 3) or 3))
-    cursor = int(runtime.get("current_agent_cursor", 0) or 0) % len(agents)
+    cursor = int(runtime.get("current_agent_cursor", 0) or 0) % len(eligible_agents)
     next_cursor = cursor
-    while len(selected) < per_tick and len(selected) < len(agents):
-        candidate = agents[next_cursor % len(agents)]
+    while len(selected) < per_tick and len(selected) < len(eligible_agents):
+        candidate = eligible_agents[next_cursor % len(eligible_agents)]
         if candidate["id"] not in {item["id"] for item in selected}:
             selected.append(candidate)
         next_cursor += 1
-    return selected[:per_tick], next_cursor % len(agents), focused_set
+    return selected[:per_tick], next_cursor % len(eligible_agents), focused_set
 
 
 def maybe_generate_group_behavior_event(conn, world_time, tick_id, day, slot):
@@ -6525,6 +6667,54 @@ def advance_world_tick(reason="background"):
                 source_type="runtime_tick",
                 source_id=tick_id,
             )
+            local_observations = capture_tick_observations(
+                conn,
+                world_time,
+                tick_id,
+                day,
+                branch_key=active_world_branch_key(conn),
+            )
+            body_states = advance_body_states(
+                conn,
+                world_time,
+                tick_index,
+                env,
+            )
+            movement_results = advance_active_movements(
+                conn,
+                world_time,
+                tick_index,
+            )
+            movement_events = []
+            for movement in movement_results:
+                arrived = movement["movement_status"] == "arrived"
+                movement_event = append_world_event(
+                    conn,
+                    movement["event_type"],
+                    (
+                        f"{movement.get('resident_name', 'Agent')}抵达目的地"
+                        if arrived
+                        else f"{movement.get('resident_name', 'Agent')}正在移动"
+                    ),
+                    (
+                        f"已抵达目标空间，完成本段路线。"
+                        if arrived
+                        else (
+                            f"本 tick 前进 {movement.get('distance_traveled_meters', 0):.1f} 米，"
+                            f"路线进度 {movement.get('progress', 0) * 100:.1f}%。"
+                        )
+                    ),
+                    tick_id=tick_id,
+                    resident_id=movement["resident_id"],
+                    payload=movement,
+                    day=day,
+                    slot=slot,
+                    source_type="spatial_movement",
+                    source_id=movement["resident_id"],
+                    parent_event_id=start_event["id"],
+                    rule_version="spatial-movement-v1",
+                )
+                movement_events.append(movement_event)
             multiscale_updates = run_due_world_updates(
                 conn,
                 world_time,
@@ -6583,6 +6773,32 @@ def advance_world_tick(reason="background"):
                         "completed_count": len(multiscale_updates["completed"]),
                         "failed_count": len(multiscale_updates["failed"]),
                     },
+                    "spatial_movements": {
+                        "advanced_count": len(movement_results),
+                        "arrived_count": sum(
+                            1
+                            for item in movement_results
+                            if item["movement_status"] == "arrived"
+                        ),
+                    },
+                    "body_states": {
+                        "advanced_count": len(body_states),
+                        "sleeping_count": sum(
+                            1 for item in body_states if item["sleeping"]
+                        ),
+                        "moving_count": sum(
+                            1 for item in body_states if item["moving"]
+                        ),
+                    },
+                    "local_perception": {
+                        "observation_count": len(local_observations),
+                        "observer_count": len(
+                            {
+                                item["observer_resident_id"]
+                                for item in local_observations
+                            }
+                        ),
+                    },
                 },
                 day=day,
                 slot=slot,
@@ -6604,6 +6820,10 @@ def advance_world_tick(reason="background"):
                 "failed_agents": failed,
                 "events": [start_event, finish_event],
                 "multiscale_updates": multiscale_updates,
+                "spatial_movements": movement_results,
+                "body_states": body_states,
+                "local_observations": local_observations,
+                "movement_events": movement_events,
                 "group_behavior": group_behavior,
                 "campus_news": campus_news,
                 "results": results,
@@ -6862,15 +7082,86 @@ SNAPSHOT_STATE_TABLES = {
     "world_resource_accounts": "id",
 }
 
+SPATIAL_FOUNDATION_SNAPSHOT_TABLES = {
+    "spatial_nodes": "id",
+    "spatial_edges": "id",
+    "agent_spatial_capabilities": "resident_id",
+    "agent_spatial_states": "resident_id",
+}
 
-def capture_objective_world_state(conn, ensure_schema=True):
+SPATIAL_SNAPSHOT_STATE_TABLES = {
+    **SPATIAL_FOUNDATION_SNAPSHOT_TABLES,
+    "spatial_resources": "id",
+    "spatial_admission_queue": "node_id, queue_position",
+}
+
+BODY_SNAPSHOT_STATE_TABLES = {
+    "agent_body_states": "resident_id",
+}
+
+PERCEPTION_SNAPSHOT_STATE_TABLES = {
+    "agent_observations": "id",
+    "agent_belief_states": "id",
+    "agent_spatial_memories": "id",
+}
+
+CAPABILITY_SNAPSHOT_STATE_TABLES = {
+    "agent_capability_profiles": "resident_id",
+    "agent_opportunity_access": "id",
+}
+
+
+def snapshot_table_exists(conn, table_name):
+    return bool(conn.execute(f"PRAGMA table_info({table_name})").fetchall())
+
+
+def snapshot_state_tables(conn):
+    if all(
+        snapshot_table_exists(conn, table_name)
+        for table_name in {
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+        }
+    ):
+        return {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+        }
+    if all(
+        snapshot_table_exists(conn, table_name)
+        for table_name in {
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+        }
+    ):
+        return {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+        }
+    if all(
+        snapshot_table_exists(conn, table_name)
+        for table_name in SPATIAL_SNAPSHOT_STATE_TABLES
+    ):
+        return {**SNAPSHOT_STATE_TABLES, **SPATIAL_SNAPSHOT_STATE_TABLES}
+    return SNAPSHOT_STATE_TABLES
+
+
+def capture_objective_world_state(conn, ensure_schema=True, state_tables=None):
     if ensure_schema:
         ensure_campus_state_table(conn)
         ensure_space_system(conn)
         ensure_agent_news_system(conn)
         ensure_external_information_system(conn)
     state = {}
-    for table_name, order_by in SNAPSHOT_STATE_TABLES.items():
+    for table_name, order_by in (
+        state_tables or snapshot_state_tables(conn)
+    ).items():
         where_clause = " WHERE status = 'pending'" if table_name == "world_delayed_effects" else ""
         rows = conn.execute(
             f"SELECT * FROM {table_name}{where_clause} ORDER BY {order_by}"
@@ -6916,6 +7207,30 @@ def create_world_snapshot_record(
     ).fetchone()
     tick_row = conn.execute("SELECT id FROM world_ticks ORDER BY id DESC LIMIT 1").fetchone()
     state = capture_objective_world_state(conn)
+    schema_version = (
+        "world-snapshot-v8-capability"
+        if all(table in state for table in CAPABILITY_SNAPSHOT_STATE_TABLES)
+        else (
+            "world-snapshot-v7-perception"
+            if all(table in state for table in PERCEPTION_SNAPSHOT_STATE_TABLES)
+            else (
+                "world-snapshot-v6-body"
+                if all(table in state for table in BODY_SNAPSHOT_STATE_TABLES)
+                else (
+                    "world-snapshot-v5-admission"
+                    if all(table in state for table in SPATIAL_SNAPSHOT_STATE_TABLES)
+                    else (
+                        "world-snapshot-v4-spatial"
+                        if all(
+                            table in state
+                            for table in SPATIAL_FOUNDATION_SNAPSHOT_TABLES
+                        )
+                        else "world-snapshot-v3"
+                    )
+                )
+            )
+        )
+    )
     state_json = canonical_json(state)
     event_cursor = int(event_row["value"] or 0)
     effective_branch_key = branch_key or runtime.get("active_branch_key") or "main"
@@ -6933,7 +7248,7 @@ def create_world_snapshot_record(
          schema_version, environment_config_id, environment_version, random_seed,
          external_data_version, event_cursor, parent_snapshot_id, branch_key,
          checksum, metadata_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'world-snapshot-v3', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             run_id or runtime.get("active_run_id") or "",
@@ -6943,6 +7258,7 @@ def create_world_snapshot_record(
             tick_row["id"] if tick_row else None,
             reason,
             state_json,
+            schema_version,
             runtime.get("environment_config_id"),
             runtime.get("environment_version") or "",
             runtime.get("random_seed") or "",
@@ -6972,6 +7288,17 @@ SNAPSHOT_UPSERT_KEYS = {
     "residents": ("id",),
     "world_runtime": ("id",),
     "world_update_schedules": ("id",),
+    "spatial_nodes": ("id",),
+    "spatial_edges": ("id",),
+    "spatial_resources": ("id",),
+    "agent_spatial_capabilities": ("resident_id",),
+    "agent_spatial_states": ("resident_id",),
+    "agent_body_states": ("resident_id",),
+    "agent_observations": ("id",),
+    "agent_belief_states": ("id",),
+    "agent_spatial_memories": ("id",),
+    "agent_capability_profiles": ("resident_id",),
+    "agent_opportunity_access": ("id",),
 }
 
 
@@ -6987,10 +7314,40 @@ def snapshot_row_or_error(conn, snapshot_id):
     state = load_json_text(row["state_json"], {})
     if not isinstance(state, dict):
         raise ValueError("世界快照状态格式无效")
-    missing = [table for table in SNAPSHOT_STATE_TABLES if table not in state]
+    if row["schema_version"] == "world-snapshot-v8-capability":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+        }
+    elif row["schema_version"] == "world-snapshot-v7-perception":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+        }
+    elif row["schema_version"] == "world-snapshot-v6-body":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+        }
+    elif row["schema_version"] == "world-snapshot-v5-admission":
+        expected_tables = {**SNAPSHOT_STATE_TABLES, **SPATIAL_SNAPSHOT_STATE_TABLES}
+    elif row["schema_version"] == "world-snapshot-v4-spatial":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_FOUNDATION_SNAPSHOT_TABLES,
+        }
+    else:
+        expected_tables = SNAPSHOT_STATE_TABLES
+    missing = [table for table in expected_tables if table not in state]
     if missing:
         raise ValueError(f"快照版本不支持完整恢复，缺少状态表：{', '.join(missing[:6])}")
-    return row, state
+    return row, state, expected_tables
 
 
 def insert_snapshot_rows(conn, table_name, rows):
@@ -7036,7 +7393,7 @@ def upsert_snapshot_rows(conn, table_name, rows, key_columns):
 
 def restore_world_snapshot_state(conn, snapshot_id, active_branch_key=None, active_run_id=""):
     ensure_world_runtime_tables(conn)
-    snapshot_row, state = snapshot_row_or_error(conn, snapshot_id)
+    snapshot_row, state, state_tables = snapshot_row_or_error(conn, snapshot_id)
     current_resident_ids = {
         int(row["id"]) for row in conn.execute("SELECT id FROM residents").fetchall()
     }
@@ -7048,12 +7405,12 @@ def restore_world_snapshot_state(conn, snapshot_id, active_branch_key=None, acti
     try:
         replace_tables = [
             table
-            for table in SNAPSHOT_STATE_TABLES
+            for table in state_tables
             if table not in SNAPSHOT_UPSERT_KEYS
         ]
         for table_name in reversed(replace_tables):
             conn.execute(f"DELETE FROM {table_name}")
-        for table_name in SNAPSHOT_STATE_TABLES:
+        for table_name in state_tables:
             rows = state[table_name]
             key_columns = SNAPSHOT_UPSERT_KEYS.get(table_name)
             if key_columns:
@@ -7081,7 +7438,11 @@ def restore_world_snapshot_state(conn, snapshot_id, active_branch_key=None, acti
                 WORLD_RUNTIME_ID,
             ),
         )
-        restored_state = capture_objective_world_state(conn, ensure_schema=False)
+        restored_state = capture_objective_world_state(
+            conn,
+            ensure_schema=False,
+            state_tables=state_tables,
+        )
         restored_checksum = content_checksum(canonical_json(restored_state))
         expected_checksum = content_checksum(snapshot_row["state_json"])
         if restored_checksum != expected_checksum:
@@ -7122,7 +7483,7 @@ def decode_world_branch(row):
 
 
 def create_world_branch_record(conn, branch_key, name, source_snapshot_id, metadata=None):
-    source_row, _ = snapshot_row_or_error(conn, source_snapshot_id)
+    source_row, _, _ = snapshot_row_or_error(conn, source_snapshot_id)
     existing = conn.execute(
         "SELECT id FROM world_branches WHERE branch_key = ?",
         (branch_key,),

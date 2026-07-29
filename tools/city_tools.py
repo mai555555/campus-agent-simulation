@@ -159,6 +159,30 @@ def move_resident(conn, resident_id, destination, commit=True):
         raise ValueError("地点不存在")
 
     day = get_current_day(conn)
+    from app.spatial.runtime import start_spatial_movement
+
+    spatial_result = start_spatial_movement(conn, resident_id, destination)
+    if spatial_result is not None:
+        description = spatial_result.get(
+            "description",
+            f"{resident['name']} 正在前往 {destination}。",
+        )
+        if spatial_result.get("movement_status") == "moving":
+            add_event(conn, day, "agent_move_started", description)
+            add_memory_once(
+                conn,
+                resident_id,
+                day,
+                description,
+                importance=2,
+                memory_type="episodic",
+                tags=["移动", resident["location"], destination],
+                source="move",
+            )
+        if commit:
+            conn.commit()
+        return {**spatial_result, "description": description}
+
     conn.execute(
         "UPDATE residents SET location = ? WHERE id = ?",
         (destination, resident_id),

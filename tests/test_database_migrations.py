@@ -1,0 +1,138 @@
+import os
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from alembic import command
+
+from app.db import create_database_engine, get_database_url
+from app.db.migration_runtime import (
+    BASELINE_REQUIRED_TABLES,
+    BASELINE_REVISION,
+    get_alembic_config,
+    get_current_revision,
+    get_head_revision,
+    list_business_tables,
+)
+from scripts.migrate_db import migrate_database
+
+
+class DatabaseMigrationFoundationTest(unittest.TestCase):
+    @staticmethod
+    def create_required_baseline_tables(db_path):
+        connection = sqlite3.connect(db_path)
+        for table_name in BASELINE_REQUIRED_TABLES:
+            connection.execute(
+                f"CREATE TABLE {table_name} (id INTEGER PRIMARY KEY)"
+            )
+        connection.commit()
+        connection.close()
+
+    def test_sqlite_url_uses_absolute_db_path(self):
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(
+            os.environ,
+            {"DB_PATH": str(Path(tmp_dir) / "campus.db")},
+            clear=False,
+        ), patch.dict(os.environ, {"DATABASE_URL": ""}, clear=False):
+            url = get_database_url()
+
+        self.assertTrue(url.startswith("sqlite+pysqlite:////"))
+        self.assertTrue(url.endswith("/campus.db"))
+
+    def test_render_postgres_url_uses_psycopg_driver(self):
+        with patch.dict(
+            os.environ,
+            {"DATABASE_URL": "postgres://user:pass@example.test/campus"},
+            clear=False,
+        ):
+            url = get_database_url()
+
+        self.assertEqual(
+            url, "postgresql+psycopg://user:pass@example.test/campus"
+        )
+
+    def test_sqlite_engine_enables_foreign_keys(self):
+        engine = create_database_engine("sqlite+pysqlite:///:memory:")
+        try:
+            with engine.connect() as connection:
+                enabled = connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one()
+            self.assertEqual(enabled, 1)
+        finally:
+            engine.dispose()
+
+    def test_legacy_database_can_be_stamped_and_upgraded_idempotently(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "legacy.db"
+            sqlite3.connect(db_path).execute(
+                "CREATE TABLE residents (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+            ).connection.close()
+            env = {"DATABASE_URL": "", "DB_PATH": str(db_path)}
+            with patch.dict(os.environ, env, clear=False):
+                engine = create_database_engine()
+                config = get_alembic_config()
+                try:
+                    self.assertEqual(list_business_tables(engine), ["residents"])
+                    self.assertIsNone(get_current_revision(engine))
+                    head_revision = get_head_revision(config)
+                    self.assertNotEqual(head_revision, BASELINE_REVISION)
+
+                    command.stamp(config, BASELINE_REVISION)
+                    command.upgrade(config, "head")
+                    command.upgrade(config, "head")
+
+                    self.assertEqual(
+                        get_current_revision(engine), head_revision
+                    )
+                finally:
+                    engine.dispose()
+
+    def test_migration_runner_rejects_empty_database(self):
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "",
+                "DB_PATH": str(Path(tmp_dir) / "empty.db"),
+            },
+            clear=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "no campus schema"):
+                migrate_database()
+
+    def test_migration_runner_reports_ready_legacy_database(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "legacy.db"
+            self.create_required_baseline_tables(db_path)
+            with patch.dict(
+                os.environ,
+                {"DATABASE_URL": "", "DB_PATH": str(db_path)},
+                clear=False,
+            ):
+                result = migrate_database()
+                checked = migrate_database(check_only=True)
+
+            self.assertTrue(result["ready"])
+            self.assertEqual(result["current"], result["head"])
+            self.assertTrue(checked["ready"])
+
+    def test_migration_runner_rejects_incomplete_legacy_schema(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "legacy.db"
+            connection = sqlite3.connect(db_path)
+            connection.execute("CREATE TABLE residents (id INTEGER PRIMARY KEY)")
+            connection.commit()
+            connection.close()
+            with patch.dict(
+                os.environ,
+                {"DATABASE_URL": "", "DB_PATH": str(db_path)},
+                clear=False,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "missing required baseline tables"
+                ):
+                    migrate_database()
+
+
+if __name__ == "__main__":
+    unittest.main()
