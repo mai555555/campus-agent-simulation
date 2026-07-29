@@ -120,7 +120,7 @@ DEFAULT_AGENT_PERSONALITY_TRAITS = {
 
 from app.schema import (
     CAMPUS_STATE_SQL, SPACE_SYSTEM_SQL, DEFAULT_SPACES, DEFAULT_ENV, ENV_COLUMN_TYPES,
-    AGENT_NEWS_SQL, EXTERNAL_INFORMATION_SQL, AGENT_PROFILE_SQL, PROFILE_COLUMN_TYPES,
+    AGENT_NEWS_SQL, AGENT_NEWS_COLUMN_TYPES, EXTERNAL_INFORMATION_SQL, AGENT_PROFILE_SQL, PROFILE_COLUMN_TYPES,
 SOCIAL_SYSTEM_SQL, BEHAVIOR_SYSTEM_SQL, RELATIONSHIP_DYNAMIC_COLUMNS,
     LONG_TERM_GOAL_COLUMNS, AGENT_INFORMATION_COLUMNS, WORLD_RUNTIME_SQL, RESEARCH_SYSTEM_SQL
 )
@@ -2263,6 +2263,10 @@ def ensure_space_system(conn):
 
 def ensure_agent_news_system(conn):
     conn.executescript(AGENT_NEWS_SQL)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(agent_news_posts)").fetchall()}
+    for column, column_type in AGENT_NEWS_COLUMN_TYPES.items():
+        if column not in columns:
+            conn.execute(f"ALTER TABLE agent_news_posts ADD COLUMN {column} {column_type}")
 
 
 def ensure_external_information_system(conn):
@@ -4671,7 +4675,7 @@ def maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=None, 
         headline = campus_news_headline(candidate["category"], candidate["location"], candidate["name"])
         content = None
         prompt = f"""
-你是《校园世界时报》的运行时观察记者。请根据校园平行世界刚出现的事实材料，写一则 80 到 130 字的中文校园快讯。
+你是《校园世界时报》的运行时观察记者。请根据校园平行世界刚出现的事实材料，写一则 90 到 150 字、具有现场感和可读性的中文校园快讯。
 
 时间窗口：{source_slot}
 新闻类型：{candidate['category']}
@@ -4683,6 +4687,9 @@ def maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=None, 
 
 要求：
 - 使用第三人称、客观新闻口吻。
+- 第一两句直接写清人物在什么地点做了什么，不要用“系统捕捉到”“值得记录”“发布最新进展”等套话起笔。
+- 随后写出行动造成的具体变化、反应或悬念；结尾说明为什么值得继续关注。
+- 句式自然，有长短变化，避免连续重复人物全称、地点和“校园”。
 - 优先呈现突发异常、关系风向、反常行为、群体现象、内心发现或校园环境变化。
 - 只能基于事实材料写，不要编造材料中没有的人物关系或因果。
 - 不要写标题、JSON、Markdown、口号或解释，只输出新闻正文。
@@ -4722,10 +4729,19 @@ def maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=None, 
             content = fallback_campus_news_content(candidate)
         cursor = conn.execute(
             """
-            INSERT OR IGNORE INTO agent_news_posts (day, resident_id, headline, content)
-            VALUES (?, ?, ?, ?)
+            INSERT OR IGNORE INTO agent_news_posts
+            (day, resident_id, source_slot, source_event_id, news_value, headline, content)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (day, candidate["resident_id"], headline, content[:300]),
+            (
+                day,
+                candidate["resident_id"],
+                source_slot,
+                candidate.get("source_event_id"),
+                candidate["score"],
+                headline,
+                content[:500],
+            ),
         )
         if cursor.rowcount:
             published.append(
@@ -7047,18 +7063,18 @@ def fallback_campus_news_content(candidate):
     location = candidate["location"] or "校园"
     content = str(candidate["content"] or "校园出现一条新的运行记录。")
     if category == "关系风向":
-        return f"{location}消息，{role}{name}相关的一次互动被记录下来。事件显示关系网络正在发生细微变化，后续信任、合作或紧张程度值得继续观察。"
+        return f"{role}{name}在{location}经历了一次不同于往常的互动。{content[:110]} 这次接触是否会改变双方后续的信任与合作，成为编辑部继续追踪的线索。"
     if category == "突发异常":
-        return f"{location}消息，系统捕捉到与{role}{name}相关的异常片段：{content[:90]}。这类信号不会中断世界运行，但已进入校园日报观察。"
+        return f"{location}出现异常动向，{role}{name}正处在事件中心。{content[:110]} 当前影响仍在发展，相关行动与环境变化需要继续观察。"
     if category == "群体现象":
-        return f"{location}消息，{role}{name}参与的行动呈现出集体扩散迹象：{content[:90]}。这可能改变接下来一段时间的校园注意力。"
+        return f"{role}{name}在{location}参与的行动开始吸引更多人响应。{content[:110]} 原本的个人选择正在形成集体趋势，可能改变接下来的空间热度和校园注意力。"
     if category == "反常行为":
-        return f"{location}消息，{role}{name}做出了一次不同寻常的行动：{content[:90]}。校园编辑部将其列为今日反常行为。"
+        return f"{role}{name}今天在{location}偏离了惯常行动轨迹。{content[:110]} 这究竟是临时选择还是持续变化，仍需结合后续行为判断。"
     if category == "内心发现":
-        return f"{location}消息，{role}{name}在运行过程中记录到新的观察或想法：{content[:90]}。这条发现为理解 Agent 的选择提供了线索。"
+        return f"{role}{name}在{location}停下来重新审视自己的选择。{content[:110]} 这份想法尚未转化为行动，却可能影响其下一步决定。"
     if category == "校园环境":
-        return f"{location}消息，校园环境出现一条值得记录的变化：{content[:100]}。这类公共信息会影响后续行动和空间选择。"
-    return f"{location}消息，{role}{name}留下新的校园行动记录：{content[:100]}。"
+        return f"{location}的运行状态发生变化。{content[:120]} 身处其中的{role}{name}首先受到影响，其他居民的行动和空间选择也可能随之调整。"
+    return f"{role}{name}在{location}完成了一次不同寻常的行动。{content[:120]} 这件事为观察后续变化留下了新的线索。"
 
 
 def collect_campus_news_candidates(conn, day, source_slot, limit=60):
@@ -7164,21 +7180,21 @@ def publish_agent_news(conn, day, results):
 
         action_summary = summarize_action_for_news(item.get("execution", {}))
         prompt = f"""
-你是《校园世界时报》的校园记者。根据以下事实写一则 90 到 140 字的中文校园快讯：
+你是《校园世界时报》的校园记者。根据以下事实写一则 90 到 150 字、具有现场感的中文校园快讯：
 消息来源：{resident['name']}（{resident['role']}）
 地点：{resident['location']}
 事实：{action_summary}
 
-使用第三人称和客观新闻口吻，交代人物、地点、事件及其对校园师生的影响。
+使用第三人称和客观新闻口吻，先写具体行动，再写变化或影响。句式自然，避免“发布最新动态”“提供参考”“值得记录”等公文套话。
 不要写个人感想、日记、号召口号、标题、JSON、Markdown 或解释，只输出新闻正文。
 """
         try:
             content = ask_llm(prompt).strip()
         except Exception:
-            content = f"{resident['role']}{resident['name']}当天在{resident['location']}完成了一项校园行动。相关变化将为师生后续学习和生活提供参考。"
+            content = f"{resident['role']}{resident['name']}当天来到{resident['location']}，完成了与自身目标相关的一项行动。现场留下的变化已经进入后续观察，编辑部将继续追踪它是否影响其他居民的选择。"
 
         if not content or content.startswith(("{", "[")):
-            content = f"{resident['role']}{resident['name']}当天在{resident['location']}完成了一项校园行动。相关变化将为师生后续学习和生活提供参考。"
+            content = f"{resident['role']}{resident['name']}当天来到{resident['location']}，完成了与自身目标相关的一项行动。现场留下的变化已经进入后续观察，编辑部将继续追踪它是否影响其他居民的选择。"
         if any(word in content for word in ("维修", "检修", "施工")):
             headline = f"{resident['location']}启动设施维护"
         elif any(word in content for word in ("食堂", "套餐", "供餐", "补货")):
@@ -7189,14 +7205,16 @@ def publish_agent_news(conn, day, results):
             headline = "考试周校园保障措施持续推进"
         else:
             headline = f"{resident['location']}发布最新校园动态"
-        conn.execute(
+        cursor = conn.execute(
             """
-            INSERT OR IGNORE INTO agent_news_posts (day, resident_id, headline, content)
-            VALUES (?, ?, ?, ?)
+            INSERT OR IGNORE INTO agent_news_posts
+            (day, resident_id, source_slot, news_value, headline, content)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (day, resident["id"], headline, content[:300]),
+            (day, resident["id"], "日终补充", 55, headline, content[:500]),
         )
-        published.append({"resident_id": resident["id"], "headline": headline})
+        if cursor.rowcount:
+            published.append({"resident_id": resident["id"], "headline": headline})
     return published
 
 
@@ -7290,7 +7308,8 @@ def agent_newspaper_posts(day: Optional[int] = None):
         target_day = max(1, int(day)) if day is not None else current_day
         posts = conn.execute(
             """
-            SELECT p.day, p.resident_id, r.name, r.role, p.headline, p.content, p.created_at
+            SELECT p.day, p.resident_id, r.name, r.role, p.source_slot,
+                   p.source_event_id, p.news_value, p.headline, p.content, p.created_at
             FROM agent_news_posts p
             JOIN residents r ON r.id = p.resident_id
             WHERE p.day = ?
@@ -7310,6 +7329,12 @@ def agent_newspaper_posts(day: Optional[int] = None):
         return {
             "day": target_day,
             "current_day": current_day,
+            "edition": {
+                "kind": "rolling" if target_day == current_day else "archive",
+                "label": "今日滚动版" if target_day == current_day else f"第 {target_day} 天归档日报",
+                "brief_count": len(posts),
+                "issue_key": f"day-{target_day}",
+            },
             "available_days": days,
             "previous_day": previous_day,
             "next_day": next_day,

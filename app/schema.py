@@ -144,12 +144,21 @@ CREATE TABLE IF NOT EXISTS agent_news_posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     day INTEGER NOT NULL,
     resident_id INTEGER NOT NULL,
+    source_slot TEXT NOT NULL DEFAULT '',
+    source_event_id INTEGER,
+    news_value INTEGER NOT NULL DEFAULT 50,
     headline TEXT NOT NULL,
     content TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(day, resident_id)
 );
 """
+
+AGENT_NEWS_COLUMN_TYPES = {
+    "source_slot": "TEXT NOT NULL DEFAULT ''",
+    "source_event_id": "INTEGER",
+    "news_value": "INTEGER NOT NULL DEFAULT 50",
+}
 
 EXTERNAL_INFORMATION_SQL = """
 CREATE TABLE IF NOT EXISTS external_information (

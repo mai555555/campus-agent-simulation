@@ -825,6 +825,7 @@ admin > participant > observer > automatic background
 - 真实天气和外部世界资讯由后台 tick 每小时自动检查一次，写入环境表、资讯表和 `world_event_stream`，不再依赖前端手动同步按钮。
 - 观察者关注 Agent 时可触发局部模型细节，写入 Agent 记忆和事件流；admin 注入事件时可触发一次事件影响反馈。
 - 校园日报接入自主循环：world tick 会从运行时事件流与关系变化中挑选新闻价值最高的材料，按 `突发异常 > 反常行为 > 关系风向 > 群体现象 > 内心发现 > 校园环境` 排序，最多生成 3 条校园快讯，写入 `agent_news_posts`，并用 `campus_news_published` / `campus_news_skipped` 记录发布状态。`campus_news_skipped` 是可重试状态，不会封死同一窗口后续发布。
+- 出版层采用“每日一期、分时更新”：每个 8 小时窗口产生带明确 `source_slot` 的快讯，同一天的快讯由前端汇编成一份滚动日报；日期结束后成为归档日报。快讯和日报共享事实来源，但使用独立阅读视图，上一期/下一期按日期导航。
 - 普通用户进入页面会创建 observer session，关注 Agent 或地点会更新观察焦点。
 - 前端通过 `/api/world/runtime` 和 `/api/world/events` 展示运行状态和实时事件流。
 - Admin 控制使用 `ADMIN_TOKEN`，支持 start、pause、manual tick 和事件注入。
