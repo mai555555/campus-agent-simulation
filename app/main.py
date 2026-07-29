@@ -191,6 +191,14 @@ def _initialize_social_system_tables(conn):
         )
         """
     )
+    membership_id_type = "SERIAL PRIMARY KEY" if using_postgres() else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    conn.execute(f"""
+        CREATE TABLE IF NOT EXISTS group_membership_events (
+            id {membership_id_type}, day INTEGER NOT NULL DEFAULT 1, group_id INTEGER NOT NULL,
+            resident_id INTEGER NOT NULL, action TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '',
+            member_ids TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     normalize_agent_hierarchy(conn)
     seed_long_term_goals(conn)
     seed_multiscale_goals(conn)
@@ -1997,6 +2005,13 @@ def create_collaboration(conn, leader_id, member_ids, title, goal):
     return {"title": title, "leader_id": leader_id, "member_ids": ids, "goal": goal, "status": "active"}
 
 
+def record_group_membership_event(conn, group_id, resident_id, action, reason, member_ids):
+    conn.execute(
+        "INSERT INTO group_membership_events (day, group_id, resident_id, action, reason, member_ids) VALUES (?, ?, ?, ?, ?, ?)",
+        (get_current_day(conn), group_id, resident_id, action, reason or "", json.dumps(member_ids, ensure_ascii=False)),
+    )
+
+
 def join_group_goal(conn, resident_id, group_id):
     ensure_social_system_tables(conn)
     group = conn.execute("SELECT * FROM group_goals WHERE id = ? AND status = 'active'", (group_id,)).fetchone()
@@ -2009,6 +2024,7 @@ def join_group_goal(conn, resident_id, group_id):
     roles = load_json_text(group["roles"], {})
     roles[str(resident_id)] = "成员"
     conn.execute("UPDATE group_goals SET member_ids = ?, roles = ? WHERE id = ?", (json.dumps(members, ensure_ascii=False), json.dumps(roles, ensure_ascii=False), group_id))
+    record_group_membership_event(conn, group_id, resident_id, "join", f"加入群体：{group['name']}", members)
     for member_id in members:
         if member_id != resident_id:
             evolve_relationship(conn, resident_id, member_id, "group_join", f"加入小组：{group['name']}", 2, 3, -1)
@@ -2031,6 +2047,7 @@ def leave_group_goal(conn, resident_id, group_id):
     roles = load_json_text(group["roles"], {})
     roles.pop(str(resident_id), None)
     conn.execute("UPDATE group_goals SET member_ids = ?, roles = ? WHERE id = ?", (json.dumps(members, ensure_ascii=False), json.dumps(roles, ensure_ascii=False), group_id))
+    record_group_membership_event(conn, group_id, resident_id, "leave", f"离开群体：{group['name']}", members)
     add_event(conn, get_current_day(conn), "group_leave", f"Agent {resident_id} 退出小组「{group['name']}」。")
     return {"group_id": group_id, "group_name": group["name"], "member_ids": members, "message": "退出小组成功"}
     return {"type": "collaboration", "title": title, "leader_id": leader_id, "member_ids": ids, "goal": goal, "score": score, "status": "active", "group_goal_id": group_cursor.lastrowid}
@@ -6391,7 +6408,68 @@ def _life_course_groups(conn, resident_id, timeline):
             "evidence_event_ids": evidence[:12],
             "membership_history_available": False,
         })
+        history = conn.execute("SELECT id, day, resident_id, action, reason, member_ids, created_at FROM group_membership_events WHERE group_id = ? ORDER BY day ASC, id ASC LIMIT 100", (row["id"],)).fetchall()
+        groups[-1]["membership_history"] = rows_to_dicts(history)
+        groups[-1]["membership_history_available"] = bool(history)
     return groups
+
+
+def _life_course_episodes(timeline):
+    """Aggregate tick-level evidence into daily experience episodes."""
+    by_day = {}
+    for event in timeline:
+        day = int(event.get("day") or 0)
+        if day <= 0:
+            continue
+        episode = by_day.setdefault(day, {
+            "id": f"day-{day}", "day": day, "event_ids": [], "actions": [],
+            "locations": [], "evidence": [], "event_count": 0, "repeat_count": 0,
+            "planned_actions": [], "actual_actions": [], "deviations": [],
+            "feedback": [], "memories": [], "state_before": None, "state_after": None,
+            "reasons": [],
+        })
+        episode["event_ids"].append(event.get("id"))
+        episode["event_count"] += 1
+        episode["repeat_count"] += max(1, int(event.get("repeat_count") or 1))
+        if event.get("action") and event["action"] != "memory" and event["action"] not in episode["actions"]:
+            episode["actions"].append(event["action"])
+        decision = event.get("decision") if isinstance(event.get("decision"), dict) else {}
+        execution = event.get("execution") if isinstance(event.get("execution"), dict) else {}
+        planned = decision.get("planned_action") or decision.get("action")
+        actual = execution.get("action") or (event.get("action") if event.get("action") != "memory" else None)
+        if planned and planned not in episode["planned_actions"]: episode["planned_actions"].append(planned)
+        if actual and actual not in episode["actual_actions"]: episode["actual_actions"].append(actual)
+        if planned and actual and planned != actual:
+            episode["deviations"].append({"planned": planned, "actual": actual, "reason": decision.get("reason", "")})
+        reason = str(decision.get("reason") or event.get("content") or "").strip()
+        if reason and reason not in episode["reasons"] and event.get("source") != "memories":
+            episode["reasons"].append(reason)
+        if event.get("location") and event["location"] not in episode["locations"]: episode["locations"].append(event["location"])
+        if event.get("environment_feedback"): episode["feedback"].append(event["environment_feedback"])
+        if event.get("source") == "memories": episode["memories"].append(event.get("content", ""))
+        before = event.get("state_before") if isinstance(event.get("state_before"), dict) else None
+        after = event.get("state_after") if isinstance(event.get("state_after"), dict) else None
+        if before and episode["state_before"] is None: episode["state_before"] = before
+        if after: episode["state_after"] = after
+        episode["evidence"].extend(event.get("evidence") or [])
+    episodes = []
+    for episode in sorted(by_day.values(), key=lambda item: item["day"], reverse=True):
+        labels = [_life_course_action_label(action) for action in episode["actions"][:4]]
+        episode["title"] = f"第{episode['day']}天经历片段"
+        episode["summary"] = "、".join(labels) if labels else "校园日常观察"
+        episode["evidence"] = episode["evidence"][:20]
+        before, after = episode.get("state_before") or {}, episode.get("state_after") or {}
+        changes = {key: {"before": before.get(key), "after": after.get(key)} for key in ("location", "energy", "time_budget", "mood", "current_task") if before.get(key) != after.get(key) and (before.get(key) is not None or after.get(key) is not None)}
+        feedback_keys = [f"{key}={value}" for item in episode["feedback"] if isinstance(item, dict) for key, value in item.items()]
+        impact_parts = []
+        if changes: impact_parts.append("状态变化：" + "、".join(f"{key} {value['before']}→{value['after']}" for key, value in changes.items()))
+        if episode["memories"]: impact_parts.append(f"形成 {len(episode['memories'])} 条后续记忆")
+        if feedback_keys: impact_parts.append("环境反馈：" + "、".join(feedback_keys[:4]))
+        episode["narrative"] = {"intention": "、".join(_life_course_action_label(item) for item in episode["planned_actions"][:4]) or "未记录计划", "actual": "、".join(_life_course_action_label(item) for item in episode["actual_actions"][:4]) or "未记录行动", "deviation_count": len(episode["deviations"]), "memory_count": len(episode["memories"]), "feedback_count": len(episode["feedback"])}
+        episode["narrative"]["reasons"] = episode["reasons"][:3]
+        episode["impact"] = {"state_changes": changes, "interpretation": "；".join(impact_parts) + "。这些是时序上观察到的结果，不代表已证明因果关系。" if impact_parts else "当前片段暂无可观测的后续状态变化。"}
+        episodes.append(episode)
+    return episodes
 
 
 def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, limit=240):
@@ -6405,6 +6483,7 @@ def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, l
         (resident_id,),
     ).fetchall()
     timeline = _life_course_timeline(conn, resident_id, from_day=from_day, to_day=to_day, limit=limit)
+    episodes = _life_course_episodes(timeline)
     for item in timeline:
         item["timeline_kind"] = _life_course_kind(item)
         item["display_title"] = _life_course_display_title(item)
@@ -6445,6 +6524,7 @@ def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, l
         "initial_goal": resident["goal"],
         "goals": [dict(goal) for goal in goals],
         "timeline": timeline,
+        "episodes": episodes,
         "action_timeline": action_timeline,
         "memory_timeline": memory_timeline,
         "turning_points": sorted(important, key=lambda item: (-int(item.get("turning_point_score") or 0), int(item.get("day") or 0)))[:12],
@@ -6462,7 +6542,7 @@ def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, l
         "research_boundaries": {
             "state_history_available": any(item.get("state_before") or item.get("state_after") for item in timeline if item.get("source") == "simulation_action_logs"),
             "relationship_history_available": any(item.get("history_available") for item in relationships),
-            "group_membership_history_available": False,
+            "group_membership_history_available": any(group.get("membership_history_available") for group in groups),
             "causal_links_available": False,
             "message": "当前版本展示事件证据和时序关联，不将时序关联表述为因果关系。",
         },
