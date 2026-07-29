@@ -2387,10 +2387,26 @@ class WorldSnapshotRequest(BaseModel):
     reason: str = Field(default="manual checkpoint", max_length=240)
     snapshot_type: str = Field(default="manual_checkpoint", max_length=60)
     run_id: str = Field(default="", max_length=120)
-    branch_key: str = Field(default="main", max_length=80)
+    branch_key: str = Field(default="", max_length=80)
     parent_snapshot_id: Optional[int] = None
     external_data_version: str = Field(default="", max_length=120)
     metadata: dict = Field(default_factory=dict)
+
+
+class WorldSnapshotRestoreRequest(BaseModel):
+    reason: str = Field(default="restore checkpoint", max_length=240)
+    create_backup: bool = True
+
+
+class WorldBranchRequest(BaseModel):
+    branch_key: str = Field(min_length=1, max_length=80, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+    name: str = Field(default="", max_length=120)
+    source_snapshot_id: int
+    metadata: dict = Field(default_factory=dict)
+
+
+class WorldBranchSwitchRequest(BaseModel):
+    reason: str = Field(default="switch branch", max_length=240)
 
 
 def row_to_dict(row):
@@ -2479,6 +2495,7 @@ def ensure_world_runtime_tables(conn):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_world_event_stream_parent ON world_event_stream(parent_event_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_world_event_stream_root ON world_event_stream(root_event_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_world_event_stream_source ON world_event_stream(source_type, source_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_world_event_stream_branch ON world_event_stream(branch_key, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_world_snapshots_parent ON world_snapshots(parent_snapshot_id)")
         seed_world_runtime_rules(conn)
         seed_world_action_rules(conn)
@@ -2518,6 +2535,16 @@ def ensure_world_runtime_tables(conn):
             WHERE id = ?
             """,
             (default_config["id"], environment_version_label(default_config), WORLD_RUNTIME_ID),
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO world_branches
+            (branch_key, name, status, metadata_json)
+            VALUES ('main', '主世界', 'active', '{}')
+            """
+        )
+        conn.execute(
+            "UPDATE world_event_stream SET branch_key = 'main' WHERE branch_key = ''"
         )
         seed_agent_personality_traits(conn)
         WORLD_SCHEMA_READY = True
@@ -2947,6 +2974,14 @@ def get_world_runtime(conn):
     return dict(conn.execute("SELECT * FROM world_runtime WHERE id = ?", (WORLD_RUNTIME_ID,)).fetchone())
 
 
+def active_world_branch_key(conn):
+    row = conn.execute(
+        "SELECT active_branch_key FROM world_runtime WHERE id = ?",
+        (WORLD_RUNTIME_ID,),
+    ).fetchone()
+    return (row["active_branch_key"] if row else "") or "main"
+
+
 def update_world_runtime_status(conn, status):
     ensure_world_runtime_tables(conn)
     now = get_world_now().isoformat()
@@ -2980,26 +3015,35 @@ def append_world_event(
     root_event_id=None,
     rule_version="world-runtime-v1",
     occurred_at=None,
+    branch_key=None,
 ):
     if ensure_schema:
         ensure_world_runtime_tables(conn)
     now = get_world_now()
     day = day or get_current_day(conn)
     slot = slot or world_slot_from_hour(now.hour)
-    if parent_event_id and not root_event_id:
+    if parent_event_id:
         parent = conn.execute(
-            "SELECT id, root_event_id FROM world_event_stream WHERE id = ?",
+            "SELECT id, root_event_id, branch_key FROM world_event_stream WHERE id = ?",
             (parent_event_id,),
         ).fetchone()
         if not parent:
             raise ValueError("parent_event_id 不存在")
-        root_event_id = parent["root_event_id"] or parent["id"]
+        root_event_id = root_event_id or parent["root_event_id"] or parent["id"]
+        branch_key = branch_key or parent["branch_key"]
+    if not branch_key:
+        runtime_row = conn.execute(
+            "SELECT active_branch_key FROM world_runtime WHERE id = ?",
+            (WORLD_RUNTIME_ID,),
+        ).fetchone()
+        branch_key = runtime_row["active_branch_key"] if runtime_row else "main"
     cursor = conn.execute(
         """
         INSERT INTO world_event_stream
         (tick_id, day, slot, event_type, resident_id, location, title, content, payload,
-         source_type, source_id, parent_event_id, root_event_id, rule_version, occurred_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         source_type, source_id, parent_event_id, root_event_id, rule_version, occurred_at,
+         branch_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             tick_id,
@@ -3017,6 +3061,7 @@ def append_world_event(
             root_event_id,
             rule_version or "world-runtime-v1",
             occurred_at or now.isoformat(),
+            branch_key or "main",
         ),
     )
     event_id = cursor.lastrowid
@@ -3531,15 +3576,16 @@ def decode_world_update_run(row):
 
 
 def world_events_for_update(conn, after_id, through_id):
+    branch_key = active_world_branch_key(conn)
     return [
         decode_world_event(row)
         for row in conn.execute(
             """
             SELECT * FROM world_event_stream
-            WHERE id > ? AND id <= ?
+            WHERE id > ? AND id <= ? AND branch_key = ?
             ORDER BY id
             """,
-            (after_id, through_id),
+            (after_id, through_id, branch_key),
         ).fetchall()
     ]
 
@@ -5352,13 +5398,15 @@ def record_plan_outcome(conn, agent, plan, step, decision, action, destination, 
 
 
 def should_generate_observed_agent_detail(conn, resident_id, world_time):
+    branch_key = active_world_branch_key(conn)
     row = conn.execute(
         """
         SELECT created_at FROM world_event_stream
         WHERE event_type = 'observer_model_detail' AND resident_id = ?
+          AND branch_key = ?
         ORDER BY id DESC LIMIT 1
         """,
-        (resident_id,),
+        (resident_id, branch_key),
     ).fetchone()
     latest_at = parse_world_datetime(row["created_at"]) if row else None
     if latest_at and (world_time - latest_at).total_seconds() < OBSERVER_MODEL_DETAIL_COOLDOWN_SECONDS:
@@ -5423,15 +5471,16 @@ Agent：{agent['name']}，{agent['role']}
 
 def build_runtime_perception(conn, agent, world_time, day, slot, plan, step, observed):
     env = dict(get_campus_environment(conn, day))
+    branch_key = active_world_branch_key(conn)
     recent_events = conn.execute(
         """
         SELECT event_type, resident_id, location, title, content, created_at
         FROM world_event_stream
-        WHERE day = ?
+        WHERE day = ? AND branch_key = ?
         ORDER BY id DESC
         LIMIT 8
         """,
-        (day,),
+        (day, branch_key),
     ).fetchall()
     location_counts = {
         row["location"]: row["count"]
@@ -6058,17 +6107,19 @@ def maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=None, 
     ensure_agent_news_system(conn)
     ensure_world_runtime_tables(conn)
     day = day or get_current_day(conn)
+    branch_key = active_world_branch_key(conn)
     window_start, window_end, source_slot = previous_completed_world_window(world_time)
     source_window_key = f"{window_start.date().isoformat()} {source_slot}"
     existing = conn.execute(
         """
         SELECT id FROM world_event_stream
         WHERE event_type = 'campus_news_published'
+          AND branch_key = ?
           AND payload LIKE ?
         ORDER BY id DESC
         LIMIT 1
         """,
-        (f'%"source_window_key": "{source_window_key}"%',),
+        (branch_key, f'%"source_window_key": "{source_window_key}"%'),
     ).fetchone()
     if existing:
         return {"skipped": True, "reason": "already_published", "source_window_key": source_window_key}
@@ -6261,12 +6312,15 @@ def select_world_tick_agents(conn, runtime):
 
 def maybe_generate_group_behavior_event(conn, world_time, tick_id, day, slot):
     ensure_world_runtime_tables(conn)
+    branch_key = active_world_branch_key(conn)
     latest = conn.execute(
         """
         SELECT created_at FROM world_event_stream
         WHERE event_type IN ('group_diffusion', 'crowd_transmission', 'organization_mobilization')
+          AND branch_key = ?
         ORDER BY id DESC LIMIT 1
-        """
+        """,
+        (branch_key,),
     ).fetchone()
     latest_at = parse_world_datetime(latest["created_at"]) if latest else None
     if latest_at and (world_time - latest_at).total_seconds() < 1800:
@@ -6755,6 +6809,16 @@ def require_admin_token(authorization: Optional[str]):
         raise HTTPException(status_code=403, detail="Admin token 无效或缺失")
 
 
+class WorldTickExclusion:
+    def __enter__(self):
+        if not WORLD_TICK_LOCK.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="世界 tick 或状态恢复正在执行中")
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        WORLD_TICK_LOCK.release()
+
+
 SNAPSHOT_STATE_TABLES = {
     "simulation_state": "key",
     "campus_state": "day",
@@ -6766,6 +6830,28 @@ SNAPSHOT_STATE_TABLES = {
     "transactions": "id",
     "relationships": "from_resident_id, to_resident_id",
     "relationship_dynamics": "from_resident_id, to_resident_id",
+    "long_term_goals": "id",
+    "agent_goals": "id",
+    "goal_dependencies": "id",
+    "goal_revisions": "id",
+    "campus_organizations": "id",
+    "organization_members": "organization_id, resident_id",
+    "agent_commitments": "id",
+    "plan_outcomes": "id",
+    "trajectory_episodes": "id",
+    "group_goals": "id",
+    "memories": "id",
+    "agent_learning": "id",
+    "collaborations": "id",
+    "competitions": "id",
+    "external_information": "id",
+    "agent_information": "information_id, resident_id",
+    "agent_action_plans": "id",
+    "agent_news_posts": "id",
+    "relationship_change_events": "id",
+    "social_interaction_events": "id",
+    "social_relation_interpretations": "id",
+    "social_beliefs": "id",
     "policies": "id",
     "world_runtime": "id",
     "campus_schedule_rules": "id",
@@ -6777,9 +6863,12 @@ SNAPSHOT_STATE_TABLES = {
 }
 
 
-def capture_objective_world_state(conn):
-    ensure_campus_state_table(conn)
-    ensure_space_system(conn)
+def capture_objective_world_state(conn, ensure_schema=True):
+    if ensure_schema:
+        ensure_campus_state_table(conn)
+        ensure_space_system(conn)
+        ensure_agent_news_system(conn)
+        ensure_external_information_system(conn)
     state = {}
     for table_name, order_by in SNAPSHOT_STATE_TABLES.items():
         where_clause = " WHERE status = 'pending'" if table_name == "world_delayed_effects" else ""
@@ -6829,9 +6918,12 @@ def create_world_snapshot_record(
     state = capture_objective_world_state(conn)
     state_json = canonical_json(state)
     event_cursor = int(event_row["value"] or 0)
+    effective_branch_key = branch_key or runtime.get("active_branch_key") or "main"
     snapshot_metadata = {
         "table_counts": {name: len(rows) for name, rows in state.items()},
         "environment_checksum": active_config["checksum"] if active_config else "",
+        "state_table_count": len(state),
+        "restorable": True,
         **(metadata or {}),
     }
     cursor = conn.execute(
@@ -6841,7 +6933,7 @@ def create_world_snapshot_record(
          schema_version, environment_config_id, environment_version, random_seed,
          external_data_version, event_cursor, parent_snapshot_id, branch_key,
          checksum, metadata_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'world-snapshot-v2', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'world-snapshot-v3', ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             run_id or runtime.get("active_run_id") or "",
@@ -6857,13 +6949,273 @@ def create_world_snapshot_record(
             external_data_version,
             event_cursor,
             parent_snapshot_id,
-            branch_key or "main",
+            effective_branch_key,
             content_checksum(state_json),
             canonical_json(snapshot_metadata),
         ),
     )
+    snapshot_id = cursor.lastrowid
+    conn.execute(
+        """
+        UPDATE world_branches
+        SET head_snapshot_id = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE branch_key = ?
+        """,
+        (snapshot_id, effective_branch_key),
+    )
     return decode_world_snapshot(
-        conn.execute("SELECT * FROM world_snapshots WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        conn.execute("SELECT * FROM world_snapshots WHERE id = ?", (snapshot_id,)).fetchone()
+    )
+
+
+SNAPSHOT_UPSERT_KEYS = {
+    "residents": ("id",),
+    "world_runtime": ("id",),
+    "world_update_schedules": ("id",),
+}
+
+
+def snapshot_row_or_error(conn, snapshot_id):
+    row = conn.execute(
+        "SELECT * FROM world_snapshots WHERE id = ?",
+        (snapshot_id,),
+    ).fetchone()
+    if not row:
+        raise ValueError("世界快照不存在")
+    if row["checksum"] != content_checksum(row["state_json"]):
+        raise ValueError("世界快照 checksum 校验失败")
+    state = load_json_text(row["state_json"], {})
+    if not isinstance(state, dict):
+        raise ValueError("世界快照状态格式无效")
+    missing = [table for table in SNAPSHOT_STATE_TABLES if table not in state]
+    if missing:
+        raise ValueError(f"快照版本不支持完整恢复，缺少状态表：{', '.join(missing[:6])}")
+    return row, state
+
+
+def insert_snapshot_rows(conn, table_name, rows):
+    if not rows:
+        return
+    table_columns = {
+        row["name"]
+        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+    for row in rows:
+        columns = [column for column in row if column in table_columns]
+        placeholders = ", ".join("?" for _ in columns)
+        conn.execute(
+            f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})",
+            tuple(row[column] for column in columns),
+        )
+
+
+def upsert_snapshot_rows(conn, table_name, rows, key_columns):
+    table_columns = {
+        row["name"]
+        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+    for row in rows:
+        columns = [column for column in row if column in table_columns]
+        mutable_columns = [column for column in columns if column not in key_columns]
+        where_clause = " AND ".join(f"{column} = ?" for column in key_columns)
+        values = [row[column] for column in mutable_columns]
+        values.extend(row[column] for column in key_columns)
+        cursor = conn.execute(
+            f"UPDATE {table_name} SET "
+            + ", ".join(f"{column} = ?" for column in mutable_columns)
+            + f" WHERE {where_clause}",
+            tuple(values),
+        )
+        if not cursor.rowcount:
+            placeholders = ", ".join("?" for _ in columns)
+            conn.execute(
+                f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})",
+                tuple(row[column] for column in columns),
+            )
+
+
+def restore_world_snapshot_state(conn, snapshot_id, active_branch_key=None, active_run_id=""):
+    ensure_world_runtime_tables(conn)
+    snapshot_row, state = snapshot_row_or_error(conn, snapshot_id)
+    current_resident_ids = {
+        int(row["id"]) for row in conn.execute("SELECT id FROM residents").fetchall()
+    }
+    snapshot_resident_ids = {int(row["id"]) for row in state["residents"]}
+    if current_resident_ids != snapshot_resident_ids:
+        raise ValueError("当前版本仅支持居民拓扑一致的快照恢复")
+
+    conn.execute("SAVEPOINT world_snapshot_restore")
+    try:
+        replace_tables = [
+            table
+            for table in SNAPSHOT_STATE_TABLES
+            if table not in SNAPSHOT_UPSERT_KEYS
+        ]
+        for table_name in reversed(replace_tables):
+            conn.execute(f"DELETE FROM {table_name}")
+        for table_name in SNAPSHOT_STATE_TABLES:
+            rows = state[table_name]
+            key_columns = SNAPSHOT_UPSERT_KEYS.get(table_name)
+            if key_columns:
+                upsert_snapshot_rows(conn, table_name, rows, key_columns)
+            else:
+                insert_snapshot_rows(conn, table_name, rows)
+
+        effective_branch = (
+            active_branch_key
+            or snapshot_row["branch_key"]
+            or "main"
+        )
+        conn.execute(
+            """
+            UPDATE world_runtime
+            SET status = 'paused', active_branch_key = ?, active_run_id = ?,
+                world_time = ?, last_tick_started_at = '',
+                last_tick_completed_at = '', updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                effective_branch,
+                active_run_id,
+                snapshot_row["world_time"],
+                WORLD_RUNTIME_ID,
+            ),
+        )
+        restored_state = capture_objective_world_state(conn, ensure_schema=False)
+        restored_checksum = content_checksum(canonical_json(restored_state))
+        expected_checksum = content_checksum(snapshot_row["state_json"])
+        if restored_checksum != expected_checksum:
+            runtime_rows = restored_state.get("world_runtime", [])
+            snapshot_runtime_rows = state.get("world_runtime", [])
+            for rows in (runtime_rows, snapshot_runtime_rows):
+                if rows:
+                    rows[0]["status"] = "paused"
+                    rows[0]["active_branch_key"] = effective_branch
+                    rows[0]["active_run_id"] = active_run_id
+                    rows[0]["last_tick_started_at"] = ""
+                    rows[0]["last_tick_completed_at"] = ""
+                    rows[0].pop("updated_at", None)
+                    rows[0]["world_time"] = snapshot_row["world_time"]
+            restored_checksum = content_checksum(canonical_json(restored_state))
+            expected_checksum = content_checksum(canonical_json(state))
+            if restored_checksum != expected_checksum:
+                raise ValueError("快照恢复后的状态校验失败")
+        conn.execute("RELEASE SAVEPOINT world_snapshot_restore")
+        return {
+            "snapshot_id": snapshot_id,
+            "branch_key": effective_branch,
+            "schema_version": snapshot_row["schema_version"],
+            "table_counts": {
+                table: len(rows) for table, rows in state.items()
+            },
+        }
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT world_snapshot_restore")
+        conn.execute("RELEASE SAVEPOINT world_snapshot_restore")
+        raise
+
+
+def decode_world_branch(row):
+    item = dict(row)
+    item["metadata"] = load_json_text(item.pop("metadata_json", "{}"), {})
+    return item
+
+
+def create_world_branch_record(conn, branch_key, name, source_snapshot_id, metadata=None):
+    source_row, _ = snapshot_row_or_error(conn, source_snapshot_id)
+    existing = conn.execute(
+        "SELECT id FROM world_branches WHERE branch_key = ?",
+        (branch_key,),
+    ).fetchone()
+    if existing:
+        raise ValueError("世界分支标识已存在")
+    runtime = conn.execute(
+        "SELECT * FROM world_runtime WHERE id = ?",
+        (WORLD_RUNTIME_ID,),
+    ).fetchone()
+    parent_branch_key = runtime["active_branch_key"] or "main"
+    run_id = f"branch-{uuid4()}"
+    clone_metadata = load_json_text(source_row["metadata_json"], {})
+    clone_metadata.update(
+        {
+            "forked_from_snapshot_id": source_snapshot_id,
+            "isolated_branch": True,
+            **(metadata or {}),
+        }
+    )
+    clone_cursor = conn.execute(
+        """
+        INSERT INTO world_snapshots
+        (run_id, snapshot_type, world_time, day, tick_id, reason, state_json,
+         schema_version, environment_config_id, environment_version, random_seed,
+         external_data_version, event_cursor, parent_snapshot_id, branch_key,
+         checksum, metadata_json)
+        VALUES (?, 'branch_seed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id,
+            source_row["world_time"],
+            source_row["day"],
+            source_row["tick_id"],
+            f"从快照 #{source_snapshot_id} 创建隔离分支",
+            source_row["state_json"],
+            source_row["schema_version"],
+            source_row["environment_config_id"],
+            source_row["environment_version"],
+            source_row["random_seed"],
+            source_row["external_data_version"],
+            source_row["event_cursor"],
+            source_snapshot_id,
+            branch_key,
+            source_row["checksum"],
+            canonical_json(clone_metadata),
+        ),
+    )
+    head_snapshot_id = clone_cursor.lastrowid
+    branch_cursor = conn.execute(
+        """
+        INSERT INTO world_branches
+        (branch_key, name, parent_branch_key, base_snapshot_id, head_snapshot_id,
+         run_id, status, metadata_json)
+        VALUES (?, ?, ?, ?, ?, ?, 'ready', ?)
+        """,
+        (
+            branch_key,
+            name or branch_key,
+            parent_branch_key,
+            source_snapshot_id,
+            head_snapshot_id,
+            run_id,
+            canonical_json(metadata or {}),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO experiment_runs
+        (run_id, experiment_name, control_or_treatment, random_seed,
+         environment_version, world_rules_version, environment_config_id,
+         source_snapshot_id, parent_run_id, branch_key, event_cursor_start,
+         status, metadata_json)
+        VALUES (?, ?, 'branch', ?, ?, 'world-runtime-v1', ?, ?, ?, ?, ?, 'paused', ?)
+        """,
+        (
+            run_id,
+            name or branch_key,
+            source_row["random_seed"],
+            source_row["environment_version"],
+            source_row["environment_config_id"],
+            source_snapshot_id,
+            runtime["active_run_id"] or "",
+            branch_key,
+            source_row["event_cursor"],
+            canonical_json(metadata or {}),
+        ),
+    )
+    return decode_world_branch(
+        conn.execute(
+            "SELECT * FROM world_branches WHERE id = ?",
+            (branch_cursor.lastrowid,),
+        ).fetchone()
     )
 
 
@@ -6879,7 +7231,10 @@ def runtime_response(conn):
         conn.commit()
     runtime = get_world_runtime(conn)
     latest_tick = conn.execute("SELECT * FROM world_ticks ORDER BY id DESC LIMIT 1").fetchone()
-    latest_event = conn.execute("SELECT id FROM world_event_stream ORDER BY id DESC LIMIT 1").fetchone()
+    latest_event = conn.execute(
+        "SELECT id FROM world_event_stream WHERE branch_key = ? ORDER BY id DESC LIMIT 1",
+        (runtime.get("active_branch_key") or "main",),
+    ).fetchone()
     runtime["latest_tick"] = dict(latest_tick) if latest_tick else None
     runtime["latest_event_id"] = latest_event["id"] if latest_event else 0
     runtime["budget"] = {
@@ -6890,6 +7245,11 @@ def runtime_response(conn):
     }
     runtime["day_sync"] = day_sync
     runtime["environment_config"] = get_active_environment_config(conn)
+    active_branch = conn.execute(
+        "SELECT * FROM world_branches WHERE branch_key = ?",
+        (runtime.get("active_branch_key") or "main",),
+    ).fetchone()
+    runtime["active_branch"] = decode_world_branch(active_branch) if active_branch else None
     runtime["multiscale_updates"] = {
         "schedules": [
             decode_world_update_schedule(row)
@@ -7102,6 +7462,220 @@ def create_world_snapshot_api(
         return {"snapshot": snapshot, "event": event}
 
 
+@app.post("/api/admin/world/snapshots/{snapshot_id}/restore")
+def restore_world_snapshot_api(
+    snapshot_id: int,
+    payload: WorldSnapshotRestoreRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    require_admin_token(authorization)
+    with WorldTickExclusion(), get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        runtime = conn.execute(
+            "SELECT * FROM world_runtime WHERE id = ?",
+            (WORLD_RUNTIME_ID,),
+        ).fetchone()
+        if runtime["status"] != "paused":
+            raise HTTPException(status_code=409, detail="恢复快照前必须先暂停 world runtime")
+        active_branch_key = runtime["active_branch_key"] or "main"
+        active_branch = conn.execute(
+            "SELECT * FROM world_branches WHERE branch_key = ?",
+            (active_branch_key,),
+        ).fetchone()
+        try:
+            backup = None
+            if payload.create_backup:
+                backup = create_world_snapshot_record(
+                    conn,
+                    reason=f"恢复快照 #{snapshot_id} 前自动备份：{payload.reason}",
+                    snapshot_type="pre_restore_backup",
+                    branch_key=active_branch_key,
+                    parent_snapshot_id=active_branch["head_snapshot_id"] if active_branch else None,
+                    metadata={"restore_target_snapshot_id": snapshot_id},
+                )
+            restored = restore_world_snapshot_state(
+                conn,
+                snapshot_id,
+                active_branch_key=active_branch_key,
+                active_run_id=runtime["active_run_id"] or "",
+            )
+            checkpoint = create_world_snapshot_record(
+                conn,
+                reason=f"已恢复快照 #{snapshot_id}：{payload.reason}",
+                snapshot_type="restored_checkpoint",
+                branch_key=active_branch_key,
+                parent_snapshot_id=snapshot_id,
+                metadata={
+                    "restored_from_snapshot_id": snapshot_id,
+                    "backup_snapshot_id": backup["id"] if backup else None,
+                },
+            )
+            event = append_world_event(
+                conn,
+                "world_snapshot_restored",
+                "世界快照已恢复",
+                f"分支 {active_branch_key} 已恢复到快照 #{snapshot_id}，runtime 保持暂停。",
+                payload={
+                    "snapshot_id": snapshot_id,
+                    "backup_snapshot_id": backup["id"] if backup else None,
+                    "checkpoint_snapshot_id": checkpoint["id"],
+                    "branch_key": active_branch_key,
+                },
+                source_type="snapshot_restore",
+                source_id=snapshot_id,
+                rule_version="world-snapshot-restore-v1",
+                branch_key=active_branch_key,
+            )
+            conn.commit()
+            return {
+                "restored": restored,
+                "backup_snapshot": backup,
+                "checkpoint_snapshot": checkpoint,
+                "event": event,
+            }
+        except ValueError as exc:
+            conn.rollback()
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/world/branches")
+def list_world_branches():
+    with get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        rows = conn.execute(
+            "SELECT * FROM world_branches ORDER BY id"
+        ).fetchall()
+        return {"branches": [decode_world_branch(row) for row in rows]}
+
+
+@app.post("/api/admin/world/branches")
+def create_world_branch_api(
+    payload: WorldBranchRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    require_admin_token(authorization)
+    with get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        try:
+            branch = create_world_branch_record(
+                conn,
+                payload.branch_key,
+                payload.name,
+                payload.source_snapshot_id,
+                metadata=payload.metadata,
+            )
+            event = append_world_event(
+                conn,
+                "world_branch_created",
+                "隔离世界分支已创建",
+                f"已从快照 #{payload.source_snapshot_id} 创建分支 {payload.branch_key}。",
+                payload={
+                    "branch_key": payload.branch_key,
+                    "source_snapshot_id": payload.source_snapshot_id,
+                    "head_snapshot_id": branch["head_snapshot_id"],
+                },
+                source_type="world_branch",
+                source_id=branch["id"],
+                rule_version="world-branch-v1",
+            )
+            conn.commit()
+            return {"branch": branch, "event": event}
+        except ValueError as exc:
+            conn.rollback()
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/admin/world/branches/{branch_key}/switch")
+def switch_world_branch_api(
+    branch_key: str,
+    payload: WorldBranchSwitchRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    require_admin_token(authorization)
+    with WorldTickExclusion(), get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        runtime = conn.execute(
+            "SELECT * FROM world_runtime WHERE id = ?",
+            (WORLD_RUNTIME_ID,),
+        ).fetchone()
+        if runtime["status"] != "paused":
+            raise HTTPException(status_code=409, detail="切换分支前必须先暂停 world runtime")
+        current_branch_key = runtime["active_branch_key"] or "main"
+        if branch_key == current_branch_key:
+            return {"switched": False, "reason": "already_active", "branch_key": branch_key}
+        target_branch = conn.execute(
+            "SELECT * FROM world_branches WHERE branch_key = ?",
+            (branch_key,),
+        ).fetchone()
+        if not target_branch or not target_branch["head_snapshot_id"]:
+            raise HTTPException(status_code=404, detail="目标分支不存在或没有可恢复的分支头")
+        current_branch = conn.execute(
+            "SELECT * FROM world_branches WHERE branch_key = ?",
+            (current_branch_key,),
+        ).fetchone()
+        try:
+            outgoing_snapshot = create_world_snapshot_record(
+                conn,
+                reason=f"切换到 {branch_key} 前封存 {current_branch_key}：{payload.reason}",
+                snapshot_type="branch_checkpoint",
+                branch_key=current_branch_key,
+                parent_snapshot_id=current_branch["head_snapshot_id"] if current_branch else None,
+                metadata={"switch_target_branch": branch_key},
+            )
+            restored = restore_world_snapshot_state(
+                conn,
+                target_branch["head_snapshot_id"],
+                active_branch_key=branch_key,
+                active_run_id=target_branch["run_id"] or "",
+            )
+            conn.execute(
+                """
+                UPDATE world_branches
+                SET status = CASE WHEN branch_key = ? THEN 'active' ELSE 'ready' END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE branch_key IN (?, ?)
+                """,
+                (branch_key, current_branch_key, branch_key),
+            )
+            conn.execute(
+                """
+                UPDATE experiment_runs
+                SET status = CASE WHEN branch_key = ? THEN 'running' ELSE 'paused' END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE branch_key IN (?, ?)
+                """,
+                (branch_key, current_branch_key, branch_key),
+            )
+            event = append_world_event(
+                conn,
+                "world_branch_switched",
+                "活动世界分支已切换",
+                f"活动世界从 {current_branch_key} 切换到 {branch_key}，runtime 保持暂停。",
+                payload={
+                    "from_branch": current_branch_key,
+                    "to_branch": branch_key,
+                    "outgoing_snapshot_id": outgoing_snapshot["id"],
+                    "restored_snapshot_id": target_branch["head_snapshot_id"],
+                },
+                source_type="world_branch",
+                source_id=target_branch["id"],
+                rule_version="world-branch-v1",
+                branch_key=branch_key,
+            )
+            conn.commit()
+            return {
+                "switched": True,
+                "from_branch": current_branch_key,
+                "to_branch": branch_key,
+                "outgoing_snapshot": outgoing_snapshot,
+                "restored": restored,
+                "event": event,
+            }
+        except ValueError as exc:
+            conn.rollback()
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/world/action-rules")
 def list_world_action_rules():
     with get_connection() as conn:
@@ -7174,23 +7748,25 @@ def list_world_delayed_effects(status: str = "", limit: int = 50):
 
 
 @app.get("/api/world/events")
-def get_world_events(after_id: int = 0, limit: int = 50):
+def get_world_events(after_id: int = 0, limit: int = 50, branch_key: str = ""):
     limit = max(1, min(limit, 200))
     with get_connection() as conn:
         ensure_world_runtime_tables(conn)
+        selected_branch = branch_key or active_world_branch_key(conn)
         rows = conn.execute(
             """
             SELECT * FROM world_event_stream
-            WHERE id > ?
+            WHERE id > ? AND branch_key = ?
             ORDER BY id ASC
             LIMIT ?
             """,
-            (after_id, limit),
+            (after_id, selected_branch, limit),
         ).fetchall()
         events = [decode_world_event(row) for row in rows]
         return {
             "events": events,
             "next_after_id": events[-1]["id"] if events else after_id,
+            "branch_key": selected_branch,
         }
 
 
@@ -7480,15 +8056,18 @@ def get_world_observer_state():
             conn.commit()
         day = day_sync["day"]
         runtime = get_world_runtime(conn)
+        branch_key = runtime.get("active_branch_key") or "main"
         residents = conn.execute(
             "SELECT id, name, role, location FROM residents ORDER BY id"
         ).fetchall()
         events = conn.execute(
             """
             SELECT * FROM world_event_stream
+            WHERE branch_key = ?
             ORDER BY id DESC
             LIMIT 20
-            """
+            """,
+            (branch_key,),
         ).fetchall()
         latest_tick = conn.execute(
             "SELECT * FROM world_ticks ORDER BY id DESC LIMIT 1"
@@ -7514,6 +8093,7 @@ def get_world_observer_state():
                 "world_time": runtime["world_time"],
                 "world_timezone": runtime["world_timezone"],
                 "tick_interval_seconds": runtime["tick_interval_seconds"],
+                "active_branch_key": branch_key,
                 "latest_tick": dict(latest_tick) if latest_tick else None,
                 "budget": budget,
             },
@@ -8065,6 +8645,7 @@ def _life_course_timeline(conn, resident_id, from_day=None, to_day=None, limit=2
         clauses.append("day <= ?")
         params.append(max(1, int(to_day)))
     where = " AND ".join(clauses)
+    branch_key = active_world_branch_key(conn)
     events = []
     seen_action_keys = set()
     world_event_items = {}
@@ -8074,11 +8655,11 @@ def _life_course_timeline(conn, resident_id, from_day=None, to_day=None, limit=2
         f"""
         SELECT id, tick_id, day, slot, event_type, resident_id, location, title, content, payload, created_at
         FROM world_event_stream
-        WHERE {where}
+        WHERE {where} AND branch_key = ?
         ORDER BY day ASC, id ASC
         LIMIT ?
         """,
-        params + [min(max(int(limit), 20), 500)],
+        params + [branch_key, min(max(int(limit), 20), 500)],
     ).fetchall()
     for row in world_rows:
         payload = load_json_text(row["payload"], {})
@@ -8966,6 +9547,7 @@ def fallback_campus_news_content(candidate):
 
 
 def collect_campus_news_candidates(conn, day, source_slot, limit=60):
+    branch_key = active_world_branch_key(conn)
     existing_residents = {
         int(row["resident_id"])
         for row in conn.execute("SELECT resident_id FROM agent_news_posts WHERE day = ?", (day,)).fetchall()
@@ -8978,6 +9560,7 @@ def collect_campus_news_candidates(conn, day, source_slot, limit=60):
         FROM world_event_stream e
         LEFT JOIN residents r ON r.id = e.resident_id
         WHERE e.day = ?
+          AND e.branch_key = ?
           AND e.resident_id IS NOT NULL
           AND e.event_type NOT IN (
               'world_tick_started', 'world_tick_complete',
@@ -8986,7 +9569,7 @@ def collect_campus_news_candidates(conn, day, source_slot, limit=60):
         ORDER BY e.id DESC
         LIMIT ?
         """,
-        (day, limit),
+        (day, branch_key, limit),
     ).fetchall()
     for row in rows:
         resident_id = int(row["resident_id"])

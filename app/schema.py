@@ -606,6 +606,7 @@ CREATE TABLE IF NOT EXISTS world_runtime (
     auto_model_calls_used INTEGER NOT NULL DEFAULT 0,
     budget_date TEXT NOT NULL DEFAULT '',
     current_agent_cursor INTEGER NOT NULL DEFAULT 0,
+    active_branch_key TEXT NOT NULL DEFAULT 'main',
     last_tick_started_at TEXT NOT NULL DEFAULT '',
     last_tick_completed_at TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -644,6 +645,7 @@ CREATE TABLE IF NOT EXISTS world_event_stream (
     root_event_id INTEGER,
     rule_version TEXT NOT NULL DEFAULT 'world-runtime-v1',
     occurred_at TEXT NOT NULL DEFAULT '',
+    branch_key TEXT NOT NULL DEFAULT 'main',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (resident_id) REFERENCES residents(id) ON DELETE SET NULL,
     FOREIGN KEY (parent_event_id) REFERENCES world_event_stream(id) ON DELETE SET NULL,
@@ -982,6 +984,22 @@ CREATE TABLE IF NOT EXISTS world_snapshots (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS world_branches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    branch_key TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    parent_branch_key TEXT NOT NULL DEFAULT '',
+    base_snapshot_id INTEGER,
+    head_snapshot_id INTEGER,
+    run_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'ready',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (base_snapshot_id) REFERENCES world_snapshots(id) ON DELETE SET NULL,
+    FOREIGN KEY (head_snapshot_id) REFERENCES world_snapshots(id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS research_export_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id TEXT NOT NULL DEFAULT '',
@@ -1000,6 +1018,7 @@ CREATE INDEX IF NOT EXISTS idx_environment_configs_key_version ON environment_co
 CREATE INDEX IF NOT EXISTS idx_environment_configs_status ON environment_configs(status);
 CREATE INDEX IF NOT EXISTS idx_world_snapshots_run_id ON world_snapshots(run_id);
 CREATE INDEX IF NOT EXISTS idx_world_snapshots_created_at ON world_snapshots(created_at);
+CREATE INDEX IF NOT EXISTS idx_world_branches_status ON world_branches(status);
 CREATE INDEX IF NOT EXISTS idx_research_export_jobs_run_id ON research_export_jobs(run_id);
 CREATE INDEX IF NOT EXISTS idx_research_export_jobs_started_at ON research_export_jobs(started_at);
 """
@@ -1009,6 +1028,7 @@ WORLD_RUNTIME_COLUMNS = {
     "environment_version": "TEXT NOT NULL DEFAULT ''",
     "random_seed": "TEXT NOT NULL DEFAULT ''",
     "active_run_id": "TEXT NOT NULL DEFAULT ''",
+    "active_branch_key": "TEXT NOT NULL DEFAULT 'main'",
 }
 
 WORLD_EVENT_STREAM_COLUMNS = {
@@ -1018,6 +1038,7 @@ WORLD_EVENT_STREAM_COLUMNS = {
     "root_event_id": "INTEGER",
     "rule_version": "TEXT NOT NULL DEFAULT 'world-runtime-v1'",
     "occurred_at": "TEXT NOT NULL DEFAULT ''",
+    "branch_key": "TEXT NOT NULL DEFAULT 'main'",
 }
 
 WORLD_SNAPSHOT_COLUMNS = {

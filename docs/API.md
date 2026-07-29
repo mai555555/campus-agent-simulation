@@ -62,6 +62,10 @@ Authorization: Bearer 你的_ADMIN_TOKEN
 | POST | `/api/admin/world/environment-configs` | 创建环境配置版本，可选择立即激活 |
 | POST | `/api/admin/world/environment-configs/{config_id}/activate` | 激活配置并应用空间与环境基线 |
 | POST | `/api/admin/world/snapshots` | 创建带配置、随机种子和事件游标的世界快照 |
+| POST | `/api/admin/world/snapshots/{snapshot_id}/restore` | 校验并恢复快照，默认先创建自动备份 |
+| GET | `/api/world/branches` | 查询世界分支及其 base/head 快照 |
+| POST | `/api/admin/world/branches` | 从可恢复快照创建隔离分支 |
+| POST | `/api/admin/world/branches/{branch_key}/switch` | 封存当前分支并切换到目标分支 |
 | POST | `/api/admin/events/trigger` | 注入 admin 世界事件，可选影响校园空间 |
 
 手动 tick 示例：
@@ -79,6 +83,22 @@ curl -X POST http://127.0.0.1:8000/api/admin/world/snapshots \
   -H 'Content-Type: application/json' \
   -d '{"reason":"政策实验前","branch_key":"control","external_data_version":"snapshot-20260729"}'
 ```
+
+恢复和切换分支前必须先暂停 runtime。分支示例：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/admin/world/branches \
+  -H 'Authorization: Bearer 你的_ADMIN_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"branch_key":"treatment-a","name":"处理组 A","source_snapshot_id":1}'
+
+curl -X POST http://127.0.0.1:8000/api/admin/world/branches/treatment-a/switch \
+  -H 'Authorization: Bearer 你的_ADMIN_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"开始处理组实验"}'
+```
+
+快照恢复不会删除 `world_event_stream` 审计历史。事件带有 `branch_key`，`GET /api/world/events` 默认只返回当前活动分支，也可显式传入 `branch_key` 查询其他分支。
 
 环境配置至少包含 `campus`、`spaces`、`population`、`institutions`、`economy` 和 `external_context`。当前版本的 `spaces` 必须覆盖现有七个 runtime 地点；激活时会更新容量、开放时间与状态，并应用 `environment_baseline` 中允许修改的字段。自定义地点、人口和组织生成仍属于后续阶段。
 

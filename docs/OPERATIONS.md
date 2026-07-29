@@ -252,11 +252,14 @@ World Runtime：
 - `observer_sessions`
 - `participant_actions`
 - `model_call_logs`
+- `world_update_schedules`
+- `world_update_runs`
 
 Research Data：
 
 - `experiment_runs`
 - `world_snapshots`
+- `world_branches`
 - `research_export_jobs`
 
 ## 导出研究数据

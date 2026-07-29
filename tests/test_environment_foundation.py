@@ -230,6 +230,7 @@ class EnvironmentFoundationTest(unittest.TestCase):
             "环境改变开始",
             source_type="test",
             source_id="root-1",
+            branch_key="experiment-a",
         )
         child = main.append_world_event(
             self.conn,
@@ -255,6 +256,8 @@ class EnvironmentFoundationTest(unittest.TestCase):
         self.assertEqual(grandchild["root_event_id"], root["id"])
         self.assertEqual(child["source_type"], "agent_action")
         self.assertEqual(child["rule_version"], "test-rule-v1")
+        self.assertEqual(child["branch_key"], "experiment-a")
+        self.assertEqual(grandchild["branch_key"], "experiment-a")
 
     def test_snapshot_contains_objective_state_and_replay_metadata(self):
         event = main.append_world_event(
@@ -286,6 +289,169 @@ class EnvironmentFoundationTest(unittest.TestCase):
         self.assertEqual(decoded["metadata"]["experiment"], "foundation")
         self.assertEqual(decoded["state"]["residents"][0]["name"], "环境测试学生")
         self.assertIn("campus_spaces", decoded["state"])
+        self.assertIn("agent_goals", decoded["state"])
+        self.assertIn("memories", decoded["state"])
+        self.assertEqual(snapshot["schema_version"], "world-snapshot-v3")
+
+    def test_snapshot_restore_rewinds_state_without_deleting_audit_events(self):
+        snapshot = main.create_world_snapshot_record(
+            self.conn,
+            reason="恢复测试基线",
+            branch_key="main",
+        )
+        future_event = main.append_world_event(
+            self.conn,
+            "future_test_event",
+            "未来事件",
+            "该事件在状态恢复后仍应保留为审计记录。",
+        )
+        self.conn.execute(
+            "UPDATE residents SET money = 7, location = '商业街' WHERE id = 1"
+        )
+        self.conn.execute(
+            "UPDATE agent_profiles SET energy = 12, mood = '疲惫' WHERE resident_id = 1"
+        )
+        main.add_memory(
+            self.conn,
+            1,
+            1,
+            "这是一条快照之后才出现的记忆。",
+            importance=8,
+        )
+
+        restored = main.restore_world_snapshot_state(
+            self.conn,
+            snapshot["id"],
+            active_branch_key="main",
+        )
+
+        resident = self.conn.execute(
+            "SELECT money, location FROM residents WHERE id = 1"
+        ).fetchone()
+        profile = self.conn.execute(
+            "SELECT energy, mood FROM agent_profiles WHERE resident_id = 1"
+        ).fetchone()
+        memory_count = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM memories WHERE resident_id = 1"
+        ).fetchone()["count"]
+        audit_event = self.conn.execute(
+            "SELECT id FROM world_event_stream WHERE id = ?",
+            (future_event["id"],),
+        ).fetchone()
+
+        self.assertEqual(restored["snapshot_id"], snapshot["id"])
+        self.assertEqual((resident["money"], resident["location"]), (100, "宿舍区"))
+        self.assertEqual((profile["energy"], profile["mood"]), (80, "平稳"))
+        self.assertEqual(memory_count, 0)
+        self.assertIsNotNone(audit_event)
+
+    def test_branch_heads_keep_independent_mutable_state(self):
+        baseline = main.create_world_snapshot_record(
+            self.conn,
+            reason="分支共同基线",
+            branch_key="main",
+        )
+        branch = main.create_world_branch_record(
+            self.conn,
+            "treatment-a",
+            "处理组 A",
+            baseline["id"],
+            metadata={"condition": "treatment"},
+        )
+        self.assertNotEqual(branch["head_snapshot_id"], baseline["id"])
+
+        self.conn.execute("UPDATE residents SET money = 25 WHERE id = 1")
+        main_checkpoint = main.create_world_snapshot_record(
+            self.conn,
+            reason="主分支变化",
+            branch_key="main",
+            parent_snapshot_id=baseline["id"],
+        )
+        main.restore_world_snapshot_state(
+            self.conn,
+            branch["head_snapshot_id"],
+            active_branch_key="treatment-a",
+            active_run_id=branch["run_id"],
+        )
+        branch_money = self.conn.execute(
+            "SELECT money FROM residents WHERE id = 1"
+        ).fetchone()["money"]
+        self.assertEqual(branch_money, 100)
+
+        self.conn.execute("UPDATE residents SET money = 70 WHERE id = 1")
+        branch_checkpoint = main.create_world_snapshot_record(
+            self.conn,
+            reason="处理组变化",
+            branch_key="treatment-a",
+            parent_snapshot_id=branch["head_snapshot_id"],
+        )
+        main.restore_world_snapshot_state(
+            self.conn,
+            main_checkpoint["id"],
+            active_branch_key="main",
+        )
+        restored_main_money = self.conn.execute(
+            "SELECT money FROM residents WHERE id = 1"
+        ).fetchone()["money"]
+        self.assertEqual(restored_main_money, 25)
+
+        main.restore_world_snapshot_state(
+            self.conn,
+            branch_checkpoint["id"],
+            active_branch_key="treatment-a",
+            active_run_id=branch["run_id"],
+        )
+        restored_branch_money = self.conn.execute(
+            "SELECT money FROM residents WHERE id = 1"
+        ).fetchone()["money"]
+        self.assertEqual(restored_branch_money, 70)
+
+    def test_admin_branch_switch_checkpoints_outgoing_world(self):
+        baseline = main.create_world_snapshot_record(
+            self.conn,
+            reason="切换测试基线",
+            branch_key="main",
+        )
+        branch = main.create_world_branch_record(
+            self.conn,
+            "switch-target",
+            "切换目标",
+            baseline["id"],
+        )
+        self.conn.execute("UPDATE residents SET money = 33 WHERE id = 1")
+
+        with patch.object(main, "require_admin_token"), patch.object(
+            main, "get_connection", return_value=self.conn
+        ):
+            result = main.switch_world_branch_api(
+                "switch-target",
+                main.WorldBranchSwitchRequest(reason="测试隔离切换"),
+                authorization=None,
+            )
+
+        runtime = self.conn.execute(
+            "SELECT active_branch_key, status FROM world_runtime WHERE id = ?",
+            (main.WORLD_RUNTIME_ID,),
+        ).fetchone()
+        money = self.conn.execute(
+            "SELECT money FROM residents WHERE id = 1"
+        ).fetchone()["money"]
+        event = self.conn.execute(
+            "SELECT branch_key FROM world_event_stream WHERE id = ?",
+            (result["event"]["id"],),
+        ).fetchone()
+        main_branch = self.conn.execute(
+            "SELECT head_snapshot_id, status FROM world_branches WHERE branch_key = 'main'"
+        ).fetchone()
+
+        self.assertTrue(result["switched"])
+        self.assertEqual(runtime["active_branch_key"], "switch-target")
+        self.assertEqual(runtime["status"], "paused")
+        self.assertEqual(money, 100)
+        self.assertEqual(event["branch_key"], "switch-target")
+        self.assertEqual(main_branch["head_snapshot_id"], result["outgoing_snapshot"]["id"])
+        self.assertEqual(main_branch["status"], "ready")
+        self.assertEqual(branch["status"], "ready")
 
 
 class EnvironmentFoundationMigrationTest(unittest.TestCase):
@@ -358,9 +524,15 @@ class EnvironmentFoundationMigrationTest(unittest.TestCase):
             row["name"] for row in conn.execute("PRAGMA table_info(world_snapshots)")
         }
         self.assertIn("environment_config_id", runtime_columns)
+        self.assertIn("active_branch_key", runtime_columns)
         self.assertIn("parent_event_id", event_columns)
+        self.assertIn("branch_key", event_columns)
         self.assertIn("event_cursor", snapshot_columns)
         self.assertIn("checksum", snapshot_columns)
+        branch = conn.execute(
+            "SELECT branch_key, status FROM world_branches WHERE branch_key = 'main'"
+        ).fetchone()
+        self.assertEqual((branch["branch_key"], branch["status"]), ("main", "active"))
         conn.close()
 
 

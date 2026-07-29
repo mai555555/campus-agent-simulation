@@ -124,12 +124,15 @@ World Runtime 已开始绑定版本化环境配置：
 - `world_runtime.environment_config_id`、`environment_version` 和 `random_seed` 标识当前运行条件。
 - `world_event_stream` 使用 `source_type`、`source_id`、`parent_event_id`、`root_event_id` 和 `rule_version` 保存事件谱系。
 - `world_snapshots` 保存客观状态、配置版本、随机种子、外部数据版本和事件游标。
+- `world-snapshot-v3` 同时保存目标、承诺、记忆、组织和主观社会状态，可在 checksum 校验后事务恢复。
+- `world_branches` 保存独立 base/head 快照；分支切换先封存当前状态，再恢复目标 head。
+- `world_event_stream.branch_key` 让跨分支审计历史保持不可变且可区分。
 - `world_action_rules` 定义行动前置条件、资源成本、持续时间、成功概率和效果。
 - `world_action_executions` 保存每次 active/passive 结算、失败原因及资源前后状态。
 - `world_delayed_effects` 由后续 tick 按 `due_at` 幂等结算，并沿来源行动继承事件谱系。
 - `world_resource_accounts` 与 `world_resource_transfers` 暂时承接行动金钱成本，避免消费支出无来源地消失；完整经济账本仍属于后续经济阶段。
 
-快照当前用于审计和后续回放基础，尚未实现从快照恢复数据库或创建隔离世界分支。
+快照支持 admin 恢复和顺序分支切换。恢复要求 runtime 已暂停，默认先创建自动备份；当前版本只允许居民拓扑一致的快照恢复，人口增删分支将在阶段 3 人口流动机制中处理。
 
 ## 前端结构
 
