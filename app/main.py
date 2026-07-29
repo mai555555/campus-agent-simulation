@@ -6394,6 +6394,59 @@ def _life_course_groups(conn, resident_id, timeline):
     return groups
 
 
+def _life_course_episodes(timeline):
+    """Aggregate tick-level evidence into daily experience episodes."""
+    by_day = {}
+    for event in timeline:
+        day = int(event.get("day") or 0)
+        if day <= 0:
+            continue
+        episode = by_day.setdefault(day, {
+            "id": f"day-{day}", "day": day, "event_ids": [], "actions": [],
+            "locations": [], "evidence": [], "event_count": 0, "repeat_count": 0,
+            "planned_actions": [], "actual_actions": [], "deviations": [],
+            "feedback": [], "memories": [], "state_before": None, "state_after": None,
+        })
+        episode["event_ids"].append(event.get("id"))
+        episode["event_count"] += 1
+        episode["repeat_count"] += max(1, int(event.get("repeat_count") or 1))
+        if event.get("action") and event["action"] != "memory" and event["action"] not in episode["actions"]:
+            episode["actions"].append(event["action"])
+        decision = event.get("decision") if isinstance(event.get("decision"), dict) else {}
+        execution = event.get("execution") if isinstance(event.get("execution"), dict) else {}
+        planned = decision.get("planned_action") or decision.get("action")
+        actual = execution.get("action") or (event.get("action") if event.get("action") != "memory" else None)
+        if planned and planned not in episode["planned_actions"]: episode["planned_actions"].append(planned)
+        if actual and actual not in episode["actual_actions"]: episode["actual_actions"].append(actual)
+        if planned and actual and planned != actual:
+            episode["deviations"].append({"planned": planned, "actual": actual, "reason": decision.get("reason", "")})
+        if event.get("location") and event["location"] not in episode["locations"]: episode["locations"].append(event["location"])
+        if event.get("environment_feedback"): episode["feedback"].append(event["environment_feedback"])
+        if event.get("source") == "memories": episode["memories"].append(event.get("content", ""))
+        before = event.get("state_before") if isinstance(event.get("state_before"), dict) else None
+        after = event.get("state_after") if isinstance(event.get("state_after"), dict) else None
+        if before and episode["state_before"] is None: episode["state_before"] = before
+        if after: episode["state_after"] = after
+        episode["evidence"].extend(event.get("evidence") or [])
+    episodes = []
+    for episode in sorted(by_day.values(), key=lambda item: item["day"], reverse=True):
+        labels = [_life_course_action_label(action) for action in episode["actions"][:4]]
+        episode["title"] = f"第{episode['day']}天经历片段"
+        episode["summary"] = "、".join(labels) if labels else "校园日常观察"
+        episode["evidence"] = episode["evidence"][:20]
+        before, after = episode.get("state_before") or {}, episode.get("state_after") or {}
+        changes = {key: {"before": before.get(key), "after": after.get(key)} for key in ("location", "energy", "time_budget", "mood", "current_task") if before.get(key) != after.get(key) and (before.get(key) is not None or after.get(key) is not None)}
+        feedback_keys = [f"{key}={value}" for item in episode["feedback"] if isinstance(item, dict) for key, value in item.items()]
+        impact_parts = []
+        if changes: impact_parts.append("状态变化：" + "、".join(f"{key} {value['before']}→{value['after']}" for key, value in changes.items()))
+        if episode["memories"]: impact_parts.append(f"形成 {len(episode['memories'])} 条后续记忆")
+        if feedback_keys: impact_parts.append("环境反馈：" + "、".join(feedback_keys[:4]))
+        episode["narrative"] = {"intention": "、".join(_life_course_action_label(item) for item in episode["planned_actions"][:4]) or "未记录计划", "actual": "、".join(_life_course_action_label(item) for item in episode["actual_actions"][:4]) or "未记录行动", "deviation_count": len(episode["deviations"]), "memory_count": len(episode["memories"]), "feedback_count": len(episode["feedback"])}
+        episode["impact"] = {"state_changes": changes, "interpretation": "；".join(impact_parts) + "。这些是时序上观察到的结果，不代表已证明因果关系。" if impact_parts else "当前片段暂无可观测的后续状态变化。"}
+        episodes.append(episode)
+    return episodes
+
+
 def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, limit=240):
     resident = get_resident(conn, resident_id)
     if not resident:
@@ -6405,6 +6458,7 @@ def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, l
         (resident_id,),
     ).fetchall()
     timeline = _life_course_timeline(conn, resident_id, from_day=from_day, to_day=to_day, limit=limit)
+    episodes = _life_course_episodes(timeline)
     for item in timeline:
         item["timeline_kind"] = _life_course_kind(item)
         item["display_title"] = _life_course_display_title(item)
@@ -6445,6 +6499,7 @@ def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, l
         "initial_goal": resident["goal"],
         "goals": [dict(goal) for goal in goals],
         "timeline": timeline,
+        "episodes": episodes,
         "action_timeline": action_timeline,
         "memory_timeline": memory_timeline,
         "turning_points": sorted(important, key=lambda item: (-int(item.get("turning_point_score") or 0), int(item.get("day") or 0)))[:12],
