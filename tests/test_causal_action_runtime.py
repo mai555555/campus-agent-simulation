@@ -125,6 +125,27 @@ class CausalActionRuntimeTest(unittest.TestCase):
         self.assertEqual(category, "突发异常")
         self.assertEqual(score, 100)
 
+    def test_observer_events_do_not_enter_news_or_agent_life_course(self):
+        main.ensure_agent_news_system(self.conn)
+        main.append_world_event(
+            self.conn,
+            "observer_session",
+            "观察者进入世界",
+            "browser-observer 正在观察 Agent 1。",
+            resident_id=1,
+            day=1,
+        )
+
+        candidates = main.collect_campus_news_candidates(
+            self.conn,
+            day=1,
+            source_slot="08:00-16:00",
+        )
+        timeline = main._life_course_timeline(self.conn, resident_id=1)
+
+        self.assertEqual(candidates, [])
+        self.assertEqual(timeline, [])
+
     def test_insufficient_energy_rejects_action_without_charging_resources(self):
         self.conn.execute(
             "UPDATE agent_profiles SET energy = 1, time_budget = 100 WHERE resident_id = 1"
