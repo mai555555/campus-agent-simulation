@@ -84,6 +84,15 @@ localStorage.setItem("ADMIN_TOKEN", "你的_ADMIN_TOKEN")
 
 v1 的 8 小时行动计划优先使用 `llm-planner-v1`，写入 `agent_action_plans`，每次自动模型调用都会进入 `model_call_logs` 并消耗 `daily_auto_model_budget`。v2 默认每日自动预算为 500 次；预算耗尽或模型失败时会自动降级为规则计划、规则等待或规则观察，世界运行不会被阻塞。`model_call_logs` 只记录真实成功、失败或预算耗尽结果，不把预算预占记作一次模型调用。
 
+未配置 LLM 时，runtime 使用 `rule-unconfigured-v1`，不会扣减自动模型预算。可使用以下只读接口检查多尺度环境更新：
+
+```bash
+curl http://127.0.0.1:8000/api/world/update-schedules
+curl http://127.0.0.1:8000/api/world/update-runs
+```
+
+默认调度包括每小时空间活动、每 8 小时社会动态、每日制度与公共资源汇总。更新记录保存输入事件游标、规则版本、聚合指标和来源事件血缘；宏观指标来自底层状态与事件，不由日报或 LLM 文案生成。
+
 每个计划窗口开始前，运行时还会确保 Agent 的五层目标链存在，并进行到期复盘。`agent_action_plans.plan_json.goal_chain` 保存长期、中期、短期目标和当前承诺；到点步骤执行后，结果进入 `plan_outcomes`，随后更新 `agent_goals`、`goal_revisions` 和 `trajectory_episodes`。这部分使用规则运行，不额外消耗模型预算。
 
 真实天气和外部世界资讯由 world tick 每小时自动同步一次。天气会更新 `campus_state` 并写入 `real_weather_auto_sync` / `real_weather_auto_sync_failed` 事件；资讯会写入 `external_information`、`agent_information` 和 `external_information_auto_sync` / `external_information_auto_sync_failed` 事件。前端不再提供手动同步按钮。

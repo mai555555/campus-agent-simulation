@@ -50,6 +50,81 @@ class CausalActionRuntimeTest(unittest.TestCase):
         }
         self.assertEqual(actions, main.WORLD_AUTONOMOUS_ACTIONS)
 
+    def test_unconfigured_llm_does_not_consume_budget(self):
+        before = main.get_world_runtime(self.conn)["auto_model_calls_used"]
+
+        with patch.object(main, "is_llm_configured", return_value=False):
+            allowed = main.consume_auto_model_budget(
+                self.conn, "autonomous_decision", resident_id=1
+            )
+
+        after = main.get_world_runtime(self.conn)["auto_model_calls_used"]
+        log = self.conn.execute(
+            "SELECT status FROM model_call_logs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        self.assertFalse(allowed)
+        self.assertEqual(after, before)
+        self.assertEqual(log["status"], "skipped:llm_unconfigured")
+
+    def test_unconfigured_llm_uses_explicit_rule_decision(self):
+        agent = dict(
+            self.conn.execute(
+                """
+                SELECT r.*, p.strategy
+                FROM residents r
+                JOIN agent_profiles p ON p.resident_id = r.id
+                WHERE r.id = 1
+                """
+            ).fetchone()
+        )
+        step = {
+            "plan_state": "due",
+            "action": "observe",
+            "location": "食堂",
+            "goal": "观察食堂运行",
+        }
+
+        with patch.object(main, "is_llm_configured", return_value=False), patch.object(
+            main, "ask_llm"
+        ) as ask_llm:
+            decision = main.build_autonomous_tick_decision(
+                self.conn, agent, {"weather": "晴"}, step
+            )
+
+        ask_llm.assert_not_called()
+        self.assertEqual(decision["mode"], "rule-unconfigured-v1")
+        self.assertNotIn("失败", decision["reason"])
+
+    def test_news_classification_ignores_internal_llm_fallback_reason(self):
+        payload = {
+            "runtime_decision": {
+                "mode": "rule-error-fallback-v1",
+                "reason": "自主决策失败，按原计划执行。",
+            },
+            "social_effect": {"effect": "positive", "relationship": {"trust": 48}},
+        }
+
+        category, score = main.classify_campus_news_candidate(
+            "agent_tick",
+            action="chat",
+            content="林小夏在宿舍区与同学交流。",
+            payload=payload,
+        )
+
+        self.assertEqual(category, "关系风向")
+        self.assertEqual(score, 86)
+
+    def test_explicit_failed_event_remains_breaking_news(self):
+        category, score = main.classify_campus_news_candidate(
+            "agent_tick_failed",
+            action="observe",
+            content="行动因空间关闭而失败。",
+            payload={"failure_code": "location_closed"},
+        )
+
+        self.assertEqual(category, "突发异常")
+        self.assertEqual(score, 100)
+
     def test_insufficient_energy_rejects_action_without_charging_resources(self):
         self.conn.execute(
             "UPDATE agent_profiles SET energy = 1, time_budget = 100 WHERE resident_id = 1"

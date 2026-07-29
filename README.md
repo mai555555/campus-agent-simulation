@@ -49,7 +49,7 @@ LLM_API_KEY=你的 API Key
 LLM_API_URL=你的模型 generateContent 接口
 ```
 
-没有配置 LLM 时，涉及 `ask_llm()` 的接口会失败或走部分 fallback；普通状态查询、手动移动、交易、关系、环境等接口仍可使用。
+没有配置 LLM 时，world runtime 会进入不消耗模型预算的规则模式；行动结算、环境更新、校园日报事实稿和普通状态查询仍可持续运行。`/api/ai/test` 会返回明确的 `503` 配置提示。
 
 ## 常用命令
 

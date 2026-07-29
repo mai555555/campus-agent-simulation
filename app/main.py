@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.db import get_connection, using_postgres
-from services.llm_service import ask_llm
+from services.llm_service import ask_llm, is_llm_configured
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 logger = logging.getLogger(__name__)
 
@@ -94,6 +94,33 @@ DEFAULT_CAUSAL_WEIGHTS = [
     ("resource_pressure_increases_queue", "resource_pressure", "action", "queue", 1.0, 0.65, 60, 0.12, "资源压力提高排队和等待行为"),
     ("crowd_increases_conflict", "campus_flow", "action", "conflict", 1.0, 0.20, 75, 0.18, "拥挤提高小冲突概率"),
     ("study_mood_increases_collaboration", "study_atmosphere", "action", "collaborate", 1.0, 0.28, 65, 0.14, "学习氛围提升协作概率"),
+]
+
+DEFAULT_WORLD_UPDATE_SCHEDULES = [
+    {
+        "update_key": "campus_space_activity",
+        "scope": "campus",
+        "cadence": "hourly",
+        "interval_seconds": 3600,
+        "rule_version": "multiscale-update-v1",
+        "metadata": {"description": "从居民位置与行动事件聚合校园空间活动"},
+    },
+    {
+        "update_key": "social_dynamics",
+        "scope": "social",
+        "cadence": "eight_hour_window",
+        "interval_seconds": 8 * 3600,
+        "rule_version": "multiscale-update-v1",
+        "metadata": {"description": "从互动和关系变化事件聚合社会动态"},
+    },
+    {
+        "update_key": "institutional_resource_review",
+        "scope": "institution",
+        "cadence": "daily",
+        "interval_seconds": 24 * 3600,
+        "rule_version": "multiscale-update-v1",
+        "metadata": {"description": "按日汇总制度、公共资源和待处理后果"},
+    },
 ]
 
 DEFAULT_WORLD_ACTION_RULES = {
@@ -2455,6 +2482,7 @@ def ensure_world_runtime_tables(conn):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_world_snapshots_parent ON world_snapshots(parent_snapshot_id)")
         seed_world_runtime_rules(conn)
         seed_world_action_rules(conn)
+        seed_world_update_schedules(conn)
         conn.execute(
             """
             INSERT OR IGNORE INTO world_resource_accounts
@@ -2537,6 +2565,25 @@ def seed_world_action_rules(conn):
                 canonical_json(rule.get("direct_effects", [])),
                 canonical_json(rule.get("delayed_effects", [])),
                 canonical_json({"probability_failure_cost_ratio": 0.5}),
+            ),
+        )
+
+
+def seed_world_update_schedules(conn):
+    for schedule in DEFAULT_WORLD_UPDATE_SCHEDULES:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO world_update_schedules
+            (update_key, scope, cadence, interval_seconds, rule_version, metadata_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                schedule["update_key"],
+                schedule["scope"],
+                schedule["cadence"],
+                schedule["interval_seconds"],
+                schedule["rule_version"],
+                canonical_json(schedule["metadata"]),
             ),
         )
 
@@ -3471,6 +3518,267 @@ def process_due_world_delayed_effects(conn, world_time, tick_id=None, day=None, 
     return {"due_count": len(rows), "applied": applied, "failed": failed}
 
 
+def decode_world_update_schedule(row):
+    item = dict(row)
+    item["metadata"] = load_json_text(item.pop("metadata_json", "{}"), {})
+    return item
+
+
+def decode_world_update_run(row):
+    item = dict(row)
+    item["metrics"] = load_json_text(item.pop("metrics_json", "{}"), {})
+    return item
+
+
+def world_events_for_update(conn, after_id, through_id):
+    return [
+        decode_world_event(row)
+        for row in conn.execute(
+            """
+            SELECT * FROM world_event_stream
+            WHERE id > ? AND id <= ?
+            ORDER BY id
+            """,
+            (after_id, through_id),
+        ).fetchall()
+    ]
+
+
+def aggregate_campus_space_activity(conn, events):
+    residents_by_location = {
+        row["location"]: int(row["count"])
+        for row in conn.execute(
+            "SELECT location, COUNT(*) AS count FROM residents GROUP BY location ORDER BY location"
+        ).fetchall()
+    }
+    actions_by_type = {}
+    actions_by_location = {}
+    rejected_actions = 0
+    for event in events:
+        if event["event_type"] != "agent_tick":
+            continue
+        payload = event["payload"]
+        action = str(payload.get("action") or "unknown")
+        location = event.get("location") or "校园"
+        actions_by_type[action] = actions_by_type.get(action, 0) + 1
+        actions_by_location[location] = actions_by_location.get(location, 0) + 1
+        if payload.get("action_success") is False or payload.get("failure_code"):
+            rejected_actions += 1
+    return {
+        "resident_count": sum(residents_by_location.values()),
+        "residents_by_location": residents_by_location,
+        "action_count": sum(actions_by_type.values()),
+        "actions_by_type": actions_by_type,
+        "actions_by_location": actions_by_location,
+        "rejected_action_count": rejected_actions,
+    }
+
+
+def aggregate_social_dynamics(conn, events):
+    interactions = 0
+    positive_effects = 0
+    commitments_created = 0
+    residents_involved = set()
+    for event in events:
+        payload = event["payload"]
+        social_effect = payload.get("social_effect")
+        if not isinstance(social_effect, dict):
+            continue
+        interactions += 1
+        if social_effect.get("effect") == "positive":
+            positive_effects += 1
+        if social_effect.get("commitment"):
+            commitments_created += 1
+        if event.get("resident_id"):
+            residents_involved.add(int(event["resident_id"]))
+        if social_effect.get("target_id"):
+            residents_involved.add(int(social_effect["target_id"]))
+    relationship_summary = conn.execute(
+        """
+        SELECT COUNT(*) AS relationship_count,
+               COALESCE(AVG(trust), 0) AS average_trust,
+               COALESCE(AVG(cooperation), 0) AS average_cooperation,
+               COALESCE(AVG(conflict), 0) AS average_conflict
+        FROM relationship_dynamics
+        """
+    ).fetchone()
+    return {
+        "interaction_count": interactions,
+        "positive_effect_count": positive_effects,
+        "commitment_count": commitments_created,
+        "residents_involved": sorted(residents_involved),
+        "relationship_count": int(relationship_summary["relationship_count"] or 0),
+        "average_trust": round(float(relationship_summary["average_trust"] or 0), 2),
+        "average_cooperation": round(float(relationship_summary["average_cooperation"] or 0), 2),
+        "average_conflict": round(float(relationship_summary["average_conflict"] or 0), 2),
+    }
+
+
+def aggregate_institutional_resources(conn, events):
+    policy_counts = {
+        row["status"]: int(row["count"])
+        for row in conn.execute(
+            "SELECT status, COUNT(*) AS count FROM policies GROUP BY status ORDER BY status"
+        ).fetchall()
+    }
+    resource_accounts = {
+        row["account_key"]: {
+            "resource_type": row["resource_type"],
+            "balance": float(row["balance"]),
+        }
+        for row in conn.execute(
+            "SELECT account_key, resource_type, balance FROM world_resource_accounts ORDER BY account_key"
+        ).fetchall()
+    }
+    pending_effects = conn.execute(
+        "SELECT COUNT(*) AS count FROM world_delayed_effects WHERE status = 'pending'"
+    ).fetchone()
+    active_events = conn.execute(
+        "SELECT COUNT(*) AS count FROM campus_events WHERE status = 'active'"
+    ).fetchone()
+    return {
+        "policy_counts": policy_counts,
+        "resource_accounts": resource_accounts,
+        "pending_delayed_effects": int(pending_effects["count"] or 0),
+        "active_campus_events": int(active_events["count"] or 0),
+        "source_event_count": len(events),
+    }
+
+
+WORLD_UPDATE_HANDLERS = {
+    "campus_space_activity": aggregate_campus_space_activity,
+    "social_dynamics": aggregate_social_dynamics,
+    "institutional_resource_review": aggregate_institutional_resources,
+}
+
+
+def run_due_world_updates(conn, world_time, tick_id, day, slot, parent_event_id=None):
+    ensure_world_runtime_tables(conn)
+    schedules = conn.execute(
+        """
+        SELECT * FROM world_update_schedules
+        WHERE status = 'active'
+        ORDER BY interval_seconds, id
+        """
+    ).fetchall()
+    event_cursor_row = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) AS value FROM world_event_stream"
+    ).fetchone()
+    input_event_cursor = int(event_cursor_row["value"] or 0)
+    completed = []
+    failed = []
+    for schedule_row in schedules:
+        schedule = dict(schedule_row)
+        next_run_at = parse_world_datetime(schedule["next_run_at"])
+        if next_run_at and next_run_at > world_time:
+            continue
+        handler = WORLD_UPDATE_HANDLERS.get(schedule["update_key"])
+        if not handler:
+            continue
+        run_cursor = conn.execute(
+            """
+            INSERT INTO world_update_runs
+            (schedule_id, tick_id, update_key, scheduled_for, input_event_cursor)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                schedule["id"],
+                tick_id,
+                schedule["update_key"],
+                world_time.isoformat(),
+                input_event_cursor,
+            ),
+        )
+        run_id = run_cursor.lastrowid
+        conn.execute("SAVEPOINT world_update_run")
+        try:
+            events = world_events_for_update(
+                conn,
+                int(schedule.get("last_event_cursor") or 0),
+                input_event_cursor,
+            )
+            metrics = handler(conn, events)
+            metrics["event_window"] = {
+                "after_id": int(schedule.get("last_event_cursor") or 0),
+                "through_id": input_event_cursor,
+            }
+            update_event = append_world_event(
+                conn,
+                "world_multiscale_update",
+                f"{schedule['scope']} 多尺度更新完成",
+                f"{schedule['cadence']} 更新《{schedule['update_key']}》已从底层状态与事件完成聚合。",
+                tick_id=tick_id,
+                payload={
+                    "run_id": run_id,
+                    "update_key": schedule["update_key"],
+                    "scope": schedule["scope"],
+                    "cadence": schedule["cadence"],
+                    "metrics": metrics,
+                },
+                day=day,
+                slot=slot,
+                source_type="world_update_run",
+                source_id=run_id,
+                parent_event_id=parent_event_id,
+                rule_version=schedule["rule_version"],
+            )
+            completed_at = world_time.isoformat()
+            next_due_at = (
+                world_time + timedelta(seconds=int(schedule["interval_seconds"]))
+            ).isoformat()
+            conn.execute(
+                """
+                UPDATE world_update_runs
+                SET output_event_id = ?, status = 'completed', metrics_json = ?,
+                    completed_at = ?
+                WHERE id = ?
+                """,
+                (update_event["id"], canonical_json(metrics), completed_at, run_id),
+            )
+            conn.execute(
+                """
+                UPDATE world_update_schedules
+                SET last_run_at = ?, next_run_at = ?, last_event_cursor = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (completed_at, next_due_at, input_event_cursor, schedule["id"]),
+            )
+            conn.execute("RELEASE SAVEPOINT world_update_run")
+            completed.append(
+                decode_world_update_run(
+                    conn.execute(
+                        "SELECT * FROM world_update_runs WHERE id = ?", (run_id,)
+                    ).fetchone()
+                )
+            )
+        except Exception as exc:
+            conn.execute("ROLLBACK TO SAVEPOINT world_update_run")
+            conn.execute("RELEASE SAVEPOINT world_update_run")
+            retry_at = (
+                world_time
+                + timedelta(seconds=min(int(schedule["interval_seconds"]), 300))
+            ).isoformat()
+            conn.execute(
+                """
+                UPDATE world_update_runs
+                SET status = 'failed', error_message = ?, completed_at = ?
+                WHERE id = ?
+                """,
+                (str(exc)[:500], world_time.isoformat(), run_id),
+            )
+            conn.execute(
+                """
+                UPDATE world_update_schedules
+                SET next_run_at = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (retry_at, schedule["id"]),
+            )
+            failed.append({"run_id": run_id, "update_key": schedule["update_key"], "error": str(exc)})
+    return {"due_count": len(completed) + len(failed), "completed": completed, "failed": failed}
+
+
 def get_recent_observer_focus(conn, minutes=10):
     ensure_world_runtime_tables(conn)
     cutoff = (get_world_now() - timedelta(minutes=minutes)).isoformat()
@@ -3503,6 +3811,9 @@ def log_model_call(conn, trigger_type, status="logged", resident_id=None, relate
 
 
 def consume_auto_model_budget(conn, trigger_type, resident_id=None):
+    if not is_llm_configured():
+        log_model_call(conn, trigger_type, status="skipped:llm_unconfigured", resident_id=resident_id)
+        return False
     runtime = get_world_runtime(conn)
     used = int(runtime["auto_model_calls_used"])
     budget = int(runtime["daily_auto_model_budget"])
@@ -5320,6 +5631,8 @@ def build_autonomous_tick_decision(conn, agent, perception, step):
     if step.get("plan_state") != "due":
         return fallback_runtime_decision(agent, step, "计划步骤尚未到点或已完成，按当前位置进行轻量观察。", "rule-waiting-v1")
     if not consume_auto_model_budget(conn, "autonomous_decision", resident_id=agent["id"]):
+        if not is_llm_configured():
+            return fallback_runtime_decision(agent, step, "当前世界使用规则决策，按个人计划继续行动。", "rule-unconfigured-v1")
         return fallback_runtime_decision(agent, step, "自动模型预算不足，按原计划执行。", "rule-budget-fallback-v1")
     model_name = os.getenv("LLM_MODEL") or os.getenv("LLM_API_MODEL") or "configured-llm"
     prompt = f"""
@@ -5821,6 +6134,7 @@ def maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=None, 
 - 只能基于事实材料写，不要编造材料中没有的人物关系或因果。
 - 不要写标题、JSON、Markdown、口号或解释，只输出新闻正文。
 """
+        model_configured = is_llm_configured()
         if consume_auto_model_budget(conn, "campus_news", resident_id=candidate["resident_id"]):
             try:
                 raw = ask_llm(prompt)
@@ -5850,7 +6164,7 @@ def maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=None, 
                     model_name=model_name,
                     prompt_version="campus-news-runtime-v2",
                 )
-        else:
+        elif model_configured:
             failed.append({"resident_id": candidate["resident_id"], "reason": "budget_exhausted"})
         if not content:
             content = fallback_campus_news_content(candidate)
@@ -6157,6 +6471,14 @@ def advance_world_tick(reason="background"):
                 source_type="runtime_tick",
                 source_id=tick_id,
             )
+            multiscale_updates = run_due_world_updates(
+                conn,
+                world_time,
+                tick_id,
+                day,
+                slot,
+                parent_event_id=start_event["id"],
+            )
             conn.commit()
             selected_agents, next_cursor, focused_set = select_world_tick_agents(conn, runtime)
             results = []
@@ -6198,7 +6520,16 @@ def advance_world_tick(reason="background"):
                 "世界 tick 完成",
                 f"本次 tick 处理 {len(results)} 位 Agent，失败 {failed} 位。",
                 tick_id=tick_id,
-                payload={"started_event_id": start_event["id"], "processed_agents": len(results), "failed_agents": failed},
+                payload={
+                    "started_event_id": start_event["id"],
+                    "processed_agents": len(results),
+                    "failed_agents": failed,
+                    "multiscale_updates": {
+                        "due_count": multiscale_updates["due_count"],
+                        "completed_count": len(multiscale_updates["completed"]),
+                        "failed_count": len(multiscale_updates["failed"]),
+                    },
+                },
                 day=day,
                 slot=slot,
                 source_type="runtime_tick",
@@ -6218,6 +6549,7 @@ def advance_world_tick(reason="background"):
                 "processed_agents": len(results),
                 "failed_agents": failed,
                 "events": [start_event, finish_event],
+                "multiscale_updates": multiscale_updates,
                 "group_behavior": group_behavior,
                 "campus_news": campus_news,
                 "results": results,
@@ -6408,6 +6740,8 @@ def share_image():
 
 @app.get("/api/ai/test")
 def ai_test():
+    if not is_llm_configured():
+        raise HTTPException(status_code=503, detail="当前环境未配置 LLM_API_KEY 或 LLM_API_URL，世界将使用规则模式运行。")
     prompt = "请用一句话说明你已接入校园封闭世界 AI-Agent 系统。"
     return {"message": "AI API 调用成功", "result": ask_llm(prompt)}
 
@@ -6438,6 +6772,7 @@ SNAPSHOT_STATE_TABLES = {
     "world_causal_weights": "id",
     "world_action_rules": "id",
     "world_delayed_effects": "due_at, id",
+    "world_update_schedules": "id",
     "world_resource_accounts": "id",
 }
 
@@ -6555,6 +6890,20 @@ def runtime_response(conn):
     }
     runtime["day_sync"] = day_sync
     runtime["environment_config"] = get_active_environment_config(conn)
+    runtime["multiscale_updates"] = {
+        "schedules": [
+            decode_world_update_schedule(row)
+            for row in conn.execute(
+                "SELECT * FROM world_update_schedules WHERE status = 'active' ORDER BY interval_seconds, id"
+            ).fetchall()
+        ],
+        "latest_runs": [
+            decode_world_update_run(row)
+            for row in conn.execute(
+                "SELECT * FROM world_update_runs ORDER BY id DESC LIMIT 3"
+            ).fetchall()
+        ],
+    }
     return runtime
 
 
@@ -6672,6 +7021,34 @@ def list_world_snapshots(limit: int = 30):
             (limit,),
         ).fetchall()
         return {"snapshots": [decode_world_snapshot(row) for row in rows]}
+
+
+@app.get("/api/world/update-schedules")
+def list_world_update_schedules():
+    with get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        rows = conn.execute(
+            "SELECT * FROM world_update_schedules ORDER BY interval_seconds, id"
+        ).fetchall()
+        return {"update_schedules": [decode_world_update_schedule(row) for row in rows]}
+
+
+@app.get("/api/world/update-runs")
+def list_world_update_runs(update_key: str = "", status: str = "", limit: int = 50):
+    limit = max(1, min(limit, 200))
+    with get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        rows = conn.execute(
+            """
+            SELECT * FROM world_update_runs
+            WHERE (? = '' OR update_key = ?)
+              AND (? = '' OR status = ?)
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (update_key, update_key, status, status, limit),
+        ).fetchall()
+        return {"update_runs": [decode_world_update_run(row) for row in rows]}
 
 
 @app.get("/api/world/snapshots/{snapshot_id}")
@@ -8523,12 +8900,26 @@ def summarize_action_for_news(execution):
 
 def classify_campus_news_candidate(event_type, action="", content="", payload=None):
     payload = payload if isinstance(payload, dict) else {}
-    text = f"{event_type} {action} {content} {json.dumps(payload, ensure_ascii=False)}"
-    if event_type in {"agent_tick_failed", "world_tick_failed", "real_weather_auto_sync_failed"} or any(word in text for word in ("失败", "异常", "降级", "冲突", "迟到")):
-        return "突发异常", 100
+    factual_payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"runtime_decision", "preconditions", "causal_settlement"}
+    }
+    text = f"{event_type} {action} {content} {json.dumps(factual_payload, ensure_ascii=False)}"
     if action in {"conflict", "late", "request_leave"} or any(word in text for word in ("冲突", "紧张", "请假", "迟到")):
         return "反常行为", 90
-    if event_type in {"social_interaction", "relationship_change"} or any(word in text for word in ("关系", "信任", "合作", "好感", "竞争")):
+    if (
+        event_type in {"agent_tick_failed", "world_tick_failed", "real_weather_auto_sync_failed"}
+        or payload.get("action_success") is False
+        or payload.get("failure_code")
+        or any(word in str(content or "") for word in ("异常", "故障", "中断", "失败"))
+    ):
+        return "突发异常", 100
+    if (
+        event_type in {"social_interaction", "relationship_change"}
+        or payload.get("social_effect")
+        or any(word in text for word in ("关系", "信任", "合作", "好感", "竞争"))
+    ):
         return "关系风向", 86
     if action in {"collaborate", "create_group", "join_group", "club_activity"} or any(word in text for word in ("小组", "社团", "协作", "动员", "扩散")):
         return "群体现象", 82

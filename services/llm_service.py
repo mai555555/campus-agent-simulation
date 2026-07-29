@@ -3,6 +3,10 @@ import requests
 from app.config import LLM_API_KEY, LLM_API_URL
 
 
+def is_llm_configured() -> bool:
+    return bool(LLM_API_KEY.strip() and LLM_API_URL.strip())
+
+
 def ask_llm(prompt: str) -> str:
     if not LLM_API_KEY:
         raise RuntimeError("缺少 LLM_API_KEY，请检查 .env 文件")

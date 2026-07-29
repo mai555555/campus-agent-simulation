@@ -22,6 +22,7 @@ POSTGRES_ID_TABLES = {
     "world_snapshots", "world_ticks", "experiment_runs", "world_action_rules",
     "world_action_executions", "world_delayed_effects",
     "world_resource_accounts", "world_resource_transfers",
+    "world_update_schedules", "world_update_runs",
 }
 
 

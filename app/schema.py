@@ -724,6 +724,39 @@ CREATE TABLE IF NOT EXISTS world_delayed_effects (
     FOREIGN KEY (applied_event_id) REFERENCES world_event_stream(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS world_update_schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    update_key TEXT NOT NULL UNIQUE,
+    scope TEXT NOT NULL,
+    cadence TEXT NOT NULL,
+    interval_seconds INTEGER NOT NULL,
+    last_run_at TEXT NOT NULL DEFAULT '',
+    next_run_at TEXT NOT NULL DEFAULT '',
+    last_event_cursor INTEGER NOT NULL DEFAULT 0,
+    rule_version TEXT NOT NULL DEFAULT 'multiscale-update-v1',
+    status TEXT NOT NULL DEFAULT 'active',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS world_update_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    schedule_id INTEGER NOT NULL,
+    tick_id INTEGER,
+    update_key TEXT NOT NULL,
+    scheduled_for TEXT NOT NULL,
+    input_event_cursor INTEGER NOT NULL DEFAULT 0,
+    output_event_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'running',
+    metrics_json TEXT NOT NULL DEFAULT '{}',
+    error_message TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (schedule_id) REFERENCES world_update_schedules(id) ON DELETE CASCADE,
+    FOREIGN KEY (output_event_id) REFERENCES world_event_stream(id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS world_resource_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_key TEXT NOT NULL UNIQUE,
@@ -871,6 +904,9 @@ CREATE INDEX IF NOT EXISTS idx_world_action_executions_tick ON world_action_exec
 CREATE INDEX IF NOT EXISTS idx_world_action_executions_status ON world_action_executions(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_world_delayed_effects_due ON world_delayed_effects(status, due_at);
 CREATE INDEX IF NOT EXISTS idx_world_delayed_effects_source ON world_delayed_effects(source_action_execution_id);
+CREATE INDEX IF NOT EXISTS idx_world_update_schedules_due ON world_update_schedules(status, next_run_at);
+CREATE INDEX IF NOT EXISTS idx_world_update_runs_schedule ON world_update_runs(schedule_id, id);
+CREATE INDEX IF NOT EXISTS idx_world_update_runs_tick ON world_update_runs(tick_id);
 CREATE INDEX IF NOT EXISTS idx_world_resource_transfers_action ON world_resource_transfers(action_execution_id);
 CREATE INDEX IF NOT EXISTS idx_world_resource_transfers_target ON world_resource_transfers(to_account_key, resource_type);
 CREATE INDEX IF NOT EXISTS idx_agent_action_plans_window ON agent_action_plans(window_start, window_end);

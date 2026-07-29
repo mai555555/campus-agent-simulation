@@ -1,6 +1,8 @@
 import json
 import sqlite3
 import unittest
+from datetime import datetime, timedelta
+from unittest.mock import patch
 
 import app.main as main
 from app.models import SCHEMA_SQL
@@ -54,6 +56,141 @@ class EnvironmentFoundationTest(unittest.TestCase):
         self.assertEqual(runtime["environment_config_id"], config["id"])
         self.assertEqual(runtime["environment_version"], config["version_label"])
         self.assertTrue(runtime["random_seed"])
+
+    def test_default_multiscale_update_schedules_are_seeded(self):
+        schedules = self.conn.execute(
+            """
+            SELECT update_key, cadence, interval_seconds, status
+            FROM world_update_schedules
+            ORDER BY interval_seconds
+            """
+        ).fetchall()
+
+        self.assertEqual(
+            [row["update_key"] for row in schedules],
+            [
+                "campus_space_activity",
+                "social_dynamics",
+                "institutional_resource_review",
+            ],
+        )
+        self.assertEqual([row["interval_seconds"] for row in schedules], [3600, 28800, 86400])
+        self.assertTrue(all(row["status"] == "active" for row in schedules))
+
+    def test_multiscale_updates_follow_cadence_and_event_lineage(self):
+        world_time = datetime.fromisoformat("2026-07-29T12:00:00+08:00")
+        tick = self.conn.execute(
+            """
+            INSERT INTO world_ticks
+            (tick_index, world_time, day, slot, reason, status)
+            VALUES (1, ?, 1, '08:00-16:00', 'test', 'running')
+            """,
+            (world_time.isoformat(),),
+        )
+        root_event = main.append_world_event(
+            self.conn,
+            "world_tick_started",
+            "测试 tick",
+            "开始多尺度更新测试",
+            tick_id=tick.lastrowid,
+        )
+        main.append_world_event(
+            self.conn,
+            "agent_tick",
+            "测试学生完成协作",
+            "测试学生在图书馆与同学协作。",
+            tick_id=tick.lastrowid,
+            resident_id=1,
+            location="图书馆",
+            payload={
+                "action": "collaborate",
+                "social_effect": {
+                    "target_id": 2,
+                    "effect": "positive",
+                    "commitment": {"id": 1},
+                },
+            },
+            parent_event_id=root_event["id"],
+        )
+
+        first = main.run_due_world_updates(
+            self.conn,
+            world_time,
+            tick.lastrowid,
+            1,
+            "08:00-16:00",
+            parent_event_id=root_event["id"],
+        )
+        immediate_retry = main.run_due_world_updates(
+            self.conn,
+            world_time + timedelta(minutes=1),
+            tick.lastrowid,
+            1,
+            "08:00-16:00",
+            parent_event_id=root_event["id"],
+        )
+        hourly = main.run_due_world_updates(
+            self.conn,
+            world_time + timedelta(hours=1),
+            tick.lastrowid,
+            1,
+            "08:00-16:00",
+            parent_event_id=root_event["id"],
+        )
+
+        self.assertEqual(first["due_count"], 3)
+        self.assertEqual(len(first["completed"]), 3)
+        self.assertFalse(first["failed"])
+        self.assertEqual(immediate_retry["due_count"], 0)
+        self.assertEqual(hourly["due_count"], 1)
+        self.assertEqual(hourly["completed"][0]["update_key"], "campus_space_activity")
+
+        social_run = next(
+            item for item in first["completed"] if item["update_key"] == "social_dynamics"
+        )
+        self.assertEqual(social_run["metrics"]["interaction_count"], 1)
+        self.assertEqual(social_run["metrics"]["commitment_count"], 1)
+        output_event = self.conn.execute(
+            "SELECT * FROM world_event_stream WHERE id = ?",
+            (social_run["output_event_id"],),
+        ).fetchone()
+        self.assertEqual(output_event["parent_event_id"], root_event["id"])
+        self.assertEqual(output_event["root_event_id"], root_event["id"])
+        self.assertEqual(output_event["source_type"], "world_update_run")
+
+    def test_world_tick_invokes_due_multiscale_updates(self):
+        world_time = datetime.fromisoformat("2026-07-29T12:00:00+08:00")
+        empty_plan_result = {
+            "created": 0,
+            "llm_plans": 0,
+            "rule_based_plans": 0,
+            "backfilled_plans": 0,
+            "goals_revised": 0,
+        }
+        with patch.object(main, "get_connection", return_value=self.conn), patch.object(
+            main, "get_world_now", return_value=world_time
+        ), patch.object(
+            main, "ensure_current_action_plans", return_value=empty_plan_result
+        ), patch.object(
+            main, "maybe_auto_sync_real_weather", return_value={"skipped": True}
+        ), patch.object(
+            main, "maybe_auto_sync_external_information", return_value={"skipped": True}
+        ), patch.object(
+            main, "select_world_tick_agents", return_value=([], 0, set())
+        ), patch.object(
+            main, "maybe_generate_group_behavior_event", return_value={"skipped": True}
+        ), patch.object(
+            main, "maybe_publish_campus_news_from_world_window", return_value={"skipped": True}
+        ):
+            tick = main.advance_world_tick(reason="test")
+
+        self.assertEqual(tick["processed_agents"], 0)
+        self.assertEqual(tick["multiscale_updates"]["due_count"], 3)
+        self.assertEqual(len(tick["multiscale_updates"]["completed"]), 3)
+        stored_tick = self.conn.execute(
+            "SELECT status FROM world_ticks WHERE id = ?", (tick["tick_id"],)
+        ).fetchone()
+        self.assertEqual(stored_tick["status"], "complete")
 
     def test_new_config_version_can_be_activated_and_applied(self):
         config = json.loads(json.dumps(main.default_environment_config(), ensure_ascii=False))

@@ -830,6 +830,7 @@ admin > participant > observer > automatic background
 - 出版层采用“每日一期、分时更新”：每个 8 小时窗口产生带明确 `source_slot` 的快讯，同一天的快讯由前端汇编成一份滚动日报；日期结束后成为归档日报。快讯和日报共享事实来源，但使用独立阅读视图，上一期/下一期按日期导航。
 - 普通用户进入页面会创建 observer session，关注 Agent 或地点会更新观察焦点。
 - 前端通过 `/api/world/runtime` 和 `/api/world/events` 展示运行状态和实时事件流。
+- runtime 使用 `world_update_schedules` / `world_update_runs` 执行多尺度聚合：空间活动每小时、社会动态每 8 小时、制度与公共资源每日更新；`/api/world/update-schedules` 和 `/api/world/update-runs` 提供只读审计。
 - Admin 控制使用 `ADMIN_TOKEN`，支持 start、pause、manual tick 和事件注入。
 - 旧 `/api/simulate/ai-day` 保留为 admin/debug 入口，不再作为主体验。
 
