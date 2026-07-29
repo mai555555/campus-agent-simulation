@@ -191,6 +191,14 @@ def _initialize_social_system_tables(conn):
         )
         """
     )
+    membership_id_type = "SERIAL PRIMARY KEY" if using_postgres() else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    conn.execute(f"""
+        CREATE TABLE IF NOT EXISTS group_membership_events (
+            id {membership_id_type}, day INTEGER NOT NULL DEFAULT 1, group_id INTEGER NOT NULL,
+            resident_id INTEGER NOT NULL, action TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '',
+            member_ids TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     normalize_agent_hierarchy(conn)
     seed_long_term_goals(conn)
     seed_multiscale_goals(conn)
@@ -1997,6 +2005,13 @@ def create_collaboration(conn, leader_id, member_ids, title, goal):
     return {"title": title, "leader_id": leader_id, "member_ids": ids, "goal": goal, "status": "active"}
 
 
+def record_group_membership_event(conn, group_id, resident_id, action, reason, member_ids):
+    conn.execute(
+        "INSERT INTO group_membership_events (day, group_id, resident_id, action, reason, member_ids) VALUES (?, ?, ?, ?, ?, ?)",
+        (get_current_day(conn), group_id, resident_id, action, reason or "", json.dumps(member_ids, ensure_ascii=False)),
+    )
+
+
 def join_group_goal(conn, resident_id, group_id):
     ensure_social_system_tables(conn)
     group = conn.execute("SELECT * FROM group_goals WHERE id = ? AND status = 'active'", (group_id,)).fetchone()
@@ -2009,6 +2024,7 @@ def join_group_goal(conn, resident_id, group_id):
     roles = load_json_text(group["roles"], {})
     roles[str(resident_id)] = "成员"
     conn.execute("UPDATE group_goals SET member_ids = ?, roles = ? WHERE id = ?", (json.dumps(members, ensure_ascii=False), json.dumps(roles, ensure_ascii=False), group_id))
+    record_group_membership_event(conn, group_id, resident_id, "join", f"加入群体：{group['name']}", members)
     for member_id in members:
         if member_id != resident_id:
             evolve_relationship(conn, resident_id, member_id, "group_join", f"加入小组：{group['name']}", 2, 3, -1)
@@ -2031,6 +2047,7 @@ def leave_group_goal(conn, resident_id, group_id):
     roles = load_json_text(group["roles"], {})
     roles.pop(str(resident_id), None)
     conn.execute("UPDATE group_goals SET member_ids = ?, roles = ? WHERE id = ?", (json.dumps(members, ensure_ascii=False), json.dumps(roles, ensure_ascii=False), group_id))
+    record_group_membership_event(conn, group_id, resident_id, "leave", f"离开群体：{group['name']}", members)
     add_event(conn, get_current_day(conn), "group_leave", f"Agent {resident_id} 退出小组「{group['name']}」。")
     return {"group_id": group_id, "group_name": group["name"], "member_ids": members, "message": "退出小组成功"}
     return {"type": "collaboration", "title": title, "leader_id": leader_id, "member_ids": ids, "goal": goal, "score": score, "status": "active", "group_goal_id": group_cursor.lastrowid}
@@ -6391,6 +6408,9 @@ def _life_course_groups(conn, resident_id, timeline):
             "evidence_event_ids": evidence[:12],
             "membership_history_available": False,
         })
+        history = conn.execute("SELECT id, day, resident_id, action, reason, member_ids, created_at FROM group_membership_events WHERE group_id = ? ORDER BY day ASC, id ASC LIMIT 100", (row["id"],)).fetchall()
+        groups[-1]["membership_history"] = rows_to_dicts(history)
+        groups[-1]["membership_history_available"] = bool(history)
     return groups
 
 
@@ -6522,7 +6542,7 @@ def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, l
         "research_boundaries": {
             "state_history_available": any(item.get("state_before") or item.get("state_after") for item in timeline if item.get("source") == "simulation_action_logs"),
             "relationship_history_available": any(item.get("history_available") for item in relationships),
-            "group_membership_history_available": False,
+            "group_membership_history_available": any(group.get("membership_history_available") for group in groups),
             "causal_links_available": False,
             "message": "当前版本展示事件证据和时序关联，不将时序关联表述为因果关系。",
         },
