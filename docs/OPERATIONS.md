@@ -225,6 +225,8 @@ buildCommand: pip install -r requirements.txt && python scripts/init_campus_safe
 startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
 ```
 
+使用 Docker 部署时，镜像构建只会在 `/tmp/campus-build/city.db` 上验证完整初始化链路，不连接 Render 持久盘或生产数据库。容器启动时才使用实际 `DATABASE_URL` 或 `DB_PATH` 依次执行安全初始化、schema 补齐、Alembic migration 和幂等空间种子，已有校园数据不会被重置。
+
 安全初始化会保留已有校园数据，随后补齐基线结构、执行 migration 并幂等补齐空间拓扑。首次部署会写入种子数据，后续构建只执行幂等结构升级和缺失空间状态回填。
 
 需要配置的环境变量：
