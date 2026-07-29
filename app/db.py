@@ -19,7 +19,9 @@ POSTGRES_ID_TABLES = {
     "participant_actions", "plan_outcomes", "policies", "residents",
     "research_export_jobs", "simulation_action_logs", "transactions",
     "trajectory_episodes", "world_causal_weights", "world_event_stream",
-    "world_snapshots", "world_ticks", "experiment_runs",
+    "world_snapshots", "world_ticks", "experiment_runs", "world_action_rules",
+    "world_action_executions", "world_delayed_effects",
+    "world_resource_accounts", "world_resource_transfers",
 }
 
 

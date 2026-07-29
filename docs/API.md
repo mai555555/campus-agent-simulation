@@ -22,6 +22,9 @@
 | GET | `/api/world/environment-configs` | 环境配置版本列表 |
 | GET | `/api/world/snapshots` | 世界快照元数据列表，不返回完整状态 |
 | GET | `/api/world/snapshots/{snapshot_id}?include_state=true` | 快照详情；按需返回完整客观状态 |
+| GET | `/api/world/action-rules` | 当前 13 种 autonomous action 的前置条件、成本和效果规则 |
+| GET | `/api/world/action-executions?resident_id=1&status=completed` | 查询结构化行动结算记录 |
+| GET | `/api/world/delayed-effects?status=pending` | 查询待结算或已结算的延迟效果 |
 | POST | `/api/world/observer-sessions` | 创建或更新观察者会话，记录关注 Agent/地点 |
 | GET | `/api/agents` | Agent 列表 |
 | GET | `/api/residents` | 同 `/api/agents` |
@@ -78,6 +81,13 @@ curl -X POST http://127.0.0.1:8000/api/admin/world/snapshots \
 ```
 
 环境配置至少包含 `campus`、`spaces`、`population`、`institutions`、`economy` 和 `external_context`。当前版本的 `spaces` 必须覆盖现有七个 runtime 地点；激活时会更新容量、开放时间与状态，并应用 `environment_baseline` 中允许修改的字段。自定义地点、人口和组织生成仍属于后续阶段。
+
+行动结算分为两种模式：
+
+- `active`：计划步骤到点，检查空间与资源前置条件，结算精力、时间、金钱、成功概率和直接/延迟效果。
+- `passive`：等待计划或窗口已完成时的 runtime 轮询，只保留观察记录，不消耗每日资源或产生宏观效果。
+
+规则拒绝与概率失败属于有效世界结果，不会被计为 tick 系统错误。其 `failure_code`、前置条件、结算前后资源和来源事件可通过 `action-executions` 查询。
 
 注入事件示例：
 

@@ -151,7 +151,7 @@ def add_inventory(conn, resident_id, item_name, quantity):
     )
 
 
-def move_resident(conn, resident_id, destination):
+def move_resident(conn, resident_id, destination, commit=True):
     resident = get_resident(conn, resident_id)
     if not resident:
         raise ValueError("找不到这个 Agent")
@@ -166,7 +166,8 @@ def move_resident(conn, resident_id, destination):
     description = f"{resident['name']} 从 {resident['location']} 移动到 {destination}。"
     add_event(conn, day, "agent_move", description)
     add_memory(conn, resident_id, day, description, importance=2, memory_type="episodic", tags=["移动", resident["location"], destination], source="move")
-    conn.commit()
+    if commit:
+        conn.commit()
     return {"message": "移动成功", "description": description}
 
 

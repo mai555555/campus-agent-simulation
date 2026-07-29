@@ -650,6 +650,104 @@ CREATE TABLE IF NOT EXISTS world_event_stream (
     FOREIGN KEY (root_event_id) REFERENCES world_event_stream(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS world_action_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_key TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    rule_version TEXT NOT NULL DEFAULT 'action-rule-v1',
+    preconditions_json TEXT NOT NULL DEFAULT '{}',
+    required_resources_json TEXT NOT NULL DEFAULT '{}',
+    duration_minutes INTEGER NOT NULL DEFAULT 10,
+    success_probability REAL NOT NULL DEFAULT 1.0,
+    direct_effects_json TEXT NOT NULL DEFAULT '[]',
+    delayed_effects_json TEXT NOT NULL DEFAULT '[]',
+    failure_policy_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(action_type, rule_version)
+);
+
+CREATE TABLE IF NOT EXISTS world_action_executions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tick_id INTEGER,
+    resident_id INTEGER NOT NULL,
+    action_type TEXT NOT NULL,
+    target_type TEXT NOT NULL DEFAULT 'location',
+    target_id TEXT NOT NULL DEFAULT '',
+    location TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    settlement_mode TEXT NOT NULL DEFAULT 'active',
+    rule_key TEXT NOT NULL DEFAULT '',
+    rule_version TEXT NOT NULL DEFAULT '',
+    precondition_results_json TEXT NOT NULL DEFAULT '[]',
+    resources_before_json TEXT NOT NULL DEFAULT '{}',
+    resources_after_json TEXT NOT NULL DEFAULT '{}',
+    resource_costs_json TEXT NOT NULL DEFAULT '{}',
+    duration_minutes INTEGER NOT NULL DEFAULT 0,
+    success_probability REAL NOT NULL DEFAULT 1.0,
+    random_roll REAL NOT NULL DEFAULT 0,
+    direct_effects_json TEXT NOT NULL DEFAULT '[]',
+    delayed_effect_ids_json TEXT NOT NULL DEFAULT '[]',
+    failure_code TEXT NOT NULL DEFAULT '',
+    failure_reason TEXT NOT NULL DEFAULT '',
+    parent_event_id INTEGER,
+    world_event_id INTEGER,
+    occurred_at TEXT NOT NULL DEFAULT '',
+    completed_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (resident_id) REFERENCES residents(id) ON DELETE CASCADE,
+    FOREIGN KEY (parent_event_id) REFERENCES world_event_stream(id) ON DELETE SET NULL,
+    FOREIGN KEY (world_event_id) REFERENCES world_event_stream(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS world_delayed_effects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_action_execution_id INTEGER,
+    source_event_id INTEGER,
+    due_at TEXT NOT NULL,
+    effect_type TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL DEFAULT '',
+    state_key TEXT NOT NULL,
+    operation TEXT NOT NULL DEFAULT 'add',
+    value_json TEXT NOT NULL DEFAULT '0',
+    rule_version TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    applied_event_id INTEGER,
+    applied_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (source_action_execution_id) REFERENCES world_action_executions(id) ON DELETE SET NULL,
+    FOREIGN KEY (source_event_id) REFERENCES world_event_stream(id) ON DELETE SET NULL,
+    FOREIGN KEY (applied_event_id) REFERENCES world_event_stream(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS world_resource_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_key TEXT NOT NULL UNIQUE,
+    owner_type TEXT NOT NULL DEFAULT 'system',
+    owner_id TEXT NOT NULL DEFAULT '',
+    resource_type TEXT NOT NULL DEFAULT 'money',
+    balance REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS world_resource_transfers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action_execution_id INTEGER,
+    from_type TEXT NOT NULL,
+    from_id TEXT NOT NULL,
+    to_account_key TEXT NOT NULL,
+    resource_type TEXT NOT NULL DEFAULT 'money',
+    amount REAL NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (action_execution_id) REFERENCES world_action_executions(id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS agent_action_plans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     resident_id INTEGER NOT NULL,
@@ -767,6 +865,14 @@ CREATE INDEX IF NOT EXISTS idx_world_event_stream_event_type ON world_event_stre
 CREATE INDEX IF NOT EXISTS idx_world_event_stream_resident_id ON world_event_stream(resident_id);
 CREATE INDEX IF NOT EXISTS idx_world_event_stream_resident_day ON world_event_stream(resident_id, day);
 CREATE INDEX IF NOT EXISTS idx_world_event_stream_tick_id ON world_event_stream(tick_id);
+CREATE INDEX IF NOT EXISTS idx_world_action_rules_action ON world_action_rules(action_type, status);
+CREATE INDEX IF NOT EXISTS idx_world_action_executions_resident ON world_action_executions(resident_id, id);
+CREATE INDEX IF NOT EXISTS idx_world_action_executions_tick ON world_action_executions(tick_id);
+CREATE INDEX IF NOT EXISTS idx_world_action_executions_status ON world_action_executions(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_world_delayed_effects_due ON world_delayed_effects(status, due_at);
+CREATE INDEX IF NOT EXISTS idx_world_delayed_effects_source ON world_delayed_effects(source_action_execution_id);
+CREATE INDEX IF NOT EXISTS idx_world_resource_transfers_action ON world_resource_transfers(action_execution_id);
+CREATE INDEX IF NOT EXISTS idx_world_resource_transfers_target ON world_resource_transfers(to_account_key, resource_type);
 CREATE INDEX IF NOT EXISTS idx_agent_action_plans_window ON agent_action_plans(window_start, window_end);
 CREATE INDEX IF NOT EXISTS idx_observer_sessions_last_seen ON observer_sessions(last_seen_at);
 CREATE INDEX IF NOT EXISTS idx_model_call_logs_trigger_date ON model_call_logs(trigger_type, created_at);

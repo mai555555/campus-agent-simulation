@@ -124,6 +124,10 @@ World Runtime 已开始绑定版本化环境配置：
 - `world_runtime.environment_config_id`、`environment_version` 和 `random_seed` 标识当前运行条件。
 - `world_event_stream` 使用 `source_type`、`source_id`、`parent_event_id`、`root_event_id` 和 `rule_version` 保存事件谱系。
 - `world_snapshots` 保存客观状态、配置版本、随机种子、外部数据版本和事件游标。
+- `world_action_rules` 定义行动前置条件、资源成本、持续时间、成功概率和效果。
+- `world_action_executions` 保存每次 active/passive 结算、失败原因及资源前后状态。
+- `world_delayed_effects` 由后续 tick 按 `due_at` 幂等结算，并沿来源行动继承事件谱系。
+- `world_resource_accounts` 与 `world_resource_transfers` 暂时承接行动金钱成本，避免消费支出无来源地消失；完整经济账本仍属于后续经济阶段。
 
 快照当前用于审计和后续回放基础，尚未实现从快照恢复数据库或创建隔离世界分支。
 

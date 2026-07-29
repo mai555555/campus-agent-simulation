@@ -96,6 +96,116 @@ DEFAULT_CAUSAL_WEIGHTS = [
     ("study_mood_increases_collaboration", "study_atmosphere", "action", "collaborate", 1.0, 0.28, 65, 0.14, "学习氛围提升协作概率"),
 ]
 
+DEFAULT_WORLD_ACTION_RULES = {
+    "move": {
+        "duration_minutes": 12,
+        "success_probability": 0.98,
+        "preconditions": {"location_open": True, "capacity_available": True},
+        "resources": {"energy": 8, "time_budget": 12, "money": 0},
+        "direct_effects": [],
+        "delayed_effects": [{"delay_minutes": 20, "target_type": "campus_state", "state_key": "campus_flow", "operation": "add", "value": 1}],
+    },
+    "observe": {
+        "duration_minutes": 8,
+        "success_probability": 1.0,
+        "preconditions": {},
+        "resources": {"energy": 2, "time_budget": 6, "money": 0},
+        "direct_effects": [],
+        "delayed_effects": [],
+    },
+    "chat": {
+        "duration_minutes": 10,
+        "success_probability": 0.97,
+        "preconditions": {},
+        "resources": {"energy": 3, "time_budget": 8, "money": 0},
+        "direct_effects": [{"target_type": "agent_profile", "state_key": "mood", "operation": "set", "value": "放松"}],
+        "delayed_effects": [],
+    },
+    "reflect": {
+        "duration_minutes": 15,
+        "success_probability": 1.0,
+        "preconditions": {},
+        "resources": {"energy": 2, "time_budget": 8, "money": 0},
+        "direct_effects": [{"target_type": "agent_profile", "state_key": "mood", "operation": "set", "value": "沉思"}],
+        "delayed_effects": [],
+    },
+    "attend_class": {
+        "duration_minutes": 45,
+        "success_probability": 0.97,
+        "preconditions": {"allowed_locations": ["教学楼"], "location_open": True, "capacity_available": True},
+        "resources": {"energy": 7, "time_budget": 18, "money": 0},
+        "direct_effects": [],
+        "delayed_effects": [{"delay_minutes": 60, "target_type": "campus_state", "state_key": "study_atmosphere", "operation": "add", "value": 1}],
+    },
+    "queue": {
+        "duration_minutes": 12,
+        "success_probability": 0.99,
+        "preconditions": {"allowed_locations": ["食堂", "商业街"], "location_open": True},
+        "resources": {"energy": 2, "time_budget": 10, "money": 0},
+        "direct_effects": [],
+        "delayed_effects": [{"delay_minutes": 30, "target_type": "campus_state", "state_key": "resource_pressure", "operation": "add", "value": -1}],
+    },
+    "consume": {
+        "duration_minutes": 20,
+        "success_probability": 0.98,
+        "preconditions": {"allowed_locations": ["食堂", "商业街"], "location_open": True},
+        "resources": {"energy": 3, "time_budget": 12, "money": 8},
+        "direct_effects": [{"target_type": "agent_profile", "state_key": "energy", "operation": "add", "value": 5}],
+        "delayed_effects": [{"delay_minutes": 60, "target_type": "campus_state", "state_key": "consumption_index", "operation": "add", "value": 0.01}],
+    },
+    "rest": {
+        "duration_minutes": 45,
+        "success_probability": 1.0,
+        "preconditions": {"allowed_locations": ["宿舍区"], "location_open": True},
+        "resources": {"energy": 0, "time_budget": 10, "money": 0},
+        "direct_effects": [
+            {"target_type": "agent_profile", "state_key": "energy", "operation": "add", "value": 12},
+            {"target_type": "agent_profile", "state_key": "mood", "operation": "set", "value": "恢复中"},
+        ],
+        "delayed_effects": [],
+    },
+    "club_activity": {
+        "duration_minutes": 40,
+        "success_probability": 0.95,
+        "preconditions": {"allowed_locations": ["操场"], "location_open": True, "capacity_available": True},
+        "resources": {"energy": 8, "time_budget": 16, "money": 0},
+        "direct_effects": [],
+        "delayed_effects": [{"delay_minutes": 60, "target_type": "campus_state", "state_key": "activity_heat", "operation": "add", "value": 1}],
+    },
+    "conflict": {
+        "duration_minutes": 15,
+        "success_probability": 0.75,
+        "preconditions": {},
+        "resources": {"energy": 6, "time_budget": 10, "money": 0},
+        "direct_effects": [{"target_type": "agent_profile", "state_key": "mood", "operation": "set", "value": "紧张"}],
+        "delayed_effects": [{"delay_minutes": 30, "target_type": "campus_state", "state_key": "activity_heat", "operation": "add", "value": -1}],
+    },
+    "collaborate": {
+        "duration_minutes": 35,
+        "success_probability": 0.93,
+        "preconditions": {},
+        "resources": {"energy": 6, "time_budget": 15, "money": 0},
+        "direct_effects": [],
+        "delayed_effects": [{"delay_minutes": 90, "target_type": "campus_state", "state_key": "study_atmosphere", "operation": "add", "value": 1}],
+    },
+    "late": {
+        "duration_minutes": 10,
+        "success_probability": 1.0,
+        "preconditions": {},
+        "resources": {"energy": 2, "time_budget": 8, "money": 0},
+        "direct_effects": [{"target_type": "agent_profile", "state_key": "mood", "operation": "set", "value": "匆忙"}],
+        "delayed_effects": [],
+    },
+    "request_leave": {
+        "duration_minutes": 25,
+        "success_probability": 0.90,
+        "preconditions": {"allowed_locations": ["校务处"], "location_open": True},
+        "resources": {"energy": 3, "time_budget": 12, "money": 0},
+        "direct_effects": [],
+        "delayed_effects": [],
+    },
+}
+
 DEFAULT_AGENT_PERSONALITY_TRAITS = {
     1: {"extraversion": 82, "conscientiousness": 58, "emotional_stability": 64, "risk_tolerance": 62, "rule_orientation": 45, "social_need": 88, "competitiveness": 36, "empathy": 72, "autonomy": 60, "stress_sensitivity": 48},
     2: {"extraversion": 42, "conscientiousness": 88, "emotional_stability": 76, "risk_tolerance": 34, "rule_orientation": 82, "social_need": 38, "competitiveness": 66, "empathy": 54, "autonomy": 74, "stress_sensitivity": 42},
@@ -130,8 +240,10 @@ SOCIAL_SYSTEM_SQL, BEHAVIOR_SYSTEM_SQL, RELATIONSHIP_DYNAMIC_COLUMNS,
 
 
 def ensure_agent_profile_table(conn):
-    conn.executescript(AGENT_PROFILE_SQL)
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(agent_profiles)").fetchall()}
+    if not columns:
+        conn.executescript(AGENT_PROFILE_SQL)
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(agent_profiles)").fetchall()}
     for column, column_type in PROFILE_COLUMN_TYPES.items():
         if column not in columns:
             conn.execute(f"ALTER TABLE agent_profiles ADD COLUMN {column} {column_type}")
@@ -2263,15 +2375,24 @@ def rows_to_dicts(rows):
 
 
 def ensure_campus_state_table(conn):
-    conn.executescript(CAMPUS_STATE_SQL)
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(campus_state)").fetchall()}
+    if not columns:
+        conn.executescript(CAMPUS_STATE_SQL)
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(campus_state)").fetchall()}
     for column, column_type in ENV_COLUMN_TYPES.items():
         if column not in columns:
             conn.execute(f"ALTER TABLE campus_state ADD COLUMN {column} {column_type}")
 
 
 def ensure_space_system(conn):
-    conn.executescript(SPACE_SYSTEM_SQL)
+    space_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(campus_spaces)").fetchall()
+    }
+    event_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(campus_events)").fetchall()
+    }
+    if not space_columns or not event_columns:
+        conn.executescript(SPACE_SYSTEM_SQL)
     for space in DEFAULT_SPACES:
         conn.execute(
             """
@@ -2333,6 +2454,14 @@ def ensure_world_runtime_tables(conn):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_world_event_stream_source ON world_event_stream(source_type, source_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_world_snapshots_parent ON world_snapshots(parent_snapshot_id)")
         seed_world_runtime_rules(conn)
+        seed_world_action_rules(conn)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO world_resource_accounts
+            (account_key, owner_type, resource_type, balance)
+            VALUES ('campus-services', 'system', 'money', 0)
+            """
+        )
         default_config = seed_default_environment_config(conn)
         now = datetime.now(WORLD_TZ).isoformat()
         budget_date = now[:10]
@@ -2385,6 +2514,30 @@ def seed_world_runtime_rules(conn):
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             weight,
+        )
+
+
+def seed_world_action_rules(conn):
+    for action_type, rule in DEFAULT_WORLD_ACTION_RULES.items():
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO world_action_rules
+            (rule_key, action_type, rule_version, preconditions_json,
+             required_resources_json, duration_minutes, success_probability,
+             direct_effects_json, delayed_effects_json, failure_policy_json)
+            VALUES (?, ?, 'action-rule-v1', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"{action_type}-default",
+                action_type,
+                canonical_json(rule.get("preconditions", {})),
+                canonical_json(rule.get("resources", {})),
+                int(rule.get("duration_minutes", 10)),
+                float(rule.get("success_probability", 1.0)),
+                canonical_json(rule.get("direct_effects", [])),
+                canonical_json(rule.get("delayed_effects", [])),
+                canonical_json({"probability_failure_cost_ratio": 0.5}),
+            ),
         )
 
 
@@ -2827,6 +2980,495 @@ def append_world_event(
             (event_id, event_id),
         )
     return dict(conn.execute("SELECT * FROM world_event_stream WHERE id = ?", (event_id,)).fetchone())
+
+
+def decode_world_action_rule(row):
+    rule = dict(row)
+    for source_key, target_key, fallback in (
+        ("preconditions_json", "preconditions", {}),
+        ("required_resources_json", "required_resources", {}),
+        ("direct_effects_json", "direct_effects", []),
+        ("delayed_effects_json", "delayed_effects", []),
+        ("failure_policy_json", "failure_policy", {}),
+    ):
+        rule[target_key] = load_json_text(rule.pop(source_key, ""), fallback)
+    return rule
+
+
+def get_world_action_rule(conn, action_type):
+    row = conn.execute(
+        """
+        SELECT * FROM world_action_rules
+        WHERE action_type = ? AND status = 'active'
+        ORDER BY id DESC LIMIT 1
+        """,
+        (action_type,),
+    ).fetchone()
+    return decode_world_action_rule(row) if row else None
+
+
+def action_resource_state(conn, resident_id):
+    row = conn.execute(
+        """
+        SELECT r.money, p.energy, p.time_budget, p.mood
+        FROM residents r
+        JOIN agent_profiles p ON p.resident_id = r.id
+        WHERE r.id = ?
+        """,
+        (resident_id,),
+    ).fetchone()
+    if not row:
+        raise ValueError("行动者不存在或缺少 Agent profile")
+    return {
+        "energy": int(row["energy"]),
+        "time_budget": int(row["time_budget"]),
+        "money": int(row["money"]),
+        "mood": row["mood"],
+    }
+
+
+def deterministic_action_roll(conn, tick_id, resident_id, action_type, location):
+    runtime = conn.execute(
+        "SELECT random_seed FROM world_runtime WHERE id = ?",
+        (WORLD_RUNTIME_ID,),
+    ).fetchone()
+    seed = runtime["random_seed"] if runtime else "campus-default-seed-v1"
+    material = f"{seed}|{tick_id or 0}|{resident_id}|{action_type}|{location}"
+    digest = hashlib.sha256(material.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") / float(2**64)
+
+
+def evaluate_world_action_preconditions(conn, resident_id, action_type, location, rule, world_time):
+    preconditions = rule.get("preconditions", {})
+    resources = rule.get("required_resources", {})
+    state = action_resource_state(conn, resident_id)
+    checks = []
+
+    def add_check(key, passed, actual, required, failure_code, reason):
+        checks.append(
+            {
+                "key": key,
+                "passed": bool(passed),
+                "actual": actual,
+                "required": required,
+                "failure_code": "" if passed else failure_code,
+                "reason": "" if passed else reason,
+            }
+        )
+
+    allowed_locations = preconditions.get("allowed_locations")
+    if allowed_locations:
+        add_check(
+            "allowed_location",
+            location in allowed_locations,
+            location,
+            allowed_locations,
+            "location_mismatch",
+            f"{action_type} 不能在{location}完成",
+        )
+    if preconditions.get("location_open"):
+        add_check(
+            "location_open",
+            location in VALID_LOCATIONS and is_location_open_at_hour(location, world_time.hour),
+            location,
+            "open",
+            "location_closed",
+            f"{location}当前未开放",
+        )
+    if preconditions.get("capacity_available") and location in VALID_LOCATIONS:
+        snapshot = get_space_snapshot(conn)
+        space = next((item for item in snapshot["spaces"] if item["location"] == location), None)
+        available = int(space.get("available_slots", 0)) if space else 0
+        add_check(
+            "capacity_available",
+            bool(space) and available > 0 and space.get("effective_status") != "关闭",
+            available,
+            "> 0",
+            "space_full",
+            f"{location}当前没有可用容量",
+        )
+    for resource_key in ("energy", "time_budget", "money"):
+        required = int(resources.get(resource_key, 0) or 0)
+        add_check(
+            f"resource_{resource_key}",
+            state[resource_key] >= required,
+            state[resource_key],
+            required,
+            f"insufficient_{resource_key}",
+            f"{resource_key}不足，需要 {required}，当前 {state[resource_key]}",
+        )
+    return checks, state
+
+
+def begin_world_action_execution(
+    conn,
+    resident_id,
+    action_type,
+    location,
+    world_time,
+    tick_id=None,
+    parent_event_id=None,
+    settlement_mode="active",
+):
+    rule = get_world_action_rule(conn, action_type)
+    if not rule:
+        raise ValueError(f"未找到行动规则：{action_type}")
+    if settlement_mode == "passive":
+        rule = {
+            **rule,
+            "rule_key": "passive-runtime-poll",
+            "rule_version": "passive-tick-v1",
+            "preconditions": {},
+            "required_resources": {"energy": 0, "time_budget": 0, "money": 0},
+            "duration_minutes": 0,
+            "success_probability": 1.0,
+            "direct_effects": [],
+            "delayed_effects": [],
+        }
+    checks, resources_before = evaluate_world_action_preconditions(
+        conn, resident_id, action_type, location, rule, world_time
+    )
+    failed_check = next((check for check in checks if not check["passed"]), None)
+    roll = deterministic_action_roll(conn, tick_id, resident_id, action_type, location)
+    probability = float(rule.get("success_probability", 1.0))
+    status = "rejected" if failed_check else ("pending" if roll <= probability else "failed")
+    failure_code = failed_check["failure_code"] if failed_check else ("probability_failure" if status == "failed" else "")
+    failure_reason = failed_check["reason"] if failed_check else ("行动未通过成功概率结算" if status == "failed" else "")
+    cursor = conn.execute(
+        """
+        INSERT INTO world_action_executions
+        (tick_id, resident_id, action_type, target_type, target_id, location, status, settlement_mode,
+         rule_key, rule_version, precondition_results_json, resources_before_json,
+         resource_costs_json, duration_minutes, success_probability, random_roll,
+         direct_effects_json, failure_code, failure_reason, parent_event_id, occurred_at)
+        VALUES (?, ?, ?, 'location', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            tick_id,
+            resident_id,
+            action_type,
+            location,
+            location,
+            status,
+            settlement_mode,
+            rule["rule_key"],
+            rule["rule_version"],
+            canonical_json(checks),
+            canonical_json(resources_before),
+            canonical_json(rule.get("required_resources", {})),
+            int(rule.get("duration_minutes", 0)),
+            probability,
+            roll,
+            canonical_json(rule.get("direct_effects", [])),
+            failure_code,
+            failure_reason,
+            parent_event_id,
+            world_time.isoformat(),
+        ),
+    )
+    return {
+        "id": cursor.lastrowid,
+        "status": status,
+        "failure_code": failure_code,
+        "failure_reason": failure_reason,
+        "preconditions": checks,
+        "resources_before": resources_before,
+        "rule": rule,
+        "random_roll": roll,
+        "settlement_mode": settlement_mode,
+    }
+
+
+def apply_structured_world_effect(conn, resident_id, effect):
+    target_type = effect.get("target_type")
+    state_key = effect.get("state_key")
+    operation = effect.get("operation", "add")
+    value = effect.get("value")
+    if target_type == "agent_profile":
+        if state_key == "energy" and operation == "add":
+            row = conn.execute(
+                "SELECT energy FROM agent_profiles WHERE resident_id = ?",
+                (resident_id,),
+            ).fetchone()
+            before = int(row["energy"])
+            after = clamp(before + int(value))
+            conn.execute(
+                "UPDATE agent_profiles SET energy = ? WHERE resident_id = ?",
+                (after, resident_id),
+            )
+        elif state_key == "mood" and operation == "set":
+            row = conn.execute(
+                "SELECT mood FROM agent_profiles WHERE resident_id = ?",
+                (resident_id,),
+            ).fetchone()
+            before = row["mood"]
+            after = str(value)[:40]
+            conn.execute(
+                "UPDATE agent_profiles SET mood = ? WHERE resident_id = ?",
+                (after, resident_id),
+            )
+        else:
+            raise ValueError(f"不支持的 Agent 效果：{state_key}/{operation}")
+    elif target_type == "campus_state":
+        allowed_numeric = set(ENV_COLUMN_TYPES) & {
+            "exam_pressure", "assignment_pressure", "study_atmosphere", "activity_heat",
+            "event_intensity", "campus_flow", "classroom_crowd", "canteen_crowd",
+            "library_crowd", "dorm_crowd", "playground_crowd", "commercial_crowd",
+            "safety_level", "resource_pressure", "consumption_index",
+        }
+        if state_key not in allowed_numeric or operation not in {"add", "set"}:
+            raise ValueError(f"不支持的校园效果：{state_key}/{operation}")
+        day = get_current_day(conn)
+        state = conn.execute(
+            f"SELECT {state_key} AS value FROM campus_state WHERE day = ?",
+            (day,),
+        ).fetchone()
+        if not state:
+            raise ValueError(f"第 {day} 天校园状态不存在")
+        before = state["value"]
+        raw_after = float(before) + float(value) if operation == "add" else float(value)
+        if state_key == "consumption_index":
+            after = round(max(0.1, min(3.0, raw_after)), 2)
+        else:
+            after = clamp(round(raw_after))
+        conn.execute(
+            f"UPDATE campus_state SET {state_key} = ? WHERE day = ?",
+            (after, day),
+        )
+    else:
+        raise ValueError(f"不支持的效果目标：{target_type}")
+    return {
+        "target_type": target_type,
+        "state_key": state_key,
+        "operation": operation,
+        "before": before,
+        "after": after,
+    }
+
+
+def settle_world_action_resources(conn, action_execution, success):
+    resident_id = action_execution["resources_before"].get("resident_id")
+    if not resident_id:
+        row = conn.execute(
+            "SELECT resident_id FROM world_action_executions WHERE id = ?",
+            (action_execution["id"],),
+        ).fetchone()
+        resident_id = int(row["resident_id"])
+    rule = action_execution["rule"]
+    requested_costs = {
+        key: int(rule.get("required_resources", {}).get(key, 0) or 0)
+        for key in ("energy", "time_budget", "money")
+    }
+    ratio = 1.0 if success else float(rule.get("failure_policy", {}).get("probability_failure_cost_ratio", 0.5))
+    costs = {
+        key: min(value, max(0, round(value * ratio)))
+        for key, value in requested_costs.items()
+    }
+    before = action_resource_state(conn, resident_id)
+    conn.execute(
+        """
+        UPDATE agent_profiles
+        SET energy = ?, time_budget = ?
+        WHERE resident_id = ?
+        """,
+        (
+            clamp(before["energy"] - costs["energy"]),
+            clamp(before["time_budget"] - costs["time_budget"]),
+            resident_id,
+        ),
+    )
+    if costs["money"]:
+        conn.execute(
+            "UPDATE residents SET money = money - ? WHERE id = ?",
+            (costs["money"], resident_id),
+        )
+        conn.execute(
+            """
+            UPDATE world_resource_accounts
+            SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP
+            WHERE account_key = 'campus-services'
+            """,
+            (costs["money"],),
+        )
+        conn.execute(
+            """
+            INSERT INTO world_resource_transfers
+            (action_execution_id, from_type, from_id, to_account_key,
+             resource_type, amount, reason)
+            VALUES (?, 'resident', ?, 'campus-services', 'money', ?, ?)
+            """,
+            (
+                action_execution["id"],
+                str(resident_id),
+                costs["money"],
+                f"{rule['action_type']} 行动资源成本",
+            ),
+        )
+    applied_effects = []
+    if success:
+        for effect in rule.get("direct_effects", []):
+            applied_effects.append(apply_structured_world_effect(conn, resident_id, effect))
+    after = action_resource_state(conn, resident_id)
+    conn.execute(
+        """
+        UPDATE world_action_executions
+        SET status = ?, resources_after_json = ?, resource_costs_json = ?,
+            direct_effects_json = ?, completed_at = ?
+        WHERE id = ?
+        """,
+        (
+            "completed" if success else "failed",
+            canonical_json(after),
+            canonical_json(costs),
+            canonical_json(applied_effects),
+            get_world_now().isoformat(),
+            action_execution["id"],
+        ),
+    )
+    return {"before": before, "after": after, "costs": costs, "direct_effects": applied_effects}
+
+
+def finalize_rejected_action_execution(conn, action_execution):
+    conn.execute(
+        """
+        UPDATE world_action_executions
+        SET resources_after_json = ?, resource_costs_json = '{}',
+            direct_effects_json = '[]', completed_at = ?
+        WHERE id = ?
+        """,
+        (
+            canonical_json(action_execution["resources_before"]),
+            get_world_now().isoformat(),
+            action_execution["id"],
+        ),
+    )
+    return {
+        "before": action_execution["resources_before"],
+        "after": action_execution["resources_before"],
+        "costs": {"energy": 0, "time_budget": 0, "money": 0},
+        "direct_effects": [],
+    }
+
+
+def enqueue_world_delayed_effects(conn, action_execution, source_event_id, world_time):
+    effect_ids = []
+    resident_id = conn.execute(
+        "SELECT resident_id FROM world_action_executions WHERE id = ?",
+        (action_execution["id"],),
+    ).fetchone()["resident_id"]
+    for effect in action_execution["rule"].get("delayed_effects", []):
+        due_at = world_time + timedelta(minutes=max(0, int(effect.get("delay_minutes", 0))))
+        target_type = effect.get("target_type") or "campus_state"
+        target_id = effect.get("target_id")
+        if target_id is None and target_type == "agent_profile":
+            target_id = resident_id
+        cursor = conn.execute(
+            """
+            INSERT INTO world_delayed_effects
+            (source_action_execution_id, source_event_id, due_at, effect_type,
+             target_type, target_id, state_key, operation, value_json, rule_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                action_execution["id"],
+                source_event_id,
+                due_at.isoformat(),
+                f"{target_type}.{effect.get('state_key')}",
+                target_type,
+                str(target_id or ""),
+                effect.get("state_key") or "",
+                effect.get("operation") or "add",
+                canonical_json(effect.get("value")),
+                action_execution["rule"]["rule_version"],
+            ),
+        )
+        effect_ids.append(cursor.lastrowid)
+    conn.execute(
+        "UPDATE world_action_executions SET delayed_effect_ids_json = ? WHERE id = ?",
+        (canonical_json(effect_ids), action_execution["id"]),
+    )
+    return effect_ids
+
+
+def link_action_execution_event(conn, action_execution_id, event_id):
+    conn.execute(
+        "UPDATE world_action_executions SET world_event_id = ? WHERE id = ?",
+        (event_id, action_execution_id),
+    )
+
+
+def process_due_world_delayed_effects(conn, world_time, tick_id=None, day=None, slot=None, limit=100):
+    rows = conn.execute(
+        """
+        SELECT d.*, a.resident_id
+        FROM world_delayed_effects d
+        LEFT JOIN world_action_executions a ON a.id = d.source_action_execution_id
+        WHERE d.status = 'pending' AND d.due_at <= ?
+        ORDER BY d.due_at, d.id
+        LIMIT ?
+        """,
+        (world_time.isoformat(), limit),
+    ).fetchall()
+    if any(row["target_type"] == "campus_state" for row in rows):
+        get_campus_environment(conn, day)
+    applied = []
+    failed = []
+    for raw in rows:
+        effect = dict(raw)
+        conn.execute("SAVEPOINT delayed_effect_apply")
+        try:
+            value = load_json_text(effect["value_json"], None)
+            result = apply_structured_world_effect(
+                conn,
+                int(effect.get("target_id") or effect.get("resident_id") or 0),
+                {
+                    "target_type": effect["target_type"],
+                    "state_key": effect["state_key"],
+                    "operation": effect["operation"],
+                    "value": value,
+                },
+            )
+            event = append_world_event(
+                conn,
+                "delayed_effect_applied",
+                "延迟效果已结算",
+                f"{effect['effect_type']} 已按计划生效。",
+                tick_id=tick_id,
+                resident_id=effect.get("resident_id"),
+                payload={"delayed_effect_id": effect["id"], "result": result},
+                day=day,
+                slot=slot,
+                source_type="delayed_effect",
+                source_id=effect["id"],
+                parent_event_id=effect.get("source_event_id"),
+                rule_version=effect["rule_version"],
+                occurred_at=world_time.isoformat(),
+            )
+            conn.execute(
+                """
+                UPDATE world_delayed_effects
+                SET status = 'applied', attempts = attempts + 1,
+                    applied_event_id = ?, applied_at = ?, last_error = ''
+                WHERE id = ?
+                """,
+                (event["id"], world_time.isoformat(), effect["id"]),
+            )
+            conn.execute("RELEASE SAVEPOINT delayed_effect_apply")
+            applied.append({"id": effect["id"], "event_id": event["id"], "result": result})
+        except Exception as exc:
+            conn.execute("ROLLBACK TO SAVEPOINT delayed_effect_apply")
+            conn.execute("RELEASE SAVEPOINT delayed_effect_apply")
+            attempts = int(effect.get("attempts") or 0) + 1
+            conn.execute(
+                """
+                UPDATE world_delayed_effects
+                SET status = ?, attempts = ?, last_error = ?
+                WHERE id = ?
+                """,
+                ("failed" if attempts >= 3 else "pending", attempts, str(exc)[:240], effect["id"]),
+            )
+            failed.append({"id": effect["id"], "error": str(exc)})
+    return {"due_count": len(rows), "applied": applied, "failed": failed}
 
 
 def get_recent_observer_focus(conn, minutes=10):
@@ -4883,11 +5525,105 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
     title = f"{agent['name']}正在{destination}行动"
 
     try:
+        action_execution = begin_world_action_execution(
+            conn,
+            agent["id"],
+            action,
+            destination,
+            world_time,
+            tick_id=tick_id,
+            parent_event_id=parent_event_id,
+            settlement_mode="active" if step.get("plan_state") == "due" else "passive",
+        )
+        if action_execution["status"] in {"rejected", "failed"}:
+            if action_execution["status"] == "failed":
+                settlement = settle_world_action_resources(conn, action_execution, success=False)
+                event_type = "agent_action_failed"
+                title = f"{agent['name']}的行动未成功"
+            else:
+                settlement = finalize_rejected_action_execution(conn, action_execution)
+                event_type = "agent_action_rejected"
+                title = f"{agent['name']}的行动条件不足"
+            content = (
+                f"{agent['name']}未能执行 {action}：{action_execution['failure_reason']}。"
+                "本次结算保留了结构化失败原因，Agent 可在后续 tick 选择替代行动。"
+            )
+            execution = {
+                "action": action,
+                "result": {"description": content},
+                "success": False,
+                "failure_code": action_execution["failure_code"],
+                "causal_settlement": settlement,
+                "plan_step": step,
+                "runtime_decision": decision,
+            }
+            state_after = get_agent_module_state(conn, agent["id"])
+            event = append_world_event(
+                conn,
+                event_type,
+                title,
+                content,
+                tick_id=tick_id,
+                resident_id=agent["id"],
+                location=destination if destination in VALID_LOCATIONS else agent["location"],
+                payload={
+                    "action": action,
+                    "goal": goal,
+                    "failure_code": action_execution["failure_code"],
+                    "failure_reason": action_execution["failure_reason"],
+                    "preconditions": action_execution["preconditions"],
+                    "action_execution_id": action_execution["id"],
+                    "causal_settlement": settlement,
+                },
+                day=day,
+                slot=slot,
+                source_type="world_action_execution",
+                source_id=action_execution["id"],
+                parent_event_id=parent_event_id,
+                rule_version=action_execution["rule"]["rule_version"],
+            )
+            link_action_execution_event(conn, action_execution["id"], event["id"])
+            record_simulation_log(
+                conn,
+                agent["id"],
+                perception,
+                {
+                    "decision": {
+                        "action": action,
+                        "reason": decision.get("reason") or goal,
+                        "tool_input": {"destination": destination},
+                    },
+                    "memory_context": {"memories": []},
+                },
+                execution,
+                {},
+                state_before,
+                state_after,
+                tick_id=tick_id,
+            )
+            add_memory_once(
+                conn,
+                agent["id"],
+                day,
+                content,
+                importance=2,
+                source="world_action_settlement",
+            )
+            conn.commit()
+            return {
+                "resident_id": agent["id"],
+                "success": True,
+                "action_success": False,
+                "event": event,
+                "action_execution_id": action_execution["id"],
+                "plan_outcome": None,
+            }
+
         if action == "move" and destination in VALID_LOCATIONS and destination != agent["location"]:
-            result = move_resident(conn, agent["id"], destination)
+            result = move_resident(conn, agent["id"], destination, commit=False)
             content = result["description"]
         elif action in {"attend_class", "queue", "consume", "rest", "club_activity", "request_leave", "collaborate", "conflict", "late"} and destination in VALID_LOCATIONS and destination != agent["location"]:
-            move_resident(conn, agent["id"], destination)
+            move_resident(conn, agent["id"], destination, commit=False)
             agent = dict(agent)
             agent["location"] = destination
             content, _, social_effect = describe_runtime_action(conn, agent, action, destination, goal, day, observed=observed)
@@ -4896,18 +5632,9 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
         execution = {"action": action, "result": {"description": content}, "success": True, "plan_step": step, "runtime_decision": decision}
         if "social_effect" in locals() and social_effect:
             execution["social_effect"] = social_effect
+        settlement = settle_world_action_resources(conn, action_execution, success=True)
+        execution["causal_settlement"] = settlement
         state_after = get_agent_module_state(conn, agent["id"])
-        action_log_id = record_simulation_log(
-            conn,
-            agent["id"],
-            perception,
-            {"decision": {"action": action, "reason": decision.get("reason") or goal, "tool_input": {"destination": destination}}, "memory_context": {"memories": []}},
-            execution,
-            {},
-            state_before,
-            state_after,
-            tick_id=tick_id,
-        )
         conn.execute(
             """
             UPDATE agent_profiles
@@ -4933,13 +5660,42 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
                 "runtime_decision": decision,
                 "social_effect": execution.get("social_effect"),
                 "action_taxonomy": "world-runtime-v3",
+                "action_execution_id": action_execution["id"],
+                "preconditions": action_execution["preconditions"],
+                "causal_settlement": settlement,
             },
             day=day,
             slot=slot,
-            source_type="agent_action",
-            source_id=action_log_id,
+            source_type="world_action_execution",
+            source_id=action_execution["id"],
             parent_event_id=parent_event_id,
-            rule_version="world-runtime-v3",
+            rule_version=action_execution["rule"]["rule_version"],
+        )
+        link_action_execution_event(conn, action_execution["id"], event["id"])
+        delayed_effect_ids = enqueue_world_delayed_effects(
+            conn,
+            action_execution,
+            event["id"],
+            world_time,
+        )
+        execution["delayed_effect_ids"] = delayed_effect_ids
+        record_simulation_log(
+            conn,
+            agent["id"],
+            perception,
+            {
+                "decision": {
+                    "action": action,
+                    "reason": decision.get("reason") or goal,
+                    "tool_input": {"destination": destination},
+                },
+                "memory_context": {"memories": []},
+            },
+            execution,
+            {},
+            state_before,
+            state_after,
+            tick_id=tick_id,
         )
         plan_outcome = record_plan_outcome(
             conn,
@@ -5364,6 +6120,13 @@ def advance_world_tick(reason="background"):
                 """,
                 (world_time.isoformat(), world_time.isoformat(), WORLD_RUNTIME_ID),
             )
+            delayed_effects = process_due_world_delayed_effects(
+                conn,
+                world_time,
+                tick_id=tick_id,
+                day=day,
+                slot=slot,
+            )
             weather_sync = maybe_auto_sync_real_weather(conn, world_time, tick_id=tick_id, day=day, slot=slot)
             if not weather_sync.get("skipped") and not weather_sync.get("failed"):
                 env = get_campus_environment(conn, day)
@@ -5382,6 +6145,11 @@ def advance_world_tick(reason="background"):
                     "weather": env.get("weather"),
                     "weather_sync": weather_sync,
                     "external_sync": compact_external_sync_result(external_sync),
+                    "delayed_effects": {
+                        "due_count": delayed_effects["due_count"],
+                        "applied_count": len(delayed_effects["applied"]),
+                        "failed_count": len(delayed_effects["failed"]),
+                    },
                     "day_sync": day_sync,
                 },
                 day=day,
@@ -5401,9 +6169,9 @@ def advance_world_tick(reason="background"):
                     tick_id,
                     day,
                     slot,
-                    observed=agent["id"] in focused_set,
-                    parent_event_id=start_event["id"],
-                )
+            observed=agent["id"] in focused_set,
+            parent_event_id=start_event["id"],
+        )
                 results.append(item)
                 if not item["success"]:
                     failed += 1
@@ -5668,6 +6436,9 @@ SNAPSHOT_STATE_TABLES = {
     "world_runtime": "id",
     "campus_schedule_rules": "id",
     "world_causal_weights": "id",
+    "world_action_rules": "id",
+    "world_delayed_effects": "due_at, id",
+    "world_resource_accounts": "id",
 }
 
 
@@ -5676,7 +6447,10 @@ def capture_objective_world_state(conn):
     ensure_space_system(conn)
     state = {}
     for table_name, order_by in SNAPSHOT_STATE_TABLES.items():
-        rows = conn.execute(f"SELECT * FROM {table_name} ORDER BY {order_by}").fetchall()
+        where_clause = " WHERE status = 'pending'" if table_name == "world_delayed_effects" else ""
+        rows = conn.execute(
+            f"SELECT * FROM {table_name}{where_clause} ORDER BY {order_by}"
+        ).fetchall()
         state[table_name] = [dict(row) for row in rows]
     return state
 
@@ -5949,6 +6723,77 @@ def create_world_snapshot_api(
         )
         conn.commit()
         return {"snapshot": snapshot, "event": event}
+
+
+@app.get("/api/world/action-rules")
+def list_world_action_rules():
+    with get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        rows = conn.execute(
+            """
+            SELECT * FROM world_action_rules
+            WHERE status = 'active'
+            ORDER BY action_type
+            """
+        ).fetchall()
+        return {"action_rules": [decode_world_action_rule(row) for row in rows]}
+
+
+@app.get("/api/world/action-executions")
+def list_world_action_executions(
+    resident_id: Optional[int] = None,
+    status: str = "",
+    limit: int = 50,
+):
+    limit = max(1, min(limit, 200))
+    with get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        rows = conn.execute(
+            """
+            SELECT * FROM world_action_executions
+            WHERE (? IS NULL OR resident_id = ?)
+              AND (? = '' OR status = ?)
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (resident_id, resident_id, status, status, limit),
+        ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            for key, fallback in (
+                ("precondition_results_json", []),
+                ("resources_before_json", {}),
+                ("resources_after_json", {}),
+                ("resource_costs_json", {}),
+                ("direct_effects_json", []),
+                ("delayed_effect_ids_json", []),
+            ):
+                item[key.removesuffix("_json")] = load_json_text(item.pop(key, ""), fallback)
+            items.append(item)
+        return {"action_executions": items}
+
+
+@app.get("/api/world/delayed-effects")
+def list_world_delayed_effects(status: str = "", limit: int = 50):
+    limit = max(1, min(limit, 200))
+    with get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        rows = conn.execute(
+            """
+            SELECT * FROM world_delayed_effects
+            WHERE (? = '' OR status = ?)
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (status, status, limit),
+        ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["value"] = load_json_text(item.pop("value_json", ""), None)
+            items.append(item)
+        return {"delayed_effects": items}
 
 
 @app.get("/api/world/events")
