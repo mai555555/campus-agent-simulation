@@ -6406,6 +6406,7 @@ def _life_course_episodes(timeline):
             "locations": [], "evidence": [], "event_count": 0, "repeat_count": 0,
             "planned_actions": [], "actual_actions": [], "deviations": [],
             "feedback": [], "memories": [], "state_before": None, "state_after": None,
+            "reasons": [],
         })
         episode["event_ids"].append(event.get("id"))
         episode["event_count"] += 1
@@ -6420,6 +6421,9 @@ def _life_course_episodes(timeline):
         if actual and actual not in episode["actual_actions"]: episode["actual_actions"].append(actual)
         if planned and actual and planned != actual:
             episode["deviations"].append({"planned": planned, "actual": actual, "reason": decision.get("reason", "")})
+        reason = str(decision.get("reason") or event.get("content") or "").strip()
+        if reason and reason not in episode["reasons"] and event.get("source") != "memories":
+            episode["reasons"].append(reason)
         if event.get("location") and event["location"] not in episode["locations"]: episode["locations"].append(event["location"])
         if event.get("environment_feedback"): episode["feedback"].append(event["environment_feedback"])
         if event.get("source") == "memories": episode["memories"].append(event.get("content", ""))
@@ -6442,6 +6446,7 @@ def _life_course_episodes(timeline):
         if episode["memories"]: impact_parts.append(f"形成 {len(episode['memories'])} 条后续记忆")
         if feedback_keys: impact_parts.append("环境反馈：" + "、".join(feedback_keys[:4]))
         episode["narrative"] = {"intention": "、".join(_life_course_action_label(item) for item in episode["planned_actions"][:4]) or "未记录计划", "actual": "、".join(_life_course_action_label(item) for item in episode["actual_actions"][:4]) or "未记录行动", "deviation_count": len(episode["deviations"]), "memory_count": len(episode["memories"]), "feedback_count": len(episode["feedback"])}
+        episode["narrative"]["reasons"] = episode["reasons"][:3]
         episode["impact"] = {"state_changes": changes, "interpretation": "；".join(impact_parts) + "。这些是时序上观察到的结果，不代表已证明因果关系。" if impact_parts else "当前片段暂无可观测的后续状态变化。"}
         episodes.append(episode)
     return episodes
