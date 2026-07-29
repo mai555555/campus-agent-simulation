@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
@@ -9,6 +10,17 @@ from sqlalchemy.engine import Engine
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "city.db"
+DEFAULT_DATABASE_SCHEMA = "public"
+
+
+def get_database_schema() -> str:
+    schema = os.getenv("DATABASE_SCHEMA", DEFAULT_DATABASE_SCHEMA).strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", schema):
+        raise ValueError(
+            "DATABASE_SCHEMA must start with a letter or underscore and contain "
+            "only letters, numbers, and underscores."
+        )
+    return schema
 
 
 def get_database_url() -> str:
@@ -37,6 +49,15 @@ def create_database_engine(database_url: str | None = None) -> Engine:
     engine = create_engine(url, **options)
     if engine.dialect.name == "sqlite":
         event.listen(engine, "connect", _enable_sqlite_foreign_keys)
+    elif engine.dialect.name == "postgresql":
+        schema = get_database_schema()
+        event.listen(
+            engine,
+            "connect",
+            lambda connection, _record: _set_postgres_search_path(
+                connection, schema
+            ),
+        )
     return engine
 
 
@@ -44,5 +65,13 @@ def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("PRAGMA foreign_keys = ON")
+    finally:
+        cursor.close()
+
+
+def _set_postgres_search_path(dbapi_connection, schema: str) -> None:
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute(f'SET search_path TO "{schema}"')
     finally:
         cursor.close()

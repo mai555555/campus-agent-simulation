@@ -5,10 +5,15 @@ from pathlib import Path
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
-from app.db.engine import PROJECT_ROOT, create_database_engine, get_database_url
+from app.db.engine import (
+    PROJECT_ROOT,
+    create_database_engine,
+    get_database_schema,
+    get_database_url,
+)
 
 
 BASELINE_REVISION = "20260729_0001"
@@ -33,6 +38,7 @@ def get_alembic_config(database_url: str | None = None) -> Config:
     resolved_url = database_url or get_database_url()
     config.set_main_option("sqlalchemy.url", resolved_url.replace("%", "%%"))
     config.attributes["database_url"] = resolved_url
+    config.attributes["database_schema"] = get_database_schema()
     return config
 
 
@@ -49,10 +55,34 @@ def get_head_revision(config: Config | None = None) -> str:
 
 
 def list_business_tables(engine: Engine) -> list[str]:
+    schema = get_database_schema() if engine.dialect.name == "postgresql" else None
     return sorted(
-        name for name in inspect(engine).get_table_names() if name != "alembic_version"
+        name
+        for name in inspect(engine).get_table_names(schema=schema)
+        if name != "alembic_version"
     )
 
 
 def create_migration_engine(database_url: str | None = None) -> Engine:
     return create_database_engine(database_url)
+
+
+def describe_database_target(engine: Engine) -> dict:
+    with engine.connect() as connection:
+        if engine.dialect.name == "postgresql":
+            row = connection.execute(
+                text(
+                    "SELECT current_database() AS database_name, "
+                    "current_schema() AS schema_name"
+                )
+            ).mappings().one()
+            return {
+                "dialect": "postgresql",
+                "database": row["database_name"],
+                "schema": row["schema_name"],
+            }
+        return {
+            "dialect": engine.dialect.name,
+            "database": str(engine.url.database or ""),
+            "schema": "",
+        }
