@@ -112,8 +112,20 @@ flowchart TD
 - `ensure_social_system_tables()`
 - `ensure_external_information_system()`
 - `ensure_memory_columns()`
+- `ensure_world_runtime_tables()`：同时补齐环境配置、事件谱系、实验运行和世界快照字段
 
 这些函数会创建表，并对缺失列执行 `ALTER TABLE`。目前没有 Alembic 这类正式 migration 系统。
+
+## 阶段 0 环境底座
+
+World Runtime 已开始绑定版本化环境配置：
+
+- `environment_configs` 保存配置正文、父版本、版本号和 SHA-256 校验和。
+- `world_runtime.environment_config_id`、`environment_version` 和 `random_seed` 标识当前运行条件。
+- `world_event_stream` 使用 `source_type`、`source_id`、`parent_event_id`、`root_event_id` 和 `rule_version` 保存事件谱系。
+- `world_snapshots` 保存客观状态、配置版本、随机种子、外部数据版本和事件游标。
+
+快照当前用于审计和后续回放基础，尚未实现从快照恢复数据库或创建隔离世界分支。
 
 ## 前端结构
 

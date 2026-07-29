@@ -12,7 +12,7 @@ DB_PATH = Path(os.getenv("DB_PATH", str(DATA_DIR / "city.db")))
 POSTGRES_ID_TABLES = {
     "agent_action_plans", "agent_learning", "agent_news_posts", "campus_events",
     "agent_commitments", "agent_goals", "calibration_observations",
-    "calibration_reports", "campus_schedule_rules",
+    "calibration_reports", "campus_schedule_rules", "environment_configs",
     "city_events", "collaborations", "competitions", "external_information",
     "goal_dependencies", "goal_revisions", "group_goals", "inventory",
     "long_term_goals", "memories", "model_call_logs", "observer_sessions",

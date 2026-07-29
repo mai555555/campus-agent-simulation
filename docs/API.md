@@ -18,6 +18,10 @@
 | GET | `/api/state` | 世界总快照：天数、环境、空间、Agent、事件、六模块状态 |
 | GET | `/api/world/runtime` | 世界运行器状态、世界时间、最新 tick、模型预算 |
 | GET | `/api/world/events?after_id=0&limit=50` | 统一实时事件流，支持按 id 增量读取 |
+| GET | `/api/world/environment-config` | 当前生效的完整环境配置、版本和校验和 |
+| GET | `/api/world/environment-configs` | 环境配置版本列表 |
+| GET | `/api/world/snapshots` | 世界快照元数据列表，不返回完整状态 |
+| GET | `/api/world/snapshots/{snapshot_id}?include_state=true` | 快照详情；按需返回完整客观状态 |
 | POST | `/api/world/observer-sessions` | 创建或更新观察者会话，记录关注 Agent/地点 |
 | GET | `/api/agents` | Agent 列表 |
 | GET | `/api/residents` | 同 `/api/agents` |
@@ -52,6 +56,9 @@ Authorization: Bearer 你的_ADMIN_TOKEN
 | POST | `/api/admin/world/start` | 启动后台 world runner |
 | POST | `/api/admin/world/pause` | 暂停后台 world runner |
 | POST | `/api/admin/world/tick` | 手动推进一个 tick |
+| POST | `/api/admin/world/environment-configs` | 创建环境配置版本，可选择立即激活 |
+| POST | `/api/admin/world/environment-configs/{config_id}/activate` | 激活配置并应用空间与环境基线 |
+| POST | `/api/admin/world/snapshots` | 创建带配置、随机种子和事件游标的世界快照 |
 | POST | `/api/admin/events/trigger` | 注入 admin 世界事件，可选影响校园空间 |
 
 手动 tick 示例：
@@ -60,6 +67,17 @@ Authorization: Bearer 你的_ADMIN_TOKEN
 curl -X POST http://127.0.0.1:8000/api/admin/world/tick \
   -H 'Authorization: Bearer 你的_ADMIN_TOKEN'
 ```
+
+创建快照示例：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/admin/world/snapshots \
+  -H 'Authorization: Bearer 你的_ADMIN_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"政策实验前","branch_key":"control","external_data_version":"snapshot-20260729"}'
+```
+
+环境配置至少包含 `campus`、`spaces`、`population`、`institutions`、`economy` 和 `external_context`。当前版本的 `spaces` 必须覆盖现有七个 runtime 地点；激活时会更新容量、开放时间与状态，并应用 `environment_baseline` 中允许修改的字段。自定义地点、人口和组织生成仍属于后续阶段。
 
 注入事件示例：
 

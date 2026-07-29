@@ -1,4 +1,5 @@
 import json
+import hashlib
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 import random
@@ -122,7 +123,9 @@ from app.schema import (
     CAMPUS_STATE_SQL, SPACE_SYSTEM_SQL, DEFAULT_SPACES, DEFAULT_ENV, ENV_COLUMN_TYPES,
     AGENT_NEWS_SQL, AGENT_NEWS_COLUMN_TYPES, EXTERNAL_INFORMATION_SQL, AGENT_PROFILE_SQL, PROFILE_COLUMN_TYPES,
 SOCIAL_SYSTEM_SQL, BEHAVIOR_SYSTEM_SQL, RELATIONSHIP_DYNAMIC_COLUMNS,
-    LONG_TERM_GOAL_COLUMNS, AGENT_INFORMATION_COLUMNS, WORLD_RUNTIME_SQL, RESEARCH_SYSTEM_SQL
+    LONG_TERM_GOAL_COLUMNS, AGENT_INFORMATION_COLUMNS, WORLD_RUNTIME_SQL, RESEARCH_SYSTEM_SQL,
+    WORLD_RUNTIME_COLUMNS, WORLD_EVENT_STREAM_COLUMNS, WORLD_SNAPSHOT_COLUMNS,
+    EXPERIMENT_RUN_COLUMNS,
 )
 
 
@@ -2232,6 +2235,25 @@ class CalibrationObservationRequest(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 
+class EnvironmentConfigRequest(BaseModel):
+    config_key: str = Field(min_length=1, max_length=80)
+    name: str = Field(min_length=1, max_length=120)
+    config: dict
+    parent_config_id: Optional[int] = None
+    created_by: str = Field(default="admin", max_length=80)
+    activate: bool = False
+
+
+class WorldSnapshotRequest(BaseModel):
+    reason: str = Field(default="manual checkpoint", max_length=240)
+    snapshot_type: str = Field(default="manual_checkpoint", max_length=60)
+    run_id: str = Field(default="", max_length=120)
+    branch_key: str = Field(default="main", max_length=80)
+    parent_snapshot_id: Optional[int] = None
+    external_data_version: str = Field(default="", max_length=120)
+    metadata: dict = Field(default_factory=dict)
+
+
 def row_to_dict(row):
     return dict(row) if row else None
 
@@ -2277,6 +2299,13 @@ def ensure_external_information_system(conn):
             conn.execute(f"ALTER TABLE agent_information ADD COLUMN {column} {column_type}")
 
 
+def ensure_table_columns(conn, table_name, column_types):
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    for column, column_type in column_types.items():
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column} {column_type}")
+
+
 def ensure_world_runtime_tables(conn):
     global WORLD_SCHEMA_READY
     if WORLD_SCHEMA_READY:
@@ -2287,7 +2316,24 @@ def ensure_world_runtime_tables(conn):
         ensure_social_system_tables(conn)
         conn.executescript(WORLD_RUNTIME_SQL)
         conn.executescript(RESEARCH_SYSTEM_SQL)
+        ensure_table_columns(conn, "world_runtime", WORLD_RUNTIME_COLUMNS)
+        ensure_table_columns(conn, "world_event_stream", WORLD_EVENT_STREAM_COLUMNS)
+        ensure_table_columns(conn, "world_snapshots", WORLD_SNAPSHOT_COLUMNS)
+        ensure_table_columns(conn, "experiment_runs", EXPERIMENT_RUN_COLUMNS)
+        conn.execute(
+            """
+            UPDATE world_event_stream
+            SET root_event_id = id,
+                occurred_at = CASE WHEN occurred_at = '' THEN created_at ELSE occurred_at END
+            WHERE root_event_id IS NULL
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_world_event_stream_parent ON world_event_stream(parent_event_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_world_event_stream_root ON world_event_stream(root_event_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_world_event_stream_source ON world_event_stream(source_type, source_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_world_snapshots_parent ON world_snapshots(parent_snapshot_id)")
         seed_world_runtime_rules(conn)
+        default_config = seed_default_environment_config(conn)
         now = datetime.now(WORLD_TZ).isoformat()
         budget_date = now[:10]
         conn.execute(
@@ -2305,6 +2351,16 @@ def ensure_world_runtime_tables(conn):
             WHERE id = ? AND daily_auto_model_budget < 500
             """,
             (WORLD_RUNTIME_ID,),
+        )
+        conn.execute(
+            """
+            UPDATE world_runtime
+            SET environment_config_id = COALESCE(environment_config_id, ?),
+                environment_version = CASE WHEN environment_version = '' THEN ? ELSE environment_version END,
+                random_seed = CASE WHEN random_seed = '' THEN 'campus-default-seed-v1' ELSE random_seed END
+            WHERE id = ?
+            """,
+            (default_config["id"], environment_version_label(default_config), WORLD_RUNTIME_ID),
         )
         seed_agent_personality_traits(conn)
         WORLD_SCHEMA_READY = True
@@ -2330,6 +2386,273 @@ def seed_world_runtime_rules(conn):
             """,
             weight,
         )
+
+
+def canonical_json(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def content_checksum(value):
+    text = value if isinstance(value, str) else canonical_json(value)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def default_environment_config():
+    spaces = [
+        {
+            "code": code,
+            "name": name,
+            "location": location,
+            "capacity": capacity,
+            "open_hour": open_hour,
+            "close_hour": close_hour,
+            "status": status,
+            "crowd_field": crowd_field,
+            "purpose": purpose,
+        }
+        for code, name, location, capacity, open_hour, close_hour, status, crowd_field, purpose in DEFAULT_SPACES
+    ]
+    return {
+        "schema_version": "environment-config-v1",
+        "campus": {
+            "key": "campus-default",
+            "name": "默认校园平行世界",
+            "school_type": "综合校园",
+            "timezone": WORLD_TIMEZONE,
+            "semester_system": "term",
+        },
+        "spaces": spaces,
+        "population": {
+            "initial_size": 20,
+            "role_mix": {"student": 0.70, "teacher": 0.10, "business": 0.10, "service": 0.10},
+            "generation_mode": "seeded_profiles",
+        },
+        "institutions": {
+            "access_policy": "campus-default-v1",
+            "schedule_rule_version": "campus-schedule-v1",
+            "organizations": ["教学系统", "校务系统", "学生社团", "校园商业"],
+        },
+        "economy": {
+            "currency": "campus_credit",
+            "price_baseline": 1.0,
+            "resource_abundance": 0.65,
+            "ledger_mode": "legacy-transactions",
+        },
+        "external_context": {
+            "city": "成都",
+            "culture": "campus-local",
+            "policy_context": "baseline",
+            "external_data_mode": "live",
+        },
+        "environment_baseline": {
+            key: value
+            for key, value in DEFAULT_ENV.items()
+            if key not in {"real_date", "real_time", "weather_observed_at"}
+        },
+        "rules": {
+            "world_rule_version": "world-runtime-v1",
+            "causal_weight_version": "causal-weights-v1",
+            "action_taxonomy": "world-runtime-v3",
+        },
+    }
+
+
+def validate_environment_config(config):
+    if not isinstance(config, dict):
+        raise ValueError("环境配置必须是 JSON 对象")
+    required = {"campus", "spaces", "population", "institutions", "economy", "external_context"}
+    missing = sorted(required - set(config))
+    if missing:
+        raise ValueError(f"环境配置缺少字段：{', '.join(missing)}")
+    for section in required - {"spaces"}:
+        if not isinstance(config[section], dict):
+            raise ValueError(f"环境配置字段 {section} 必须是对象")
+    if not isinstance(config["spaces"], list) or not config["spaces"]:
+        raise ValueError("环境配置至少需要一个空间")
+    codes = set()
+    locations = set()
+    for space in config["spaces"]:
+        if not isinstance(space, dict):
+            raise ValueError("空间配置必须是对象")
+        code = str(space.get("code") or "").strip()
+        location = str(space.get("location") or "").strip()
+        if not code or not location:
+            raise ValueError("每个空间必须包含 code 和 location")
+        if code in codes or location in locations:
+            raise ValueError("空间 code 和 location 必须唯一")
+        codes.add(code)
+        locations.add(location)
+        try:
+            capacity = int(space.get("capacity"))
+            open_hour = int(space.get("open_hour"))
+            close_hour = int(space.get("close_hour"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("空间容量和开放时间必须是整数") from exc
+        if capacity <= 0 or not 0 <= open_hour <= 24 or not 0 <= close_hour <= 24:
+            raise ValueError("空间容量必须大于 0，开放时间必须在 0-24 之间")
+    expected_locations = set(VALID_LOCATIONS)
+    if locations != expected_locations:
+        missing_locations = sorted(expected_locations - locations)
+        unsupported_locations = sorted(locations - expected_locations)
+        details = []
+        if missing_locations:
+            details.append(f"缺少地点：{', '.join(missing_locations)}")
+        if unsupported_locations:
+            details.append(f"当前 runtime 尚不支持：{', '.join(unsupported_locations)}")
+        raise ValueError("当前环境配置必须覆盖七个 runtime 地点；" + "；".join(details))
+    baseline = config.get("environment_baseline", {})
+    if baseline is not None and not isinstance(baseline, dict):
+        raise ValueError("environment_baseline 必须是对象")
+    unknown_baseline = sorted(set(baseline or {}) - set(ENV_COLUMN_TYPES))
+    if unknown_baseline:
+        raise ValueError(f"environment_baseline 包含未知字段：{', '.join(unknown_baseline)}")
+    return config
+
+
+def environment_version_label(config_row):
+    return f"{config_row['config_key']}@{config_row['version']}:{config_row['checksum'][:12]}"
+
+
+def decode_environment_config(row):
+    item = dict(row)
+    item["config"] = load_json_text(item.pop("config_json", "{}"), {})
+    item["version_label"] = environment_version_label(item)
+    return item
+
+
+def seed_default_environment_config(conn):
+    config = default_environment_config()
+    checksum = content_checksum(config)
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO environment_configs
+        (config_key, name, version, status, config_json, checksum, created_by)
+        VALUES ('campus-default', '默认校园平行世界', 1, 'active', ?, ?, 'system')
+        """,
+        (canonical_json(config), checksum),
+    )
+    row = conn.execute(
+        """
+        SELECT * FROM environment_configs
+        WHERE config_key = 'campus-default' AND version = 1
+        """
+    ).fetchone()
+    return dict(row)
+
+
+def get_active_environment_config(conn):
+    row = conn.execute(
+        """
+        SELECT c.*
+        FROM environment_configs c
+        JOIN world_runtime w ON w.environment_config_id = c.id
+        WHERE w.id = ?
+        """,
+        (WORLD_RUNTIME_ID,),
+    ).fetchone()
+    if not row:
+        row = conn.execute(
+            "SELECT * FROM environment_configs WHERE status = 'active' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    return decode_environment_config(row) if row else None
+
+
+def create_environment_config_record(conn, config_key, name, config, parent_config_id=None, created_by="admin"):
+    config_key = str(config_key or "").strip()
+    name = str(name or "").strip()
+    if not config_key or not name:
+        raise ValueError("环境配置 key 和名称不能为空")
+    validate_environment_config(config)
+    if parent_config_id:
+        parent = conn.execute("SELECT id FROM environment_configs WHERE id = ?", (parent_config_id,)).fetchone()
+        if not parent:
+            raise ValueError("父环境配置不存在")
+    row = conn.execute(
+        "SELECT COALESCE(MAX(version), 0) AS value FROM environment_configs WHERE config_key = ?",
+        (config_key,),
+    ).fetchone()
+    version = int(row["value"] or 0) + 1
+    checksum = content_checksum(config)
+    cursor = conn.execute(
+        """
+        INSERT INTO environment_configs
+        (config_key, name, version, parent_config_id, status, config_json, checksum, created_by)
+        VALUES (?, ?, ?, ?, 'draft', ?, ?, ?)
+        """,
+        (
+            config_key,
+            name,
+            version,
+            parent_config_id,
+            canonical_json(config),
+            checksum,
+            created_by,
+        ),
+    )
+    return decode_environment_config(
+        conn.execute("SELECT * FROM environment_configs WHERE id = ?", (cursor.lastrowid,)).fetchone()
+    )
+
+
+def apply_environment_config(conn, config_row):
+    config = load_json_text(config_row["config_json"], {})
+    validate_environment_config(config)
+    ensure_campus_state_table(conn)
+    ensure_space_system(conn)
+    for space in config["spaces"]:
+        conn.execute(
+            """
+            INSERT INTO campus_spaces
+            (code, name, location, capacity, open_hour, close_hour, status, crowd_field, purpose)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(code) DO UPDATE SET
+                name = excluded.name,
+                location = excluded.location,
+                capacity = excluded.capacity,
+                open_hour = excluded.open_hour,
+                close_hour = excluded.close_hour,
+                status = excluded.status,
+                crowd_field = excluded.crowd_field,
+                purpose = excluded.purpose,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                space["code"],
+                space.get("name") or space["location"],
+                space["location"],
+                int(space["capacity"]),
+                int(space["open_hour"]),
+                int(space["close_hour"]),
+                space.get("status") or "开放",
+                space.get("crowd_field") or "campus_flow",
+                space.get("purpose") or "",
+            ),
+        )
+    baseline = config.get("environment_baseline")
+    applied_baseline = []
+    if isinstance(baseline, dict):
+        allowed = sorted(set(baseline) & set(ENV_COLUMN_TYPES) - {"real_date", "real_time", "time_source"})
+        if allowed:
+            day = get_current_day(conn)
+            get_campus_environment(conn, day)
+            set_clause = ", ".join(f"{key} = ?" for key in allowed)
+            conn.execute(
+                f"UPDATE campus_state SET {set_clause} WHERE day = ?",
+                [baseline[key] for key in allowed] + [day],
+            )
+            applied_baseline = allowed
+    conn.execute("UPDATE environment_configs SET status = 'archived' WHERE status = 'active'")
+    conn.execute("UPDATE environment_configs SET status = 'active' WHERE id = ?", (config_row["id"],))
+    version_label = environment_version_label(config_row)
+    conn.execute(
+        """
+        UPDATE world_runtime
+        SET environment_config_id = ?, environment_version = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (config_row["id"], version_label, WORLD_RUNTIME_ID),
+    )
+    return {"spaces": len(config["spaces"]), "baseline_fields": applied_baseline}
 
 
 def seed_agent_personality_traits(conn):
@@ -2439,17 +2762,44 @@ def update_world_runtime_status(conn, status):
     return get_world_runtime(conn)
 
 
-def append_world_event(conn, event_type, title, content, tick_id=None, resident_id=None, location="", payload=None, day=None, slot=None, ensure_schema=True):
+def append_world_event(
+    conn,
+    event_type,
+    title,
+    content,
+    tick_id=None,
+    resident_id=None,
+    location="",
+    payload=None,
+    day=None,
+    slot=None,
+    ensure_schema=True,
+    source_type="runtime",
+    source_id="",
+    parent_event_id=None,
+    root_event_id=None,
+    rule_version="world-runtime-v1",
+    occurred_at=None,
+):
     if ensure_schema:
         ensure_world_runtime_tables(conn)
     now = get_world_now()
     day = day or get_current_day(conn)
     slot = slot or world_slot_from_hour(now.hour)
+    if parent_event_id and not root_event_id:
+        parent = conn.execute(
+            "SELECT id, root_event_id FROM world_event_stream WHERE id = ?",
+            (parent_event_id,),
+        ).fetchone()
+        if not parent:
+            raise ValueError("parent_event_id 不存在")
+        root_event_id = parent["root_event_id"] or parent["id"]
     cursor = conn.execute(
         """
         INSERT INTO world_event_stream
-        (tick_id, day, slot, event_type, resident_id, location, title, content, payload)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (tick_id, day, slot, event_type, resident_id, location, title, content, payload,
+         source_type, source_id, parent_event_id, root_event_id, rule_version, occurred_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             tick_id,
@@ -2461,9 +2811,21 @@ def append_world_event(conn, event_type, title, content, tick_id=None, resident_
             title,
             content,
             json.dumps(payload or {}, ensure_ascii=False),
+            source_type or "runtime",
+            str(source_id or ""),
+            parent_event_id,
+            root_event_id,
+            rule_version or "world-runtime-v1",
+            occurred_at or now.isoformat(),
         ),
     )
     event_id = cursor.lastrowid
+    if not root_event_id:
+        root_event_id = event_id
+        conn.execute(
+            "UPDATE world_event_stream SET root_event_id = ? WHERE id = ?",
+            (event_id, event_id),
+        )
     return dict(conn.execute("SELECT * FROM world_event_stream WHERE id = ?", (event_id,)).fetchone())
 
 
@@ -3447,7 +3809,7 @@ def record_simulation_log(conn, resident_id, perception, decision_data, executio
     """Persist the exact inputs and outcome that explain one autonomous action."""
     ensure_social_system_tables(conn)
     memory_context = decision_data.get("memory_context", {})
-    conn.execute(
+    cursor = conn.execute(
         """
         INSERT INTO simulation_action_logs
         (day, resident_id, tick_id, perception, retrieved_memories, decision, execution,
@@ -3467,6 +3829,7 @@ def record_simulation_log(conn, resident_id, perception, decision_data, executio
             json.dumps(state_after or {}, ensure_ascii=False),
         ),
     )
+    return cursor.lastrowid
 
 
 def run_lifecycle_step(conn, resident_id):
@@ -4507,7 +4870,7 @@ def describe_runtime_action(conn, agent, action, destination, goal, day, observe
     return content, event_type, social_effect
 
 
-def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observed=False):
+def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observed=False, parent_event_id=None):
     state_before = get_agent_module_state(conn, agent["id"])
     plan = get_current_agent_plan(conn, agent["id"], world_time) or {}
     step = choose_plan_step(plan, world_time, agent["location"])
@@ -4534,7 +4897,7 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
         if "social_effect" in locals() and social_effect:
             execution["social_effect"] = social_effect
         state_after = get_agent_module_state(conn, agent["id"])
-        record_simulation_log(
+        action_log_id = record_simulation_log(
             conn,
             agent["id"],
             perception,
@@ -4573,6 +4936,10 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
             },
             day=day,
             slot=slot,
+            source_type="agent_action",
+            source_id=action_log_id,
+            parent_event_id=parent_event_id,
+            rule_version="world-runtime-v3",
         )
         plan_outcome = record_plan_outcome(
             conn,
@@ -4608,6 +4975,10 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
             payload={"error": str(exc), "action": action, "goal": goal},
             day=day,
             slot=slot,
+            source_type="agent_action",
+            source_id=agent["id"],
+            parent_event_id=parent_event_id,
+            rule_version="world-runtime-v3",
         )
         conn.commit()
         return {"resident_id": agent["id"], "success": False, "event": event, "error": str(exc)}
@@ -5015,13 +5386,24 @@ def advance_world_tick(reason="background"):
                 },
                 day=day,
                 slot=slot,
+                source_type="runtime_tick",
+                source_id=tick_id,
             )
             conn.commit()
             selected_agents, next_cursor, focused_set = select_world_tick_agents(conn, runtime)
             results = []
             failed = 0
             for agent in selected_agents:
-                item = process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observed=agent["id"] in focused_set)
+                item = process_world_agent_tick(
+                    conn,
+                    agent,
+                    world_time,
+                    tick_id,
+                    day,
+                    slot,
+                    observed=agent["id"] in focused_set,
+                    parent_event_id=start_event["id"],
+                )
                 results.append(item)
                 if not item["success"]:
                     failed += 1
@@ -5051,6 +5433,9 @@ def advance_world_tick(reason="background"):
                 payload={"started_event_id": start_event["id"], "processed_agents": len(results), "failed_agents": failed},
                 day=day,
                 slot=slot,
+                source_type="runtime_tick",
+                source_id=tick_id,
+                parent_event_id=start_event["id"],
             )
             group_behavior = maybe_generate_group_behavior_event(conn, world_time, tick_id, day, slot)
             campus_news = maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=tick_id, day=day)
@@ -5268,6 +5653,111 @@ def require_admin_token(authorization: Optional[str]):
         raise HTTPException(status_code=403, detail="Admin token 无效或缺失")
 
 
+SNAPSHOT_STATE_TABLES = {
+    "simulation_state": "key",
+    "campus_state": "day",
+    "campus_spaces": "code",
+    "campus_events": "id",
+    "residents": "id",
+    "agent_profiles": "resident_id",
+    "inventory": "id",
+    "transactions": "id",
+    "relationships": "from_resident_id, to_resident_id",
+    "relationship_dynamics": "from_resident_id, to_resident_id",
+    "policies": "id",
+    "world_runtime": "id",
+    "campus_schedule_rules": "id",
+    "world_causal_weights": "id",
+}
+
+
+def capture_objective_world_state(conn):
+    ensure_campus_state_table(conn)
+    ensure_space_system(conn)
+    state = {}
+    for table_name, order_by in SNAPSHOT_STATE_TABLES.items():
+        rows = conn.execute(f"SELECT * FROM {table_name} ORDER BY {order_by}").fetchall()
+        state[table_name] = [dict(row) for row in rows]
+    return state
+
+
+def decode_world_snapshot(row, include_state=False):
+    item = dict(row)
+    item["metadata"] = load_json_text(item.pop("metadata_json", "{}"), {})
+    if include_state:
+        item["state"] = load_json_text(item.pop("state_json", "{}"), {})
+    else:
+        item.pop("state_json", None)
+    return item
+
+
+def create_world_snapshot_record(
+    conn,
+    reason="manual checkpoint",
+    snapshot_type="manual_checkpoint",
+    run_id="",
+    branch_key="main",
+    parent_snapshot_id=None,
+    external_data_version="",
+    metadata=None,
+):
+    ensure_world_runtime_tables(conn)
+    if parent_snapshot_id:
+        parent = conn.execute(
+            "SELECT id FROM world_snapshots WHERE id = ?",
+            (parent_snapshot_id,),
+        ).fetchone()
+        if not parent:
+            raise ValueError("父快照不存在")
+    runtime = dict(
+        conn.execute("SELECT * FROM world_runtime WHERE id = ?", (WORLD_RUNTIME_ID,)).fetchone()
+    )
+    active_config = get_active_environment_config(conn)
+    event_row = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) AS value FROM world_event_stream"
+    ).fetchone()
+    tick_row = conn.execute("SELECT id FROM world_ticks ORDER BY id DESC LIMIT 1").fetchone()
+    state = capture_objective_world_state(conn)
+    state_json = canonical_json(state)
+    event_cursor = int(event_row["value"] or 0)
+    snapshot_metadata = {
+        "table_counts": {name: len(rows) for name, rows in state.items()},
+        "environment_checksum": active_config["checksum"] if active_config else "",
+        **(metadata or {}),
+    }
+    cursor = conn.execute(
+        """
+        INSERT INTO world_snapshots
+        (run_id, snapshot_type, world_time, day, tick_id, reason, state_json,
+         schema_version, environment_config_id, environment_version, random_seed,
+         external_data_version, event_cursor, parent_snapshot_id, branch_key,
+         checksum, metadata_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'world-snapshot-v2', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id or runtime.get("active_run_id") or "",
+            snapshot_type,
+            runtime.get("world_time") or get_world_now().isoformat(),
+            get_current_day(conn),
+            tick_row["id"] if tick_row else None,
+            reason,
+            state_json,
+            runtime.get("environment_config_id"),
+            runtime.get("environment_version") or "",
+            runtime.get("random_seed") or "",
+            external_data_version,
+            event_cursor,
+            parent_snapshot_id,
+            branch_key or "main",
+            content_checksum(state_json),
+            canonical_json(snapshot_metadata),
+        ),
+    )
+    return decode_world_snapshot(
+        conn.execute("SELECT * FROM world_snapshots WHERE id = ?", (cursor.lastrowid,)).fetchone()
+    )
+
+
 def decode_world_event(row):
     event = dict(row)
     event["payload"] = load_json_text(event.get("payload"), {})
@@ -5290,6 +5780,7 @@ def runtime_response(conn):
         "remaining_auto_model_calls": max(0, int(runtime["daily_auto_model_budget"]) - int(runtime["auto_model_calls_used"])),
     }
     runtime["day_sync"] = day_sync
+    runtime["environment_config"] = get_active_environment_config(conn)
     return runtime
 
 
@@ -5297,6 +5788,167 @@ def runtime_response(conn):
 def get_world_runtime_api():
     with get_connection() as conn:
         return runtime_response(conn)
+
+
+@app.get("/api/world/environment-config")
+def get_current_environment_config_api():
+    with get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        return {"environment_config": get_active_environment_config(conn)}
+
+
+@app.get("/api/world/environment-configs")
+def list_environment_configs(limit: int = 50):
+    limit = max(1, min(limit, 200))
+    with get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        rows = conn.execute(
+            """
+            SELECT * FROM environment_configs
+            ORDER BY config_key, version DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return {"environment_configs": [decode_environment_config(row) for row in rows]}
+
+
+@app.post("/api/admin/world/environment-configs")
+def create_environment_config_api(
+    payload: EnvironmentConfigRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    require_admin_token(authorization)
+    with get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        try:
+            config = create_environment_config_record(
+                conn,
+                payload.config_key.strip(),
+                payload.name.strip(),
+                payload.config,
+                parent_config_id=payload.parent_config_id,
+                created_by=payload.created_by.strip() or "admin",
+            )
+            applied = None
+            event = None
+            if payload.activate:
+                row = conn.execute(
+                    "SELECT * FROM environment_configs WHERE id = ?",
+                    (config["id"],),
+                ).fetchone()
+                applied = apply_environment_config(conn, dict(row))
+                event = append_world_event(
+                    conn,
+                    "environment_config_activated",
+                    "环境配置已激活",
+                    f"校园环境切换到《{config['name']}》版本 {config['version']}。",
+                    payload={"environment_config_id": config["id"], "applied": applied},
+                    source_type="admin_configuration",
+                    source_id=config["id"],
+                    rule_version=config["version_label"],
+                )
+                config = get_active_environment_config(conn)
+            conn.commit()
+            return {"environment_config": config, "applied": applied, "event": event}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/admin/world/environment-configs/{config_id}/activate")
+def activate_environment_config_api(
+    config_id: int,
+    authorization: Optional[str] = Header(default=None),
+):
+    require_admin_token(authorization)
+    with get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        row = conn.execute(
+            "SELECT * FROM environment_configs WHERE id = ?",
+            (config_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="环境配置不存在")
+        try:
+            applied = apply_environment_config(conn, dict(row))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        config = get_active_environment_config(conn)
+        event = append_world_event(
+            conn,
+            "environment_config_activated",
+            "环境配置已激活",
+            f"校园环境切换到《{config['name']}》版本 {config['version']}。",
+            payload={"environment_config_id": config_id, "applied": applied},
+            source_type="admin_configuration",
+            source_id=config_id,
+            rule_version=config["version_label"],
+        )
+        conn.commit()
+        return {"environment_config": config, "applied": applied, "event": event}
+
+
+@app.get("/api/world/snapshots")
+def list_world_snapshots(limit: int = 30):
+    limit = max(1, min(limit, 200))
+    with get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        rows = conn.execute(
+            "SELECT * FROM world_snapshots ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return {"snapshots": [decode_world_snapshot(row) for row in rows]}
+
+
+@app.get("/api/world/snapshots/{snapshot_id}")
+def get_world_snapshot_api(snapshot_id: int, include_state: bool = False):
+    with get_connection() as conn:
+        ensure_world_runtime_tables(conn)
+        row = conn.execute(
+            "SELECT * FROM world_snapshots WHERE id = ?",
+            (snapshot_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="世界快照不存在")
+        return {"snapshot": decode_world_snapshot(row, include_state=include_state)}
+
+
+@app.post("/api/admin/world/snapshots")
+def create_world_snapshot_api(
+    payload: WorldSnapshotRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    require_admin_token(authorization)
+    with get_connection() as conn:
+        try:
+            snapshot = create_world_snapshot_record(
+                conn,
+                reason=payload.reason,
+                snapshot_type=payload.snapshot_type,
+                run_id=payload.run_id,
+                branch_key=payload.branch_key,
+                parent_snapshot_id=payload.parent_snapshot_id,
+                external_data_version=payload.external_data_version,
+                metadata=payload.metadata,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        event = append_world_event(
+            conn,
+            "world_snapshot_created",
+            "世界快照已创建",
+            f"已创建快照 #{snapshot['id']}，事件游标为 {snapshot['event_cursor']}。",
+            payload={
+                "snapshot_id": snapshot["id"],
+                "checksum": snapshot["checksum"],
+                "branch_key": snapshot["branch_key"],
+            },
+            source_type="snapshot",
+            source_id=snapshot["id"],
+            rule_version=snapshot["schema_version"],
+        )
+        conn.commit()
+        return {"snapshot": snapshot, "event": event}
 
 
 @app.get("/api/world/events")

@@ -638,8 +638,16 @@ CREATE TABLE IF NOT EXISTS world_event_stream (
     title TEXT NOT NULL,
     content TEXT NOT NULL,
     payload TEXT NOT NULL DEFAULT '{}',
+    source_type TEXT NOT NULL DEFAULT 'runtime',
+    source_id TEXT NOT NULL DEFAULT '',
+    parent_event_id INTEGER,
+    root_event_id INTEGER,
+    rule_version TEXT NOT NULL DEFAULT 'world-runtime-v1',
+    occurred_at TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (resident_id) REFERENCES residents(id) ON DELETE SET NULL
+    FOREIGN KEY (resident_id) REFERENCES residents(id) ON DELETE SET NULL,
+    FOREIGN KEY (parent_event_id) REFERENCES world_event_stream(id) ON DELETE SET NULL,
+    FOREIGN KEY (root_event_id) REFERENCES world_event_stream(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS agent_action_plans (
@@ -769,6 +777,21 @@ CREATE INDEX IF NOT EXISTS idx_calibration_reports_run_id ON calibration_reports
 """
 
 RESEARCH_SYSTEM_SQL = """
+CREATE TABLE IF NOT EXISTS environment_configs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    config_key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    parent_config_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'draft',
+    config_json TEXT NOT NULL DEFAULT '{}',
+    checksum TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT 'system',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(config_key, version),
+    FOREIGN KEY (parent_config_id) REFERENCES environment_configs(id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS experiment_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     experiment_id TEXT NOT NULL DEFAULT '',
@@ -784,6 +807,11 @@ CREATE TABLE IF NOT EXISTS experiment_runs (
     agent_config_version TEXT NOT NULL DEFAULT '',
     model_config_version TEXT NOT NULL DEFAULT '',
     world_rules_version TEXT NOT NULL DEFAULT 'world-runtime-v1',
+    environment_config_id INTEGER,
+    source_snapshot_id INTEGER,
+    parent_run_id TEXT NOT NULL DEFAULT '',
+    branch_key TEXT NOT NULL DEFAULT 'main',
+    event_cursor_start INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'running',
     metadata_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -800,6 +828,15 @@ CREATE TABLE IF NOT EXISTS world_snapshots (
     reason TEXT NOT NULL DEFAULT '',
     state_json TEXT NOT NULL DEFAULT '{}',
     schema_version TEXT NOT NULL DEFAULT 'research-v1',
+    environment_config_id INTEGER,
+    environment_version TEXT NOT NULL DEFAULT '',
+    random_seed TEXT NOT NULL DEFAULT '',
+    external_data_version TEXT NOT NULL DEFAULT '',
+    event_cursor INTEGER NOT NULL DEFAULT 0,
+    parent_snapshot_id INTEGER,
+    branch_key TEXT NOT NULL DEFAULT 'main',
+    checksum TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -817,8 +854,46 @@ CREATE TABLE IF NOT EXISTS research_export_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_experiment_runs_run_id ON experiment_runs(run_id);
 CREATE INDEX IF NOT EXISTS idx_experiment_runs_status ON experiment_runs(status);
+CREATE INDEX IF NOT EXISTS idx_environment_configs_key_version ON environment_configs(config_key, version);
+CREATE INDEX IF NOT EXISTS idx_environment_configs_status ON environment_configs(status);
 CREATE INDEX IF NOT EXISTS idx_world_snapshots_run_id ON world_snapshots(run_id);
 CREATE INDEX IF NOT EXISTS idx_world_snapshots_created_at ON world_snapshots(created_at);
 CREATE INDEX IF NOT EXISTS idx_research_export_jobs_run_id ON research_export_jobs(run_id);
 CREATE INDEX IF NOT EXISTS idx_research_export_jobs_started_at ON research_export_jobs(started_at);
 """
+
+WORLD_RUNTIME_COLUMNS = {
+    "environment_config_id": "INTEGER",
+    "environment_version": "TEXT NOT NULL DEFAULT ''",
+    "random_seed": "TEXT NOT NULL DEFAULT ''",
+    "active_run_id": "TEXT NOT NULL DEFAULT ''",
+}
+
+WORLD_EVENT_STREAM_COLUMNS = {
+    "source_type": "TEXT NOT NULL DEFAULT 'runtime'",
+    "source_id": "TEXT NOT NULL DEFAULT ''",
+    "parent_event_id": "INTEGER",
+    "root_event_id": "INTEGER",
+    "rule_version": "TEXT NOT NULL DEFAULT 'world-runtime-v1'",
+    "occurred_at": "TEXT NOT NULL DEFAULT ''",
+}
+
+WORLD_SNAPSHOT_COLUMNS = {
+    "environment_config_id": "INTEGER",
+    "environment_version": "TEXT NOT NULL DEFAULT ''",
+    "random_seed": "TEXT NOT NULL DEFAULT ''",
+    "external_data_version": "TEXT NOT NULL DEFAULT ''",
+    "event_cursor": "INTEGER NOT NULL DEFAULT 0",
+    "parent_snapshot_id": "INTEGER",
+    "branch_key": "TEXT NOT NULL DEFAULT 'main'",
+    "checksum": "TEXT NOT NULL DEFAULT ''",
+    "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+}
+
+EXPERIMENT_RUN_COLUMNS = {
+    "environment_config_id": "INTEGER",
+    "source_snapshot_id": "INTEGER",
+    "parent_run_id": "TEXT NOT NULL DEFAULT ''",
+    "branch_key": "TEXT NOT NULL DEFAULT 'main'",
+    "event_cursor_start": "INTEGER NOT NULL DEFAULT 0",
+}
