@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 from alembic import command
 
-from app.db import create_database_engine, get_database_url
+from app.db import DB_PATH, create_database_engine, get_database_schema, get_database_url
+from app.db.engine import DEFAULT_DB_PATH
 from app.db.migration_runtime import (
     BASELINE_REQUIRED_TABLES,
     BASELINE_REVISION,
@@ -40,6 +41,24 @@ class DatabaseMigrationFoundationTest(unittest.TestCase):
 
         self.assertTrue(url.startswith("sqlite+pysqlite:////"))
         self.assertTrue(url.endswith("/campus.db"))
+
+    def test_legacy_and_migration_layers_share_default_sqlite_path(self):
+        self.assertEqual(DB_PATH.resolve(), DEFAULT_DB_PATH.resolve())
+
+    def test_database_schema_is_validated(self):
+        with patch.dict(
+            os.environ,
+            {"DATABASE_SCHEMA": "campus_runtime"},
+            clear=False,
+        ):
+            self.assertEqual(get_database_schema(), "campus_runtime")
+        with patch.dict(
+            os.environ,
+            {"DATABASE_SCHEMA": "invalid-schema"},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(ValueError, "DATABASE_SCHEMA"):
+                get_database_schema()
 
     def test_render_postgres_url_uses_psycopg_driver(self):
         with patch.dict(

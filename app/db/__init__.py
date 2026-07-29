@@ -4,10 +4,12 @@ import os
 import re
 from dotenv import load_dotenv
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 load_dotenv(PROJECT_ROOT / ".env")
-DB_PATH = Path(os.getenv("DB_PATH", str(DATA_DIR / "city.db")))
+DB_PATH = Path(os.getenv("DB_PATH", str(DATA_DIR / "city.db"))).expanduser()
+if not DB_PATH.is_absolute():
+    DB_PATH = (PROJECT_ROOT / DB_PATH).resolve()
 
 POSTGRES_ID_TABLES = {
     "agent_action_plans", "agent_learning", "agent_news_posts", "campus_events",
@@ -38,7 +40,7 @@ def _postgres_sql(sql: str) -> str:
     if pragma:
         return (
             "SELECT column_name AS name FROM information_schema.columns "
-            "WHERE table_schema = 'public' AND table_name = %s "
+            "WHERE table_schema = %s AND table_name = %s "
             "ORDER BY ordinal_position"
         )
 
@@ -105,7 +107,12 @@ class PostgresConnection:
     def execute(self, sql: str, params=()):
         statement = _postgres_sql(sql)
         pragma = re.fullmatch(r"PRAGMA table_info\((\w+)\)", sql.strip(), re.IGNORECASE)
-        execute_params = (pragma.group(1),) if pragma else params
+        if pragma:
+            from app.db.engine import get_database_schema
+
+            execute_params = (get_database_schema(), pragma.group(1))
+        else:
+            execute_params = params
         table_match = re.search(r"INSERT\s+(?:OR\s+IGNORE\s+)?INTO\s+(\w+)", sql, re.IGNORECASE)
         table = table_match.group(1).lower() if table_match else ""
         needs_id = table in POSTGRES_ID_TABLES and "RETURNING" not in statement.upper()
@@ -139,13 +146,17 @@ def get_connection():
             from psycopg.rows import dict_row
         except ImportError as exc:
             raise RuntimeError("PostgreSQL support requires psycopg[binary].") from exc
-        return PostgresConnection(
-            psycopg.connect(
-                os.environ["DATABASE_URL"],
-                row_factory=dict_row,
-                prepare_threshold=None,
-            )
+        from app.db.engine import get_database_schema
+
+        connection = psycopg.connect(
+            os.environ["DATABASE_URL"].strip(),
+            row_factory=dict_row,
+            prepare_threshold=None,
         )
+        connection.execute(
+            f'SET search_path TO "{get_database_schema()}"'
+        )
+        return PostgresConnection(connection)
 
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
@@ -160,7 +171,11 @@ def execute_script(sql: str) -> None:
         conn.commit()
 
 
-from app.db.engine import create_database_engine, get_database_url  # noqa: E402
+from app.db.engine import (  # noqa: E402
+    create_database_engine,
+    get_database_schema,
+    get_database_url,
+)
 
 __all__ = [
     "DB_PATH",
@@ -169,5 +184,6 @@ __all__ = [
     "execute_script",
     "get_connection",
     "get_database_url",
+    "get_database_schema",
     "using_postgres",
 ]

@@ -19,6 +19,7 @@ ADMIN_TOKEN=本地_admin_token
 | `LLM_API_KEY` | AI 决策必填 | LLM API Key |
 | `LLM_API_URL` | AI 决策必填 | LLM generateContent 风格接口 |
 | `DATABASE_URL` | 否 | 设置后使用 PostgreSQL；不设置则使用 SQLite |
+| `DATABASE_SCHEMA` | 否 | PostgreSQL schema，默认 `public`；初始化、运行时与 Alembic 必须一致 |
 | `DB_PATH` | 否 | SQLite 文件路径，默认 `data/city.db` |
 | `ADMIN_TOKEN` | 推荐 | World Runtime admin 接口 Bearer token；未设置时本地开发会放行并写 warning |
 | `PORT` | 部署时常用 | Uvicorn 监听端口 |

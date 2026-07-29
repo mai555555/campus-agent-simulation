@@ -16,6 +16,7 @@ from app.db.migration_runtime import (  # noqa: E402
     BASELINE_REQUIRED_TABLES,
     BASELINE_REVISION,
     create_migration_engine,
+    describe_database_target,
     get_alembic_config,
     get_current_revision,
     get_head_revision,
@@ -28,6 +29,7 @@ def migrate_database(check_only: bool = False) -> dict:
     config = get_alembic_config()
     try:
         tables = list_business_tables(engine)
+        target = describe_database_target(engine)
         current = get_current_revision(engine)
         head = get_head_revision(config)
         if check_only:
@@ -36,10 +38,14 @@ def migrate_database(check_only: bool = False) -> dict:
                 "head": head,
                 "business_tables": len(tables),
                 "ready": current == head,
+                "target": target,
             }
         if not tables:
             raise RuntimeError(
-                "Database has no campus schema. Run scripts/init_campus_safe.py "
+                "Database has no campus schema "
+                f"(dialect={target['dialect']}, database={target['database']}, "
+                f"schema={target['schema'] or 'default'}). "
+                "Run scripts/init_campus_safe.py "
                 "and scripts/prepare_legacy_schema.py before the baseline migration."
             )
         if current is None:
@@ -59,6 +65,7 @@ def migrate_database(check_only: bool = False) -> dict:
             "head": head,
             "business_tables": len(tables),
             "ready": current == head,
+            "target": target,
         }
     finally:
         engine.dispose()
@@ -74,7 +81,10 @@ def main() -> None:
     args = parser.parse_args()
     result = migrate_database(check_only=args.check)
     print(
-        f"Database revision {result['current'] or 'unversioned'} / "
+        f"Database target {result['target']['dialect']}:"
+        f"{result['target']['database']}"
+        f"{('/' + result['target']['schema']) if result['target']['schema'] else ''}; "
+        f"revision {result['current'] or 'unversioned'} / "
         f"{result['head']}; tables={result['business_tables']}; "
         f"ready={str(result['ready']).lower()}"
     )
