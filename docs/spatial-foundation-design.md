@@ -1,23 +1,28 @@
-# 空间社会智能第一阶段详细技术设计
+# 阶段 1A：空间真值层详细技术设计
 
 ## 1. 文档状态
 
-- 设计阶段：第一阶段，空间数据与实验基础。
-- 上游路线：`docs/spatial-intelligence-roadmap.md`。
+- 统一阶段：`ENVIRONMENT_REALISM_ROADMAP.md` 阶段 1A。
+- 空间子路线：`docs/spatial-intelligence-roadmap.md` 阶段 1A。
+- 前置状态：统一阶段 0 已完成，现有 environment config、因果执行、事件谱系、多尺度更新、世界快照和分支能力直接复用。
 - 目标分支：后续实现分别使用 `refactor/...`、`feat/...` 和 `fix/...`。
-- 本文档 PR：只包含设计，不修改运行代码、数据库或部署配置。
+- 本文定位：空间真值层的 schema、迁移、服务边界、兼容策略和验收设计。
+- 阶段边界：本阶段先建立空间事实，不提前实现路径规划、排队或局部感知。
+- 实施状态：阶段 1A-1F 已完成开发与本地验证。数据库迁移、空间真值、连续移动、空间资源与准入、身体状态、有限可观测性、空间记忆、个体能力与机会差异和快照恢复已在同一阶段分支内落地；下一步进入阶段 2。
 
-## 2. 第一阶段目标
+## 2. 阶段 1A 目标
 
-第一阶段建立空间社会智能的工程底座，使后续路径规划、连续移动、局部感知和空间实验可以在稳定边界内开发。
+阶段 1A 建立唯一的空间真值与证据底座，使后续路径规划、连续移动、空间准入、有限可观测性和空间实验可以在稳定边界内开发。
 
 本阶段交付：
 
 - 可同时运行于本地 SQLite 和线上 PostgreSQL 的统一数据访问基础。
 - 正式数据库 migration 与回滚流程。
-- 空间节点、空间连接、Agent 空间状态、轨迹和实验批次模型。
+- 空间节点、空间连接、Agent 空间能力、当前空间状态和不可变轨迹模型。
+- 复用现有 `experiment_runs`、`world_snapshots`、`world_branches` 和 runtime 随机种子，不创建第二套实验系统。
 - 从 `app/main.py` 中拆出的空间服务边界。
 - 可查询的校园场景图 API。
+- 空间真值的快照、恢复和分支隔离。
 - 可重复的空间基础测试。
 
 本阶段不交付：
@@ -72,7 +77,7 @@ SQLAlchemy 2 Core
 
 ### 3.3 JSON 与时间
 
-第一阶段采用可移植类型：
+阶段 1A 采用可移植类型：
 
 - JSON 数据使用 SQLAlchemy `JSON` 类型，由方言映射到 SQLite JSON 文本和 PostgreSQL JSON。
 - 暂不依赖 PostgreSQL `JSONB` 查询能力。
@@ -82,10 +87,10 @@ SQLAlchemy 2 Core
 
 ### 3.4 坐标系统
 
-第一阶段使用右手坐标系：
+阶段 1A 使用右手坐标系：
 
 - `x`：校园东西方向。
-- `y`：高度，第一阶段通常为 `0`。
+- `y`：高度，阶段 1A 通常为 `0`。
 - `z`：校园南北方向。
 - 距离单位：米。
 - 时间单位：模拟分钟和 tick。
@@ -176,7 +181,7 @@ PostgreSQL：
 
 ### 6.1 `experiment_runs`
 
-记录一次可独立分析和复现的实验运行。
+复用阶段 0 已建立的 `experiment_runs`。本节描述空间模块需要依赖的字段语义；实现时优先扩展现有表和解码逻辑，不创建同名表或平行运行实体。
 
 | 字段 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
@@ -262,7 +267,29 @@ PostgreSQL：
 | `updated_tick` | Integer | NOT NULL | 最后更新时间 |
 | `version` | Integer | NOT NULL | 乐观锁版本 |
 
-### 6.5 `agent_trajectories`
+### 6.5 `agent_spatial_capabilities`
+
+保存路径和感知机制需要的基础异质性。阶段 1A 定义字段和默认值，阶段 1B、1D、1E 分别启用移动、身体和感知差异。
+
+| 字段 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| `resident_id` | Integer | PK, FK | Agent ID |
+| `base_speed_m_per_min` | Float | NOT NULL | 基础移动速度 |
+| `mobility_class` | String(32) | NOT NULL | standard/limited/assisted |
+| `accessibility_needs` | JSON | NOT NULL | 无障碍与路径需求 |
+| `perception_radius_m` | Float | NOT NULL | 基础视觉感知半径 |
+| `hearing_radius_m` | Float | NOT NULL | 基础听觉感知半径 |
+| `source` | String(64) | NOT NULL | seeded/imported/research_config |
+| `version` | Integer | NOT NULL | 配置版本 |
+| `updated_at` | DateTime | NOT NULL | 更新时间 |
+
+要求：
+
+- 缺失资料使用明确默认值，不根据人物文案或 LLM 推断敏感能力。
+- 每个字段具有允许范围、来源和版本。
+- 能力字段不能绕过道路通行、门禁和空间准入规则。
+
+### 6.6 `agent_trajectories`
 
 保存研究用途的不可变轨迹事实。
 
@@ -299,35 +326,39 @@ PostgreSQL：
 迁移规则：
 
 1. 根据现有地点名称映射到 `spatial_nodes.code`。
-2. 为每个 Agent 创建 `agent_spatial_states`。
-3. 同步写入期间，空间状态更新后派生更新 `residents.location`。
-4. 新代码只读取 `agent_spatial_states`。
-5. 所有消费者迁移完成后，再通过独立 PR 移除旧字段依赖。
+2. 为每个 Agent 创建带明确默认值和 `seeded` 来源的 `agent_spatial_capabilities`。
+3. 为每个 Agent 创建 `agent_spatial_states`。
+4. 同步写入期间，空间状态更新后派生更新 `residents.location`。
+5. 新代码只通过空间服务读取 `agent_spatial_states` 和能力档案。
+6. 所有消费者迁移完成后，再通过独立 PR 移除旧字段依赖。
 
-不得在第一阶段直接删除 `residents.location`。
+不得在阶段 1A 直接删除 `residents.location`。
 
 ## 8. Migration 设计
 
 ### 8.1 Alembic 基线
 
-第一个重构 PR：
+阶段 1A 的迁移准备 PR：
 
 - 引入 SQLAlchemy 和 Alembic。
 - 建立当前数据库结构的基线 revision。
 - 不修改现有表和运行行为。
 - SQLite 与 PostgreSQL 均执行 `alembic upgrade head`。
+- 保留现有 `app/db.py` 兼容入口，禁止在同一业务事务中混用两套连接。
 
 ### 8.2 空间表 migration
 
-第二个功能 PR：
+空间 schema PR：
 
-- 创建 `experiment_runs`。
+- 复用并按需扩展现有 `experiment_runs`。
 - 创建 `spatial_nodes`。
 - 创建 `spatial_edges`。
+- 创建 `agent_spatial_capabilities`。
 - 创建 `agent_spatial_states`。
 - 创建 `agent_trajectories`。
 - 写入7个校园主空间和第一版道路拓扑。
 - 根据 `residents.location` 回填 Agent 空间状态。
+- 将空间能力、当前状态与拓扑纳入 `world-snapshot-v3` 的后续兼容版本；轨迹作为不可变研究证据，不在恢复时删除。
 
 ### 8.3 回滚
 
@@ -335,9 +366,9 @@ PostgreSQL：
 
 1. 停止空间服务写入。
 2. 确保 `residents.location` 已同步最新节点名称。
-3. 删除轨迹和 Agent 空间状态表。
+3. 删除轨迹、Agent 空间状态和空间能力表。
 4. 删除空间连接与节点表。
-5. 删除实验批次表。
+5. 保留阶段 0 已存在的实验运行、快照和世界分支数据。
 
 生产环境执行 downgrade 前必须备份数据库。应用启动流程不自动执行 downgrade。
 
@@ -385,7 +416,7 @@ class SpatialService:
     def create_scene_snapshot(self, run_id: int, tick: int) -> SceneSnapshot: ...
 ```
 
-第一阶段场景图可以按请求缓存；空间节点或连接状态改变时显式失效。不得使用无限期全局缓存。
+阶段 1A 场景图可以按请求缓存；空间节点或连接状态改变时显式失效。不得使用无限期全局缓存。
 
 ## 10. API 契约
 
@@ -434,7 +465,7 @@ GET /api/spatial/occupancy
 GET /api/agents/{resident_id}/spatial-state
 ```
 
-不存在的 Agent 返回 `404`；空间状态尚未初始化返回明确的 `409`，不返回伪造默认位置。
+响应同时提供当前空间真值和已启用的空间能力摘要。不存在的 Agent 返回 `404`；空间状态或能力档案尚未初始化返回明确的 `409`，不返回伪造默认位置或能力。
 
 ### 10.4 获取 Agent 轨迹
 
@@ -450,12 +481,12 @@ GET /api/agents/{resident_id}/trajectory?run_id=...&from_tick=0&to_tick=100
 
 ## 11. Tick 一致性
 
-第一阶段暂不实现移动，但必须确定后续写入顺序：
+阶段 1A 暂不实现移动，但必须确定阶段 1B 的后续写入顺序：
 
 ```text
 1. 锁定 experiment_run 和当前 tick
 2. 读取世界快照
-3. 读取所有 Agent 空间状态
+3. 读取所有 Agent 空间状态和当前阶段已启用的能力字段
 4. 计算本 tick 空间变化
 5. 批量更新 agent_spatial_states
 6. 批量写入 agent_trajectories
@@ -503,6 +534,7 @@ Render 发布流程：
 - 坐标与属性序列化。
 - 空间容量和占用计算。
 - 旧地点名称到节点代码的映射。
+- 空间能力默认值、范围、来源和版本校验。
 
 ### 13.2 Migration 测试
 
@@ -511,6 +543,7 @@ SQLite 和 PostgreSQL 分别验证：
 - 空数据库执行到 `head`。
 - 现有结构升级到 `head`。
 - 回填空间状态。
+- 回填空间能力且重复执行不覆盖研究配置。
 - 重复执行幂等种子逻辑。
 - downgrade 后旧应用仍可读取 `residents.location`。
 
@@ -532,7 +565,7 @@ Python + PostgreSQL service container
 
 ## 14. 性能边界
 
-第一阶段目标规模：
+阶段 1A 目标规模：
 
 - 20-100 个 Agent。
 - 7个主空间及不超过100个子空间节点。
@@ -556,34 +589,46 @@ Python + PostgreSQL service container
 
 ## 16. 实现 PR 顺序
 
-### PR 1：`refactor/database-foundation`
+### PR 1：`refactor/spatial-database-foundation`
 
 - 引入 SQLAlchemy Engine 和 Alembic。
 - 建立现有数据库基线。
 - 保持行为不变。
 - SQLite/PostgreSQL migration 测试。
+- 不迁移无关业务查询，不重建阶段 0 的 experiment、snapshot 或 branch 模型。
 
 ### PR 2：`feat/spatial-schema`
 
-- 新增空间与实验数据模型。
+- 新增节点、连接、Agent 空间能力、当前空间状态和不可变轨迹模型。
 - 新增 migration、回填和回滚。
 - 新增 repository 测试。
+- 将空间当前状态和拓扑接入快照与分支隔离。
 
 ### PR 3：`feat/spatial-scene-api`
 
 - 新增场景图服务和 API。
 - 前端仍可保持现有展示。
 - 增加 API 契约测试。
+- API 返回后端坐标与拓扑，为后续 Three.js 移除硬编码地图做准备。
 
 ### PR 4：`refactor/spatial-service-boundary`
 
 - 将现有空间状态逻辑从 `app/main.py` 迁入空间服务。
 - 保持现有接口兼容。
 - 增加回归测试。
+- 新空间逻辑不再直接读取 `residents.location`。
 
-完成上述四个 PR 后，才进入路径规划和连续移动阶段。
+完成上述四个 PR 即完成统一主路线阶段 1A。之后进入阶段 1B 的路径规划和连续移动，不在阶段 1A 顺带实现排队、感知或社会接触。
 
-## 17. 第一阶段验收标准
+实现结果：
+
+- Alembic revision `20260729_0002` 建立 5 张空间基础表。
+- 幂等种子建立 19 个空间节点、20 条连接边及居民空间能力和当前状态。
+- 场景图、占用、Agent 当前空间状态和轨迹查询 API 已发布。
+- 当前空间真值进入 `world-snapshot-v4-spatial`；不可变轨迹保留为实验审计记录。
+- SQLite 在线迁移、PostgreSQL 离线 migration SQL、服务读取及恢复测试均已通过。
+
+## 17. 阶段 1A 验收标准
 
 - 本地未设置 `DATABASE_URL` 时使用 SQLite。
 - 线上设置 `DATABASE_URL` 时使用 PostgreSQL。
@@ -592,17 +637,21 @@ Python + PostgreSQL service container
 - 空间相关路由不直接执行 SQL。
 - 7个校园主空间拥有稳定节点代码和坐标。
 - 每位 Agent 拥有唯一空间状态。
+- 每位 Agent 拥有带来源、范围和默认值策略的唯一空间能力档案。
 - 实验批次能够记录随机种子、代码版本和配置快照。
 - 轨迹记录通过实验批次和 tick 唯一定位。
 - SQLite/PostgreSQL CI 均通过。
 - 原有校园页面和 Agent 生命周期没有行为回归。
+- 当前空间真值与世界快照、恢复和分支切换保持一致。
+- 轨迹作为不可变研究证据，不因快照恢复被覆盖或删除。
 
-## 18. 待老师确认的决策
+## 18. 已确认的实施决策
 
-以下项目在进入实现前需要明确确认：
+结合环境主路线和空间子路线，阶段 1A 采用以下决策：
 
-1. 是否同意新增 SQLAlchemy 2 Core 与 Alembic。
-2. 是否接受现有原始 SQL 渐进迁移，而不是一次性重写。
-3. 是否同意第一阶段继续保留 `residents.location` 兼容字段。
-4. 是否同意第一阶段只做二维空间真值，Three.js 负责三维展示。
-5. 是否同意路径规划和局部感知放到空间数据底座完成之后。
+1. 新增 SQLAlchemy 2 Core 与 Alembic，但采用渐进迁移，不一次性重写现有原始 SQL。
+2. 继续保留 `residents.location` 兼容字段，空间服务成为新代码的真值入口。
+3. 阶段 1A 使用二维空间真值，`y` 默认值为 `0`，Three.js 负责三维展示。
+4. 先完成空间数据底座，再进入路径规划；先完成真实移动，再进入局部感知。
+5. 阶段 0 的实验运行、随机种子、快照和分支能力直接复用。
+6. 容量准入属于阶段 1C，社会性排队、个人空间和插队属于阶段 2。
