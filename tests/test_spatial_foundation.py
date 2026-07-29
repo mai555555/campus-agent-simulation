@@ -25,6 +25,11 @@ from app.perception_runtime import (
 )
 from app.db import create_database_engine
 from app.db.migration_runtime import BASELINE_REVISION, get_alembic_config
+from app.economy.service import (
+    post_money_transfer,
+    reconcile_ledger,
+    seed_economy_foundation,
+)
 from app.models import SCHEMA_SQL
 from app.spatial.repository import SpatialRepository
 from app.spatial.planner import RouteNotFoundError
@@ -92,6 +97,12 @@ class SpatialFoundationTest(unittest.TestCase):
         with self.engine.begin() as spatial_connection:
             self.first_seed = seed_spatial_foundation(spatial_connection)
             self.second_seed = seed_spatial_foundation(spatial_connection)
+        economy_connection = sqlite3.connect(self.db_path)
+        economy_connection.row_factory = sqlite3.Row
+        economy_connection.execute("PRAGMA foreign_keys = ON")
+        seed_economy_foundation(economy_connection)
+        economy_connection.commit()
+        economy_connection.close()
 
     def tearDown(self):
         self.engine.dispose()
@@ -175,6 +186,8 @@ class SpatialFoundationTest(unittest.TestCase):
         self.assertIn("/api/perception/observations", paths)
         self.assertIn("/api/agents/{resident_id}/capability-profile", paths)
         self.assertIn("/api/capabilities", paths)
+        self.assertIn("/api/macro/definitions", paths)
+        self.assertIn("/api/macro/snapshots/latest", paths)
 
     def test_capability_profiles_create_explainable_agent_differences(self):
         connection = sqlite3.connect(self.db_path)
@@ -830,7 +843,7 @@ class SpatialFoundationTest(unittest.TestCase):
             )
             self.assertEqual(
                 snapshot["schema_version"],
-                "world-snapshot-v8-capability",
+                "world-snapshot-v19-macro-reconciliation",
             )
             original = connection.execute(
                 "SELECT current_node_id, x, z FROM agent_spatial_states WHERE resident_id = 1"
@@ -844,13 +857,35 @@ class SpatialFoundationTest(unittest.TestCase):
                 WHERE resident_id = 1
                 """
             )
+            post_money_transfer(
+                connection,
+                transaction_key="snapshot:test:transfer",
+                from_account_key="resident:1:cash",
+                to_account_key="system:campus-services:cash",
+                amount_coins=8,
+                transaction_type="snapshot_test",
+                source_type="unit_test",
+            )
             main.restore_world_snapshot_state(connection, snapshot["id"])
             restored = connection.execute(
                 "SELECT current_node_id, x, z FROM agent_spatial_states WHERE resident_id = 1"
             ).fetchone()
+            restored_money = connection.execute(
+                "SELECT money FROM residents WHERE id = 1"
+            ).fetchone()
+            restored_cash = connection.execute(
+                """
+                SELECT balance_minor FROM ledger_accounts
+                WHERE account_key = 'resident:1:cash'
+                """
+            ).fetchone()
+            ledger_balanced = reconcile_ledger(connection)["balanced"]
             connection.close()
 
-        self.assertEqual(tuple(restored), tuple(original))
+            self.assertEqual(tuple(restored), tuple(original))
+            self.assertEqual(restored_money["money"], 100)
+            self.assertEqual(restored_cash["balance_minor"], 10000)
+            self.assertTrue(ledger_balanced)
 
 
 if __name__ == "__main__":

@@ -42,12 +42,34 @@ python scripts/init_campus_safe.py
 python scripts/prepare_legacy_schema.py
 python scripts/migrate_db.py
 python scripts/seed_spatial_foundation.py
+python scripts/seed_economy_foundation.py
+python scripts/seed_organization_runtime.py
+python scripts/seed_supply_foundation.py
+python scripts/seed_labor_runtime.py
+python scripts/seed_budget_runtime.py
+python scripts/seed_market_runtime.py
+python scripts/seed_credit_runtime.py
+python scripts/seed_public_policy_runtime.py
+python scripts/seed_social_institution_runtime.py
+python scripts/seed_macro_runtime.py
+python scripts/audit_economy_ledger.py
 python scripts/migrate_db.py --check
 ```
 
 - `prepare_legacy_schema.py` 只补齐 Alembic 基线要求的旧表，不清空业务数据。
 - `migrate_db.py` 首次会验证完整旧 schema 并 stamp 基线，随后执行 `upgrade head`。
 - `seed_spatial_foundation.py` 幂等写入校园拓扑，并为尚无空间状态的居民建立兼容初始状态。
+- `seed_economy_foundation.py` 幂等建立经济主体、账户和可追溯期初余额，并执行账本对账。
+- `seed_organization_runtime.py` 幂等建立组织治理档案、角色权限、初始成员责任和组织关系。
+- `seed_supply_foundation.py` 幂等建立商品与服务目录、库存账户、生产配方和服务供给，并将旧库存迁移为可追溯期初流水。
+- `seed_labor_runtime.py` 幂等建立组织职位、劳动合同、收入计划和周期必要支出。
+- `seed_budget_runtime.py` 幂等建立居民预算档案、储蓄账户和初始预算快照；信用、透支与借款保持关闭。
+- `seed_market_runtime.py` 幂等建立商品和服务的固定价、动态价或配给市场机制。
+- `seed_credit_runtime.py` 幂等建立储蓄目标、风险档案、信用产品、信用额度和有来源的信用合作社准备金。
+- `seed_public_policy_runtime.py` 幂等建立公共服务、政策工具和有来源的公共政策基金。
+- `seed_social_institution_runtime.py` 幂等建立传播渠道、制度规则和居民权力画像。
+- `seed_macro_runtime.py` 幂等建立指标口径并生成当前日宏观快照和统一核验结果。
+- `audit_economy_ledger.py` 校验所有已入账交易的借贷平衡与账户余额；异常时记录审计事件并以非零状态退出。
 - `--check` 只读取当前 revision；未到最新版本时以非零状态退出。
 - 新增空间表及后续结构变化必须通过 Alembic migration，不再继续扩展启动时建表逻辑。
 
@@ -62,6 +84,17 @@ python scripts/init_campus_safe.py
 python scripts/prepare_legacy_schema.py
 python scripts/migrate_db.py
 python scripts/seed_spatial_foundation.py
+python scripts/seed_economy_foundation.py
+python scripts/seed_organization_runtime.py
+python scripts/seed_supply_foundation.py
+python scripts/seed_labor_runtime.py
+python scripts/seed_budget_runtime.py
+python scripts/seed_market_runtime.py
+python scripts/seed_credit_runtime.py
+python scripts/seed_public_policy_runtime.py
+python scripts/seed_social_institution_runtime.py
+python scripts/seed_macro_runtime.py
+python scripts/audit_economy_ledger.py
 uvicorn app.main:app --reload
 ```
 
@@ -78,6 +111,31 @@ World Runtime v1 让校园世界从“点击模拟一天”升级为后台 tick 
 - `GET /api/spatial/agents`：全部居民当前坐标、路线、进度和移动能力。
 - `GET /api/spatial/resources`：空间席位、窗口、服务能力与当前可用量。
 - `GET /api/spatial/admission-queue`：当前 FIFO 等待队列、位次、耐心和预计等待时间。
+- `GET /api/supply/catalog`：商品、服务和生产资料目录。
+- `GET /api/supply/inventory`：按主体与商品查询真实库存账户。
+- `GET /api/supply/production-batches`：生产批次、状态和预计完成时间。
+- `GET /api/supply/services`、`/api/supply/service-deliveries`：服务容量与交付/排队结果。
+- `GET /api/labor/positions`、`/contracts`、`/shifts`：职位、合同和有行动证据的班次结算。
+- `GET /api/labor/income-programs`、`/payments`、`/expense-obligations`：持续收入、支付来源和必要支出。
+- `GET /api/labor/distribution`：基于账本余额与收入流水的不平等摘要。
+- `GET /api/budgets/residents/{id}`：居民当前预算、可支配资金、每日时间预算和信用关闭状态。
+- `GET /api/budgets/residents/{id}/snapshots`、`/savings-transfers`、`/choices`：预算历史、储蓄流水和行动机会成本。
+- `GET /api/market/mechanisms`、`/prices`：市场规则及带供需、库存、成本解释的小时价格。
+- `GET /api/market/demand`、`/frictions`：需求响应、替代选择、缺货、配给和摩擦成本。
+- `GET /api/market/quote?item_name=奶茶&location=商业街&resident_id=1`：商品报价或居民支付意愿评估。
+- `GET /api/credit/products`、`/profiles`、`/contracts`、`/installments`、`/payments`：信用规则、额度、债务合同和还款事实。
+- `GET /api/credit/savings-goals`、`/risk-profiles`、`/shocks`、`/risk-claims`：储蓄缓冲、风险暴露、经济冲击和共济赔付。
+- `GET /api/credit/events`：放款、计息、还款、逾期、违约与额度变化历史。
+- `GET /api/public-policy/services`、`/operations`、`/usages`：公共服务定义、每日财政运行与居民使用结果。
+- `GET /api/public-policy/externalities`、`/exposures`：外部性来源、范围和逐居民暴露证据。
+- `GET /api/public-policy/policies`、`/benefits`、`/outcomes`：政策规则、财政受益和按群体聚合的结果。
+- `GET /api/social-institutions/claims`、`/transmissions`、`/exposures`、`/beliefs`：信息主张、传播路径、暴露和居民信念。
+- `GET /api/social-institutions/rules`、`/cases`、`/decisions`：制度规则、案件、奖惩和申诉决定。
+- `GET /api/social-institutions/power`、`/trust-events`：正式权力、非正式影响和制度信任证据。
+- `GET /api/macro/definitions`、`/snapshots`、`/snapshots/latest`：宏观指标口径、历史窗口和最新聚合结果。
+- `GET /api/macro/snapshots/{id}`：快照内全部总体、角色与收入组指标及统一核验结果。
+- `GET /api/macro/values/{id}/components`：从宏观值下钻到底层账户、交易、服务或事件组成。
+- `POST /api/macro/snapshots?window_type=manual`：创建可复现的人工宏观检查点。
 - `GET /api/body-states`：全部居民当前身体、注意力与恢复状态，以及达到阈值的告警。
 - `GET /api/agents/{id}/body-state`：单个居民的完整身体状态。
 - `GET /api/agents/{id}/perception-evidence`：单个居民最近的局部观察、信念、空间记忆和实际接收消息。
@@ -209,10 +267,21 @@ docker run --rm -p 8000:8000 \
 当前 Dockerfile 在 build 阶段执行：
 
 ```bash
-python scripts/init_campus.py
+python scripts/init_campus_safe.py
 python scripts/prepare_legacy_schema.py
 python scripts/migrate_db.py
 python scripts/seed_spatial_foundation.py
+python scripts/seed_economy_foundation.py
+python scripts/seed_organization_runtime.py
+python scripts/seed_supply_foundation.py
+python scripts/seed_labor_runtime.py
+python scripts/seed_budget_runtime.py
+python scripts/seed_market_runtime.py
+python scripts/seed_credit_runtime.py
+python scripts/seed_public_policy_runtime.py
+python scripts/seed_social_institution_runtime.py
+python scripts/seed_macro_runtime.py
+python scripts/audit_economy_ledger.py
 ```
 
 这会生成一个全新的校园世界并升级到最新 migration。持久化 PostgreSQL 部署应使用 Render 的安全初始化流程，避免重置线上数据。
@@ -222,13 +291,13 @@ python scripts/seed_spatial_foundation.py
 `render.yaml` 当前配置：
 
 ```yaml
-buildCommand: pip install -r requirements.txt && python scripts/init_campus_safe.py && python scripts/prepare_legacy_schema.py && python scripts/migrate_db.py && python scripts/seed_spatial_foundation.py
+buildCommand: pip install -r requirements.txt && python scripts/init_campus_safe.py && python scripts/prepare_legacy_schema.py && python scripts/migrate_db.py && python scripts/seed_spatial_foundation.py && python scripts/seed_economy_foundation.py && python scripts/seed_organization_runtime.py && python scripts/seed_supply_foundation.py && python scripts/seed_labor_runtime.py && python scripts/seed_budget_runtime.py && python scripts/seed_market_runtime.py && python scripts/seed_credit_runtime.py && python scripts/seed_public_policy_runtime.py && python scripts/seed_social_institution_runtime.py && python scripts/seed_macro_runtime.py && python scripts/audit_economy_ledger.py
 startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
 ```
 
 使用 Docker 部署时，镜像构建只会在 `/tmp/campus-build/city.db` 上验证完整初始化链路，不连接 Render 持久盘或生产数据库。容器启动时才使用实际 `DATABASE_URL` 或 `DB_PATH` 依次执行安全初始化、schema 补齐、Alembic migration 和幂等空间种子，已有校园数据不会被重置。
 
-安全初始化会保留已有校园数据，随后补齐基线结构、执行 migration 并幂等补齐空间拓扑。首次部署会写入种子数据，后续构建只执行幂等结构升级和缺失空间状态回填。
+安全初始化会保留已有校园数据，随后补齐基线结构、执行 migration，并幂等补齐空间拓扑、经济账本、组织治理档案、供给目录和劳动收入制度。账本审计通过后服务才会启动。首次部署会写入种子数据，后续构建只执行幂等结构升级、缺失空间状态回填、期初账户补录、组织角色补齐、旧库存来源化和缺失劳动合同补齐。
 
 需要配置的环境变量：
 

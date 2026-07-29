@@ -4,6 +4,8 @@ from datetime import datetime, timedelta
 from unittest.mock import patch
 
 import app.main as main
+from app.economy.schema import ECONOMY_FOUNDATION_SQL
+from app.economy.service import seed_economy_foundation
 from app.models import SCHEMA_SQL
 
 
@@ -34,6 +36,8 @@ class CausalActionRuntimeTest(unittest.TestCase):
         main.ensure_campus_state_table(self.conn)
         main.ensure_space_system(self.conn)
         main.ensure_world_runtime_tables(self.conn)
+        self.conn.executescript(ECONOMY_FOUNDATION_SQL)
+        seed_economy_foundation(self.conn)
         self.world_time = datetime.fromisoformat("2026-07-29T12:00:00+08:00")
 
     def tearDown(self):
@@ -254,6 +258,26 @@ class CausalActionRuntimeTest(unittest.TestCase):
         self.assertEqual(service_account["balance"], 8)
         self.assertEqual(transfer["amount"], 8)
         self.assertEqual(transfer["to_account_key"], "campus-services")
+        ledger_transaction = self.conn.execute(
+            """
+            SELECT * FROM ledger_transactions
+            WHERE action_execution_id = ?
+            """,
+            (action["id"],),
+        ).fetchone()
+        ledger_entries = self.conn.execute(
+            """
+            SELECT entry_side, amount_minor
+            FROM ledger_entries
+            WHERE transaction_id = ?
+            ORDER BY entry_side
+            """,
+            (ledger_transaction["id"],),
+        ).fetchall()
+        self.assertEqual(
+            [(row["entry_side"], row["amount_minor"]) for row in ledger_entries],
+            [("credit", 800), ("debit", 800)],
+        )
         self.assertEqual(len(delayed_ids), 1)
 
         delayed_result = main.process_due_world_delayed_effects(
