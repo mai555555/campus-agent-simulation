@@ -8259,20 +8259,15 @@ def upsert_observer_session(payload: ObserverSessionRequest):
                 (payload.user_id, payload.session_type, payload.focused_resident_id, payload.focused_location, now, now),
             )
             session_id = cursor.lastrowid
-        focus_label = payload.focused_location or (f"Agent {payload.focused_resident_id}" if payload.focused_resident_id else "校园全局")
-        event = append_world_event(
+        log_model_call(
             conn,
-            "observer_session",
-            "观察者进入世界",
-            f"{payload.user_id} 正在观察{focus_label}。",
+            "observer",
+            status="session_recorded",
             resident_id=payload.focused_resident_id,
-            location=payload.focused_location,
-            payload={"session_id": session_id, "session_type": payload.session_type},
         )
-        log_model_call(conn, "observer", status="session_recorded", resident_id=payload.focused_resident_id, related_event_id=event["id"])
         conn.commit()
         row = conn.execute("SELECT * FROM observer_sessions WHERE id = ?", (session_id,)).fetchone()
-        return {"session": dict(row), "event": event}
+        return {"session": dict(row), "event": None}
 
 
 @app.post("/api/admin/world/start")
@@ -9017,6 +9012,7 @@ def _life_course_timeline(conn, resident_id, from_day=None, to_day=None, limit=2
         SELECT id, tick_id, day, slot, event_type, resident_id, location, title, content, payload, created_at
         FROM world_event_stream
         WHERE {where} AND branch_key = ?
+          AND event_type NOT IN ('observer_session', 'observer_model_detail')
         ORDER BY day ASC, id ASC
         LIMIT ?
         """,
@@ -9925,7 +9921,8 @@ def collect_campus_news_candidates(conn, day, source_slot, limit=60):
           AND e.resident_id IS NOT NULL
           AND e.event_type NOT IN (
               'world_tick_started', 'world_tick_complete',
-              'campus_news_published', 'campus_news_skipped'
+              'campus_news_published', 'campus_news_skipped',
+              'observer_session', 'observer_model_detail'
           )
         ORDER BY e.id DESC
         LIMIT ?
