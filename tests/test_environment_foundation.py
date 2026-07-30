@@ -32,9 +32,11 @@ class EnvironmentFoundationTest(unittest.TestCase):
         )
         main.SOCIAL_SCHEMA_READY = False
         main.WORLD_SCHEMA_READY = False
-        main.ensure_campus_state_table(self.conn)
-        main.ensure_space_system(self.conn)
-        main.ensure_world_runtime_tables(self.conn)
+        main.ensure_campus_state_table(self.conn, allow_ddl=True)
+        main.ensure_space_system(self.conn, allow_ddl=True)
+        main.ensure_agent_news_system(self.conn, allow_ddl=True)
+        main.ensure_external_information_system(self.conn, allow_ddl=True)
+        main.ensure_world_runtime_tables(self.conn, allow_ddl=True)
 
     def tearDown(self):
         self.conn.close()
@@ -512,7 +514,7 @@ class EnvironmentFoundationMigrationTest(unittest.TestCase):
         main.SOCIAL_SCHEMA_READY = False
         main.WORLD_SCHEMA_READY = False
 
-        main.ensure_world_runtime_tables(conn)
+        main.ensure_world_runtime_tables(conn, allow_ddl=True)
 
         runtime_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(world_runtime)")

@@ -367,81 +367,122 @@ SOCIAL_SYSTEM_SQL, BEHAVIOR_SYSTEM_SQL, RELATIONSHIP_DYNAMIC_COLUMNS,
 )
 
 
-def ensure_agent_profile_table(conn):
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(agent_profiles)").fetchall()}
+class SchemaMigrationRequired(RuntimeError):
+    """Raised when the runtime database has not completed build-time migrations."""
+
+
+def ensure_table_columns(conn, table_name, column_types, *, allow_ddl=False):
+    columns = {
+        row["name"]
+        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
     if not columns:
+        raise SchemaMigrationRequired(
+            f"Database table '{table_name}' is missing. Run the deployment schema "
+            "initialization before starting the web service."
+        )
+    missing_columns = [
+        (column, column_type)
+        for column, column_type in column_types.items()
+        if column not in columns
+    ]
+    if missing_columns and not allow_ddl:
+        names = ", ".join(column for column, _ in missing_columns)
+        raise SchemaMigrationRequired(
+            f"Database table '{table_name}' is missing columns: {names}. Run the "
+            "deployment migrations before starting the web service."
+        )
+    for column, column_type in missing_columns:
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column} {column_type}")
+
+
+def ensure_agent_profile_table(conn, *, allow_ddl=False):
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(agent_profiles)").fetchall()}
+    if not columns and allow_ddl:
         conn.executescript(AGENT_PROFILE_SQL)
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(agent_profiles)").fetchall()}
-    for column, column_type in PROFILE_COLUMN_TYPES.items():
-        if column not in columns:
-            conn.execute(f"ALTER TABLE agent_profiles ADD COLUMN {column} {column_type}")
+    ensure_table_columns(
+        conn,
+        "agent_profiles",
+        PROFILE_COLUMN_TYPES,
+        allow_ddl=allow_ddl,
+    )
 
 
-def ensure_social_system_tables(conn):
+def ensure_social_system_tables(conn, *, allow_ddl=False):
     global SOCIAL_SCHEMA_READY
     if SOCIAL_SCHEMA_READY:
         return
     with SOCIAL_SCHEMA_LOCK:
         if SOCIAL_SCHEMA_READY:
             return
-        _initialize_social_system_tables(conn)
+        _initialize_social_system_tables(conn, allow_ddl=allow_ddl)
         SOCIAL_SCHEMA_READY = True
 
 
-def _initialize_social_system_tables(conn):
-    ensure_agent_profile_table(conn)
-    conn.executescript(SOCIAL_SYSTEM_SQL)
-    conn.executescript(BEHAVIOR_SYSTEM_SQL)
-    relationship_columns = {row["name"] for row in conn.execute("PRAGMA table_info(relationship_dynamics)").fetchall()}
-    for column, column_type in RELATIONSHIP_DYNAMIC_COLUMNS.items():
-        if column not in relationship_columns:
-            conn.execute(f"ALTER TABLE relationship_dynamics ADD COLUMN {column} {column_type}")
-    goal_columns = {row["name"] for row in conn.execute("PRAGMA table_info(long_term_goals)").fetchall()}
-    for column, column_type in LONG_TERM_GOAL_COLUMNS.items():
-        if column not in goal_columns:
-            conn.execute(f"ALTER TABLE long_term_goals ADD COLUMN {column} {column_type}")
-    action_log_columns = {row["name"] for row in conn.execute("PRAGMA table_info(simulation_action_logs)").fetchall()}
-    for column, column_type in {
-        "tick_id": "INTEGER",
-        "state_before": "TEXT NOT NULL DEFAULT '{}'",
-        "state_after": "TEXT NOT NULL DEFAULT '{}'",
-    }.items():
-        if column not in action_log_columns:
-            conn.execute(f"ALTER TABLE simulation_action_logs ADD COLUMN {column} {column_type}")
-    relationship_id_type = "SERIAL PRIMARY KEY" if using_postgres() else "INTEGER PRIMARY KEY AUTOINCREMENT"
-    conn.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS relationship_change_events (
-            id {relationship_id_type},
-            day INTEGER NOT NULL DEFAULT 1,
-            tick_id INTEGER,
-            event_id INTEGER,
-            from_resident_id INTEGER NOT NULL,
-            to_resident_id INTEGER NOT NULL,
-            interaction TEXT NOT NULL DEFAULT '',
-            reason TEXT NOT NULL DEFAULT '',
-            affinity_before INTEGER NOT NULL DEFAULT 50,
-            affinity_after INTEGER NOT NULL DEFAULT 50,
-            trust_before INTEGER NOT NULL DEFAULT 50,
-            trust_after INTEGER NOT NULL DEFAULT 50,
-            cooperation_before INTEGER NOT NULL DEFAULT 50,
-            cooperation_after INTEGER NOT NULL DEFAULT 50,
-            competition_before INTEGER NOT NULL DEFAULT 0,
-            competition_after INTEGER NOT NULL DEFAULT 0,
-            conflict_before INTEGER NOT NULL DEFAULT 0,
-            conflict_after INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-        """
+def _initialize_social_system_tables(conn, *, allow_ddl=False):
+    ensure_agent_profile_table(conn, allow_ddl=allow_ddl)
+    if allow_ddl:
+        conn.executescript(SOCIAL_SYSTEM_SQL)
+        conn.executescript(BEHAVIOR_SYSTEM_SQL)
+    ensure_table_columns(
+        conn,
+        "relationship_dynamics",
+        RELATIONSHIP_DYNAMIC_COLUMNS,
+        allow_ddl=allow_ddl,
     )
-    membership_id_type = "SERIAL PRIMARY KEY" if using_postgres() else "INTEGER PRIMARY KEY AUTOINCREMENT"
-    conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS group_membership_events (
-            id {membership_id_type}, day INTEGER NOT NULL DEFAULT 1, group_id INTEGER NOT NULL,
-            resident_id INTEGER NOT NULL, action TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '',
-            member_ids TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ensure_table_columns(
+        conn,
+        "long_term_goals",
+        LONG_TERM_GOAL_COLUMNS,
+        allow_ddl=allow_ddl,
+    )
+    ensure_table_columns(
+        conn,
+        "simulation_action_logs",
+        {
+            "tick_id": "INTEGER",
+            "state_before": "TEXT NOT NULL DEFAULT '{}'",
+            "state_after": "TEXT NOT NULL DEFAULT '{}'",
+        },
+        allow_ddl=allow_ddl,
+    )
+    if allow_ddl:
+        relationship_id_type = "SERIAL PRIMARY KEY" if using_postgres() else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS relationship_change_events (
+                id {relationship_id_type},
+                day INTEGER NOT NULL DEFAULT 1,
+                tick_id INTEGER,
+                event_id INTEGER,
+                from_resident_id INTEGER NOT NULL,
+                to_resident_id INTEGER NOT NULL,
+                interaction TEXT NOT NULL DEFAULT '',
+                reason TEXT NOT NULL DEFAULT '',
+                affinity_before INTEGER NOT NULL DEFAULT 50,
+                affinity_after INTEGER NOT NULL DEFAULT 50,
+                trust_before INTEGER NOT NULL DEFAULT 50,
+                trust_after INTEGER NOT NULL DEFAULT 50,
+                cooperation_before INTEGER NOT NULL DEFAULT 50,
+                cooperation_after INTEGER NOT NULL DEFAULT 50,
+                competition_before INTEGER NOT NULL DEFAULT 0,
+                competition_after INTEGER NOT NULL DEFAULT 0,
+                conflict_before INTEGER NOT NULL DEFAULT 0,
+                conflict_after INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
         )
-    """)
+        membership_id_type = "SERIAL PRIMARY KEY" if using_postgres() else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS group_membership_events (
+                id {membership_id_type}, day INTEGER NOT NULL DEFAULT 1, group_id INTEGER NOT NULL,
+                resident_id INTEGER NOT NULL, action TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '',
+                member_ids TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+    ensure_table_columns(conn, "relationship_change_events", {})
+    ensure_table_columns(conn, "group_membership_events", {})
     normalize_agent_hierarchy(conn)
     seed_long_term_goals(conn)
     seed_multiscale_goals(conn)
@@ -2499,25 +2540,29 @@ def rows_to_dicts(rows):
     return [dict(row) for row in rows]
 
 
-def ensure_campus_state_table(conn):
+def ensure_campus_state_table(conn, *, allow_ddl=False):
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(campus_state)").fetchall()}
-    if not columns:
+    if not columns and allow_ddl:
         conn.executescript(CAMPUS_STATE_SQL)
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(campus_state)").fetchall()}
-    for column, column_type in ENV_COLUMN_TYPES.items():
-        if column not in columns:
-            conn.execute(f"ALTER TABLE campus_state ADD COLUMN {column} {column_type}")
+    ensure_table_columns(
+        conn,
+        "campus_state",
+        ENV_COLUMN_TYPES,
+        allow_ddl=allow_ddl,
+    )
 
 
-def ensure_space_system(conn):
+def ensure_space_system(conn, *, allow_ddl=False):
     space_columns = {
         row["name"] for row in conn.execute("PRAGMA table_info(campus_spaces)").fetchall()
     }
     event_columns = {
         row["name"] for row in conn.execute("PRAGMA table_info(campus_events)").fetchall()
     }
-    if not space_columns or not event_columns:
+    if (not space_columns or not event_columns) and allow_ddl:
         conn.executescript(SPACE_SYSTEM_SQL)
+    ensure_table_columns(conn, "campus_spaces", {})
+    ensure_table_columns(conn, "campus_events", {})
     for space in DEFAULT_SPACES:
         conn.execute(
             """
@@ -2529,43 +2574,54 @@ def ensure_space_system(conn):
         )
 
 
-def ensure_agent_news_system(conn):
-    conn.executescript(AGENT_NEWS_SQL)
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(agent_news_posts)").fetchall()}
-    for column, column_type in AGENT_NEWS_COLUMN_TYPES.items():
-        if column not in columns:
-            conn.execute(f"ALTER TABLE agent_news_posts ADD COLUMN {column} {column_type}")
+def ensure_agent_news_system(conn, *, allow_ddl=False):
+    if allow_ddl:
+        conn.executescript(AGENT_NEWS_SQL)
+    ensure_table_columns(
+        conn,
+        "agent_news_posts",
+        AGENT_NEWS_COLUMN_TYPES,
+        allow_ddl=allow_ddl,
+    )
 
 
-def ensure_external_information_system(conn):
-    conn.executescript(EXTERNAL_INFORMATION_SQL)
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(agent_information)").fetchall()}
-    for column, column_type in AGENT_INFORMATION_COLUMNS.items():
-        if column not in columns:
-            conn.execute(f"ALTER TABLE agent_information ADD COLUMN {column} {column_type}")
+def ensure_external_information_system(conn, *, allow_ddl=False):
+    if allow_ddl:
+        conn.executescript(EXTERNAL_INFORMATION_SQL)
+    ensure_table_columns(
+        conn,
+        "agent_information",
+        AGENT_INFORMATION_COLUMNS,
+        allow_ddl=allow_ddl,
+    )
 
 
-def ensure_table_columns(conn, table_name, column_types):
-    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
-    for column, column_type in column_types.items():
-        if column not in columns:
-            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column} {column_type}")
-
-
-def ensure_world_runtime_tables(conn):
+def ensure_world_runtime_tables(conn, *, allow_ddl=False):
     global WORLD_SCHEMA_READY
     if WORLD_SCHEMA_READY:
         return
     with WORLD_SCHEMA_LOCK:
         if WORLD_SCHEMA_READY:
             return
-        ensure_social_system_tables(conn)
-        conn.executescript(WORLD_RUNTIME_SQL)
-        conn.executescript(RESEARCH_SYSTEM_SQL)
-        ensure_table_columns(conn, "world_runtime", WORLD_RUNTIME_COLUMNS)
-        ensure_table_columns(conn, "world_event_stream", WORLD_EVENT_STREAM_COLUMNS)
-        ensure_table_columns(conn, "world_snapshots", WORLD_SNAPSHOT_COLUMNS)
-        ensure_table_columns(conn, "experiment_runs", EXPERIMENT_RUN_COLUMNS)
+        ensure_social_system_tables(conn, allow_ddl=allow_ddl)
+        if allow_ddl:
+            conn.executescript(WORLD_RUNTIME_SQL)
+            conn.executescript(RESEARCH_SYSTEM_SQL)
+        ensure_table_columns(
+            conn, "world_runtime", WORLD_RUNTIME_COLUMNS, allow_ddl=allow_ddl
+        )
+        ensure_table_columns(
+            conn,
+            "world_event_stream",
+            WORLD_EVENT_STREAM_COLUMNS,
+            allow_ddl=allow_ddl,
+        )
+        ensure_table_columns(
+            conn, "world_snapshots", WORLD_SNAPSHOT_COLUMNS, allow_ddl=allow_ddl
+        )
+        ensure_table_columns(
+            conn, "experiment_runs", EXPERIMENT_RUN_COLUMNS, allow_ddl=allow_ddl
+        )
         conn.execute(
             """
             UPDATE world_event_stream
@@ -2574,11 +2630,12 @@ def ensure_world_runtime_tables(conn):
             WHERE root_event_id IS NULL
             """
         )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_world_event_stream_parent ON world_event_stream(parent_event_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_world_event_stream_root ON world_event_stream(root_event_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_world_event_stream_source ON world_event_stream(source_type, source_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_world_event_stream_branch ON world_event_stream(branch_key, id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_world_snapshots_parent ON world_snapshots(parent_snapshot_id)")
+        if allow_ddl:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_world_event_stream_parent ON world_event_stream(parent_event_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_world_event_stream_root ON world_event_stream(root_event_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_world_event_stream_source ON world_event_stream(source_type, source_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_world_event_stream_branch ON world_event_stream(branch_key, id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_world_snapshots_parent ON world_snapshots(parent_snapshot_id)")
         seed_world_runtime_rules(conn)
         seed_world_action_rules(conn)
         seed_world_update_schedules(conn)
@@ -7254,9 +7311,6 @@ def world_runner_loop():
 @app.on_event("startup")
 def start_world_runner_thread():
     global WORLD_RUNNER_THREAD
-    with get_connection() as conn:
-        ensure_world_runtime_tables(conn)
-        conn.commit()
     with WORLD_RUNNER_LOCK:
         if WORLD_RUNNER_THREAD and WORLD_RUNNER_THREAD.is_alive():
             return

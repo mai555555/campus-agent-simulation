@@ -47,6 +47,9 @@ def run_migrations_online() -> None:
     with connectable.connect() as connection:
         if connection.dialect.name == "postgresql":
             connection.execute(text(f'SET search_path TO "{database_schema}"'))
+            # SET starts an implicit SQLAlchemy transaction. Commit it before
+            # Alembic opens the transaction that must persist versioned DDL.
+            connection.commit()
         context.configure(
             connection=connection,
             target_metadata=target_metadata,

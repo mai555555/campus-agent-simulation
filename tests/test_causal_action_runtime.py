@@ -33,9 +33,9 @@ class CausalActionRuntimeTest(unittest.TestCase):
         )
         main.SOCIAL_SCHEMA_READY = False
         main.WORLD_SCHEMA_READY = False
-        main.ensure_campus_state_table(self.conn)
-        main.ensure_space_system(self.conn)
-        main.ensure_world_runtime_tables(self.conn)
+        main.ensure_campus_state_table(self.conn, allow_ddl=True)
+        main.ensure_space_system(self.conn, allow_ddl=True)
+        main.ensure_world_runtime_tables(self.conn, allow_ddl=True)
         self.conn.executescript(ECONOMY_FOUNDATION_SQL)
         seed_economy_foundation(self.conn)
         self.world_time = datetime.fromisoformat("2026-07-29T12:00:00+08:00")
@@ -130,7 +130,7 @@ class CausalActionRuntimeTest(unittest.TestCase):
         self.assertEqual(score, 100)
 
     def test_observer_events_do_not_enter_news_or_agent_life_course(self):
-        main.ensure_agent_news_system(self.conn)
+        main.ensure_agent_news_system(self.conn, allow_ddl=True)
         main.append_world_event(
             self.conn,
             "observer_session",

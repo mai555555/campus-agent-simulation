@@ -21,11 +21,11 @@ from app.models import SCHEMA_SQL  # noqa: E402
 def prepare_legacy_schema() -> None:
     with get_connection() as conn:
         conn.executescript(SCHEMA_SQL)
-        ensure_campus_state_table(conn)
-        ensure_space_system(conn)
-        ensure_agent_news_system(conn)
-        ensure_external_information_system(conn)
-        ensure_world_runtime_tables(conn)
+        ensure_campus_state_table(conn, allow_ddl=True)
+        ensure_space_system(conn, allow_ddl=True)
+        ensure_agent_news_system(conn, allow_ddl=True)
+        ensure_external_information_system(conn, allow_ddl=True)
+        ensure_world_runtime_tables(conn, allow_ddl=True)
         conn.commit()
 
 

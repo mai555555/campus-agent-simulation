@@ -75,10 +75,10 @@ class SoftConstraintRuntimeTest(unittest.TestCase):
             )
         main.SOCIAL_SCHEMA_READY = False
         main.WORLD_SCHEMA_READY = False
-        main.ensure_campus_state_table(conn)
-        main.ensure_space_system(conn)
-        main.ensure_external_information_system(conn)
-        main.ensure_world_runtime_tables(conn)
+        main.ensure_campus_state_table(conn, allow_ddl=True)
+        main.ensure_space_system(conn, allow_ddl=True)
+        main.ensure_external_information_system(conn, allow_ddl=True)
+        main.ensure_world_runtime_tables(conn, allow_ddl=True)
         conn.commit()
         conn.close()
         config = get_alembic_config(self.database_url)

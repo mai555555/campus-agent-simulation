@@ -291,11 +291,13 @@ python scripts/audit_economy_ledger.py
 `render.yaml` 当前配置：
 
 ```yaml
-buildCommand: pip install -r requirements.txt && python scripts/init_campus_safe.py && python scripts/prepare_legacy_schema.py && python scripts/migrate_db.py && python scripts/seed_spatial_foundation.py && python scripts/seed_economy_foundation.py && python scripts/seed_organization_runtime.py && python scripts/seed_supply_foundation.py && python scripts/seed_labor_runtime.py && python scripts/seed_budget_runtime.py && python scripts/seed_market_runtime.py && python scripts/seed_credit_runtime.py && python scripts/seed_public_policy_runtime.py && python scripts/seed_social_institution_runtime.py && python scripts/seed_macro_runtime.py && python scripts/audit_economy_ledger.py
+buildCommand: pip install -r requirements.txt && python scripts/deploy_database.py --require-postgres
 startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
 ```
 
-使用 Docker 部署时，镜像构建只会在 `/tmp/campus-build/city.db` 上验证完整初始化链路，不连接 Render 持久盘或生产数据库。容器启动时才使用实际 `DATABASE_URL` 或 `DB_PATH` 依次执行安全初始化、schema 补齐、Alembic migration 和幂等空间种子，已有校园数据不会被重置。
+`deploy_database.py` 会拒绝缺少 `DATABASE_URL` 的 Render 构建，避免迁移意外落入临时 SQLite。PostgreSQL 部署使用 advisory lock 串行化初始化和迁移；完成全部幂等种子后再次检查 Alembic revision。Web 启动命令只启动 Uvicorn，不执行 DDL。
+
+使用 Docker 部署时，镜像构建只会在 `/tmp/campus-build/city.db` 上验证完整初始化链路，不连接 Render 持久盘或生产数据库。容器启动命令也不会修改表结构；持久化 PostgreSQL 必须在发布镜像前单独运行 `python scripts/deploy_database.py --require-postgres`。
 
 安全初始化会保留已有校园数据，随后补齐基线结构、执行 migration，并幂等补齐空间拓扑、经济账本、组织治理档案、供给目录和劳动收入制度。账本审计通过后服务才会启动。首次部署会写入种子数据，后续构建只执行幂等结构升级、缺失空间状态回填、期初账户补录、组织角色补齐、旧库存来源化和缺失劳动合同补齐。
 
