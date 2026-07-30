@@ -1,7 +1,7 @@
 import json
 import hashlib
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 import random
 import re
 import requests
@@ -3136,6 +3136,12 @@ def update_world_runtime_status(conn, status):
     return get_world_runtime(conn)
 
 
+def _world_event_json_default(value):
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def append_world_event(
     conn,
     event_type,
@@ -3193,7 +3199,7 @@ def append_world_event(
             location or "",
             title,
             content,
-            json.dumps(payload or {}, ensure_ascii=False),
+            json.dumps(payload or {}, ensure_ascii=False, default=_world_event_json_default),
             source_type or "runtime",
             str(source_id or ""),
             parent_event_id,
@@ -3251,10 +3257,10 @@ def action_resource_state(conn, resident_id):
     if not row:
         raise ValueError("行动者不存在或缺少 Agent profile")
     return {
-        "energy": int(row["energy"]),
-        "time_budget": int(row["time_budget"]),
-        "money": int(row["money"]),
-        "mood": row["mood"],
+        "energy": int(row["energy"] if row["energy"] is not None else 80),
+        "time_budget": int(row["time_budget"] if row["time_budget"] is not None else 100),
+        "money": int(row["money"] if row["money"] is not None else 0),
+        "mood": row["mood"] or "平稳",
     }
 
 
@@ -4304,8 +4310,8 @@ def active_schedule_rules(conn, role, hour, env=None):
     ).fetchall()
     rules = []
     for row in rows:
-        start_hour = int(row["start_hour"])
-        end_hour = int(row["end_hour"])
+        start_hour = int(row["start_hour"] if row["start_hour"] is not None else 0)
+        end_hour = int(row["end_hour"] if row["end_hour"] is not None else 24)
         if (start_hour <= end_hour and start_hour <= hour < end_hour) or (start_hour > end_hour and (hour >= start_hour or hour < end_hour)):
             rules.append(dict(row))
     return rules
@@ -10372,6 +10378,34 @@ def _life_course_episodes(timeline):
     return episodes
 
 
+def _life_course_latest_recorded_day(conn, resident_id):
+    latest_days = []
+    for table in ("world_event_stream", "simulation_action_logs", "memories"):
+        row = conn.execute(
+            f"SELECT MAX(day) AS latest_day FROM {table} WHERE resident_id = ?",
+            (resident_id,),
+        ).fetchone()
+        if row and row["latest_day"] is not None:
+            latest_days.append(int(row["latest_day"]))
+    return max(latest_days) if latest_days else None
+
+
+def _life_course_temporal_coverage(current_day, latest_recorded_day, from_day=None, to_day=None):
+    current = max(1, int(current_day or 1))
+    latest = int(latest_recorded_day) if latest_recorded_day is not None else None
+    requested_to = max(1, int(to_day)) if to_day is not None else current
+    requested_from = max(1, int(from_day)) if from_day is not None else None
+    return {
+        "current_day": current,
+        "latest_recorded_day": latest,
+        "has_current_day_record": latest == current,
+        "days_without_records_after_latest": max(0, current - latest) if latest is not None else None,
+        "requested_from_day": requested_from,
+        "requested_to_day": requested_to,
+        "window_includes_current_day": requested_to >= current,
+    }
+
+
 def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, limit=240):
     resident = get_resident(conn, resident_id)
     if not resident:
@@ -10417,8 +10451,15 @@ def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, l
             and item.get("timeline_kind") == "action"
         )
     ]
+    temporal_coverage = _life_course_temporal_coverage(
+        get_current_day(conn),
+        _life_course_latest_recorded_day(conn, resident_id),
+        from_day=from_day,
+        to_day=to_day,
+    )
     return {
         "analysis_version": "life-course-v2",
+        "temporal_coverage": temporal_coverage,
         "resident": dict(resident),
         "current_state": current_state,
         "initial_goal": resident["goal"],
