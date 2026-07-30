@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Optional
+
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
@@ -20,7 +24,7 @@ def list_claims(limit: int = Query(100, ge=1, le=500)):
 
 @router.get("/transmissions")
 def list_transmissions(
-    resident_id: int | None = None,
+    resident_id: Optional[int] = None,
     limit: int = Query(200, ge=1, le=1000),
 ):
     if resident_id is None:
@@ -36,7 +40,7 @@ def list_transmissions(
 
 
 @router.get("/exposures")
-def list_exposures(resident_id: int | None = None, limit: int = Query(200, ge=1, le=1000)):
+def list_exposures(resident_id: Optional[int] = None, limit: int = Query(200, ge=1, le=1000)):
     if resident_id is None:
         return _rows("SELECT * FROM information_exposures ORDER BY id DESC LIMIT ?", (limit,))
     return _rows(
@@ -46,7 +50,7 @@ def list_exposures(resident_id: int | None = None, limit: int = Query(200, ge=1,
 
 
 @router.get("/beliefs")
-def list_beliefs(resident_id: int | None = None, limit: int = Query(200, ge=1, le=1000)):
+def list_beliefs(resident_id: Optional[int] = None, limit: int = Query(200, ge=1, le=1000)):
     if resident_id is None:
         return _rows("SELECT * FROM information_beliefs ORDER BY last_updated_at DESC LIMIT ?", (limit,))
     return _rows(
@@ -61,7 +65,7 @@ def list_rules():
 
 
 @router.get("/cases")
-def list_cases(resident_id: int | None = None, limit: int = Query(200, ge=1, le=1000)):
+def list_cases(resident_id: Optional[int] = None, limit: int = Query(200, ge=1, le=1000)):
     if resident_id is None:
         return _rows("SELECT * FROM institutional_cases ORDER BY id DESC LIMIT ?", (limit,))
     return _rows(
@@ -81,7 +85,7 @@ def list_power_profiles():
 
 
 @router.get("/trust-events")
-def list_trust_events(resident_id: int | None = None, limit: int = Query(200, ge=1, le=1000)):
+def list_trust_events(resident_id: Optional[int] = None, limit: int = Query(200, ge=1, le=1000)):
     if resident_id is None:
         return _rows("SELECT * FROM institutional_trust_events ORDER BY id DESC LIMIT ?", (limit,))
     return _rows(
@@ -94,7 +98,7 @@ class CaseRequest(BaseModel):
     case_key: str = Field(min_length=1, max_length=240)
     rule_key: str = Field(min_length=1, max_length=120)
     subject_resident_id: int
-    organization_id: int | None = None
+    organization_id: Optional[int] = None
     evidence: dict = Field(default_factory=dict)
     requested_outcome: str = ""
     bypass_attempted: bool = False
@@ -124,4 +128,3 @@ def create_appeal(case_id: int, payload: AppealRequest):
         )
         conn.commit()
         return result
-

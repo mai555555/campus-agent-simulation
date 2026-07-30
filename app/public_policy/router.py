@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Optional
+
 from fastapi import APIRouter, Query
 
 from app.db import get_connection
@@ -31,7 +35,7 @@ def list_public_service_operations(limit: int = Query(100, ge=1, le=500)):
 
 @router.get("/usages")
 def list_public_service_usages(
-    resident_id: int | None = None,
+    resident_id: Optional[int] = None,
     limit: int = Query(100, ge=1, le=500),
 ):
     if resident_id is None:
@@ -54,7 +58,7 @@ def list_externalities(limit: int = Query(100, ge=1, le=500)):
 
 @router.get("/exposures")
 def list_externality_exposures(
-    resident_id: int | None = None,
+    resident_id: Optional[int] = None,
     limit: int = Query(100, ge=1, le=500),
 ):
     if resident_id is None:
@@ -77,7 +81,7 @@ def list_policy_instruments():
 
 @router.get("/benefits")
 def list_policy_benefits(
-    resident_id: int | None = None,
+    resident_id: Optional[int] = None,
     limit: int = Query(100, ge=1, le=500),
 ):
     if resident_id is None:
@@ -93,4 +97,3 @@ def list_policy_outcomes(limit: int = Query(200, ge=1, le=1000)):
     return _rows(
         "SELECT * FROM policy_outcome_snapshots ORDER BY id DESC LIMIT ?", (limit,)
     )
-

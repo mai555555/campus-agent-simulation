@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 import json
 from datetime import date, datetime, timedelta, timezone
 
@@ -136,7 +138,7 @@ def _runtime_world_date(conn) -> date:
     return datetime.now(timezone.utc).date()
 
 
-def seed_labor_runtime(conn, world_date: date | None = None) -> dict:
+def seed_labor_runtime(conn, world_date: Optional[date] = None) -> dict:
     today = world_date or _runtime_world_date(conn)
     for (
         key, organization_name, title, location, actions, skill_dimension,

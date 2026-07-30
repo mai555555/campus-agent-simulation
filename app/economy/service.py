@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -25,9 +27,9 @@ def _insert_actor(
     actor_type: str,
     display_name: str,
     *,
-    resident_id: int | None = None,
-    organization_id: int | None = None,
-    metadata: dict | None = None,
+    resident_id: Optional[int] = None,
+    organization_id: Optional[int] = None,
+    metadata: Optional[dict] = None,
 ):
     conn.execute(
         """
@@ -59,7 +61,7 @@ def _insert_account(
     account_type: str,
     normal_side: str,
     *,
-    metadata: dict | None = None,
+    metadata: Optional[dict] = None,
 ):
     conn.execute(
         """
@@ -127,7 +129,7 @@ def _insert_authorization_rule(
     counterparty_side: str,
     allowed_target_actor_types: list[str],
     max_amount_minor: int = 0,
-    metadata: dict | None = None,
+    metadata: Optional[dict] = None,
 ):
     conn.execute(
         """
@@ -195,12 +197,12 @@ def post_ledger_transaction(
     source_type: str,
     source_id: str = "",
     entries: list[dict],
-    action_execution_id: int | None = None,
-    world_event_id: int | None = None,
-    occurred_at: datetime | None = None,
+    action_execution_id: Optional[int] = None,
+    world_event_id: Optional[int] = None,
+    occurred_at: Optional[datetime] = None,
     rule_version: str = LEDGER_RULE_VERSION,
     description: str = "",
-    metadata: dict | None = None,
+    metadata: Optional[dict] = None,
 ) -> dict:
     existing = conn.execute(
         "SELECT id FROM ledger_transactions WHERE transaction_key = ?",
@@ -302,10 +304,10 @@ def post_money_transfer(
     transaction_type: str,
     source_type: str,
     source_id: str = "",
-    action_execution_id: int | None = None,
-    world_event_id: int | None = None,
+    action_execution_id: Optional[int] = None,
+    world_event_id: Optional[int] = None,
     description: str = "",
-    metadata: dict | None = None,
+    metadata: Optional[dict] = None,
 ) -> dict:
     return post_money_transfer_minor(
         conn,
@@ -333,10 +335,10 @@ def post_money_transfer_minor(
     transaction_type: str,
     source_type: str,
     source_id: str = "",
-    action_execution_id: int | None = None,
-    world_event_id: int | None = None,
+    action_execution_id: Optional[int] = None,
+    world_event_id: Optional[int] = None,
     description: str = "",
-    metadata: dict | None = None,
+    metadata: Optional[dict] = None,
 ) -> dict:
     existing = conn.execute(
         "SELECT id FROM ledger_transactions WHERE transaction_key = ?",
@@ -414,7 +416,7 @@ def post_authorized_balance_change(
     source_type: str,
     source_id: str = "",
     description: str,
-    metadata: dict | None = None,
+    metadata: Optional[dict] = None,
 ) -> dict:
     if operation_type not in {"issue", "destroy", "external_inflow"}:
         raise ValueError(f"不支持的授权余额操作：{operation_type}")
@@ -668,9 +670,9 @@ def _seed_actor_accounts(
     actor_type: str,
     display_name: str,
     opening_coins: int,
-    resident_id: int | None = None,
-    organization_id: int | None = None,
-    metadata: dict | None = None,
+    resident_id: Optional[int] = None,
+    organization_id: Optional[int] = None,
+    metadata: Optional[dict] = None,
 ) -> tuple[int, bool]:
     actor = _insert_actor(
         conn,
@@ -894,7 +896,7 @@ def _insert_audit_event(
     event_type: str,
     severity: str,
     details: dict,
-    transaction_id: int | None = None,
+    transaction_id: Optional[int] = None,
     source_type: str = "ledger_audit",
     source_id: str = "",
 ) -> None:

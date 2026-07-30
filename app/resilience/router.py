@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -19,7 +23,7 @@ class ShockRequest(BaseModel):
     source_id: str = ""
     branch_key: str = "main"
     random_seed: int = 0
-    duration_minutes: int | None = Field(default=None, ge=1)
+    duration_minutes: Optional[int] = Field(default=None, ge=1)
 
 
 class ShockReplayRequest(BaseModel):
@@ -39,7 +43,7 @@ def list_shock_definitions():
 
 
 @router.get("/shocks")
-def list_shocks(status: str | None = None, limit: int = 100):
+def list_shocks(status: Optional[str] = None, limit: int = 100):
     with get_connection() as conn:
         if status is None:
             rows = conn.execute(
@@ -110,4 +114,3 @@ def create_shock_replay(shock_id: int, payload: ShockReplayRequest):
             return result
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 import hashlib
 import json
 import math
@@ -378,9 +380,9 @@ def originate_credit(
     product_key: str = "campus-emergency-credit-v1",
     purpose: str = "emergency",
     world_time=None,
-    guarantor_resident_id: int | None = None,
-    collateral: dict | None = None,
-    contract_key: str | None = None,
+    guarantor_resident_id: Optional[int] = None,
+    collateral: Optional[dict] = None,
+    contract_key: Optional[str] = None,
 ) -> dict:
     now = _now(world_time)
     product = conn.execute(
@@ -659,7 +661,7 @@ def pay_credit_installment(
     conn,
     *,
     contract_id: int,
-    amount_minor: int | None = None,
+    amount_minor: Optional[int] = None,
     world_time=None,
 ) -> dict:
     now = _now(world_time)

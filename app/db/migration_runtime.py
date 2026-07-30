@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from pathlib import Path
 
 from alembic.config import Config
@@ -29,7 +31,7 @@ BASELINE_REQUIRED_TABLES = {
 }
 
 
-def get_alembic_config(database_url: str | None = None) -> Config:
+def get_alembic_config(database_url: Optional[str] = None) -> Config:
     config_path = PROJECT_ROOT / "alembic.ini"
     config = Config(str(config_path))
     config.set_main_option(
@@ -42,12 +44,12 @@ def get_alembic_config(database_url: str | None = None) -> Config:
     return config
 
 
-def get_current_revision(engine: Engine) -> str | None:
+def get_current_revision(engine: Engine) -> Optional[str]:
     with engine.connect() as connection:
         return MigrationContext.configure(connection).get_current_revision()
 
 
-def get_head_revision(config: Config | None = None) -> str:
+def get_head_revision(config: Optional[Config] = None) -> str:
     heads = ScriptDirectory.from_config(config or get_alembic_config()).get_heads()
     if len(heads) != 1:
         raise RuntimeError(f"Expected one migration head, found: {heads}")
@@ -63,7 +65,7 @@ def list_business_tables(engine: Engine) -> list[str]:
     )
 
 
-def create_migration_engine(database_url: str | None = None) -> Engine:
+def create_migration_engine(database_url: Optional[str] = None) -> Engine:
     return create_database_engine(database_url)
 
 
