@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Optional
+
 import json
 
 from fastapi import APIRouter, Query
@@ -17,7 +21,7 @@ def get_resident_budget(resident_id: int):
 
 @router.get("/snapshots")
 def list_budget_snapshots(
-    resident_id: int | None = None,
+    resident_id: Optional[int] = None,
     limit: int = Query(default=50, ge=1, le=200),
 ):
     with get_connection() as conn:
@@ -45,7 +49,7 @@ def list_budget_snapshots(
 
 @router.get("/savings-transfers")
 def list_savings_transfers(
-    resident_id: int | None = None,
+    resident_id: Optional[int] = None,
     limit: int = Query(default=50, ge=1, le=200),
 ):
     with get_connection() as conn:
@@ -69,8 +73,8 @@ def list_savings_transfers(
 
 @router.get("/choices")
 def list_choice_evaluations(
-    resident_id: int | None = None,
-    decision: str | None = Query(
+    resident_id: Optional[int] = None,
+    decision: Optional[str] = Query(
         default=None, pattern="^(allowed|rejected|deferred)$"
     ),
     limit: int = Query(default=50, ge=1, le=200),

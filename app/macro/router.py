@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Optional
+
 import json
 
 from fastapi import APIRouter, HTTPException
@@ -31,7 +35,7 @@ def list_metric_definitions():
 
 
 @router.get("/snapshots")
-def list_macro_snapshots(window_type: str | None = None, limit: int = 30):
+def list_macro_snapshots(window_type: Optional[str] = None, limit: int = 30):
     with get_connection() as conn:
         if window_type:
             rows = conn.execute(

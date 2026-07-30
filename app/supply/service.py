@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
@@ -120,10 +122,10 @@ def record_inventory_movement(
     unit_cost_minor: int,
     source_type: str,
     source_id: str = "",
-    ledger_transaction_id: int | None = None,
-    production_batch_id: int | None = None,
+    ledger_transaction_id: Optional[int] = None,
+    production_batch_id: Optional[int] = None,
     occurred_at=None,
-    metadata: dict | None = None,
+    metadata: Optional[dict] = None,
 ):
     existing = conn.execute(
         "SELECT * FROM inventory_movements WHERE movement_key = ?",
@@ -201,7 +203,7 @@ def settle_goods_trade(
     unit_price_minor: int,
     source_type: str,
     source_id: str = "",
-    action_execution_id: int | None = None,
+    action_execution_id: Optional[int] = None,
     consume_immediately: bool = False,
 ):
     item = _item(conn, item_name)
@@ -312,7 +314,7 @@ def fulfill_runtime_consumption(
     resident_id: int,
     location: str,
     amount_minor: int,
-    action_execution_id: int | None,
+    action_execution_id: Optional[int],
 ):
     availability = consumption_availability(conn, location)
     if not availability["available"]:
@@ -452,8 +454,8 @@ def deliver_service(
     delivery_key: str,
     offering_key: str,
     consumer_actor_key: str,
-    consumer_resident_id: int | None = None,
-    world_action_execution_id: int | None = None,
+    consumer_resident_id: Optional[int] = None,
+    world_action_execution_id: Optional[int] = None,
     requested_at=None,
 ):
     existing = conn.execute(

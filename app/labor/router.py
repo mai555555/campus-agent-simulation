@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Optional
+
 import json
 
 from fastapi import APIRouter, Query
@@ -45,7 +49,7 @@ def list_labor_positions():
 
 
 @router.get("/contracts")
-def list_employment_contracts(resident_id: int | None = None):
+def list_employment_contracts(resident_id: Optional[int] = None):
     with get_connection() as conn:
         where, params = ("", ())
         if resident_id is not None:
@@ -72,7 +76,7 @@ def list_employment_contracts(resident_id: int | None = None):
 
 @router.get("/shifts")
 def list_labor_shifts(
-    resident_id: int | None = None,
+    resident_id: Optional[int] = None,
     limit: int = Query(default=50, ge=1, le=200),
 ):
     with get_connection() as conn:
@@ -103,7 +107,7 @@ def list_labor_shifts(
 
 
 @router.get("/income-programs")
-def list_income_programs(resident_id: int | None = None):
+def list_income_programs(resident_id: Optional[int] = None):
     with get_connection() as conn:
         where, params = ("", ())
         if resident_id is not None:
@@ -126,7 +130,7 @@ def list_income_programs(resident_id: int | None = None):
 
 @router.get("/payments")
 def list_income_payments(
-    resident_id: int | None = None,
+    resident_id: Optional[int] = None,
     limit: int = Query(default=50, ge=1, le=200),
 ):
     with get_connection() as conn:
@@ -150,7 +154,7 @@ def list_income_payments(
 
 
 @router.get("/expense-obligations")
-def list_expense_obligations(resident_id: int | None = None):
+def list_expense_obligations(resident_id: Optional[int] = None):
     with get_connection() as conn:
         where, params = ("", ())
         if resident_id is not None:

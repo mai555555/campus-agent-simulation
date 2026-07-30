@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Optional
+
 import json
 
 from fastapi import APIRouter, Query
@@ -93,8 +97,8 @@ def get_runtime_organization(organization_id: int):
 
 @router.get("/proposals")
 def list_organization_proposals(
-    organization_id: int | None = None,
-    status: str | None = Query(
+    organization_id: Optional[int] = None,
+    status: Optional[str] = Query(
         default=None,
         pattern="^(pending|approved|rejected|executed|cancelled|expired)$",
     ),
@@ -129,8 +133,8 @@ def list_organization_proposals(
 
 @router.get("/commitments")
 def list_organization_commitments(
-    organization_id: int | None = None,
-    status: str | None = Query(
+    organization_id: Optional[int] = None,
+    status: Optional[str] = Query(
         default=None,
         pattern="^(active|fulfilled|breached|cancelled)$",
     ),
@@ -171,7 +175,7 @@ def list_organization_commitments(
 
 @router.get("/events")
 def list_organization_events(
-    organization_id: int | None = None,
+    organization_id: Optional[int] = None,
     limit: int = Query(default=50, ge=1, le=200),
 ):
     with get_connection() as conn:
@@ -198,4 +202,3 @@ def list_organization_events(
             item["details"] = json.loads(item.pop("details_json") or "{}")
             result.append(item)
         return result
-
