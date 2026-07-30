@@ -60,6 +60,11 @@ def migrate_database(check_only: bool = False) -> dict:
         command.upgrade(config, "head")
         current = get_current_revision(engine)
         tables = list_business_tables(engine)
+        if current != head:
+            raise RuntimeError(
+                "Database migration did not persist the target revision: "
+                f"current={current or 'unversioned'}, head={head}."
+            )
         return {
             "current": current,
             "head": head,

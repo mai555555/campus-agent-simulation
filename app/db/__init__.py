@@ -28,7 +28,6 @@ POSTGRES_ID_TABLES = {
     "world_branches",
     "economic_actors", "ledger_accounts", "ledger_transactions",
     "ledger_entries", "ledger_authorization_rules", "ledger_audit_events",
-    "ledger_authorized_operations",
     "organization_roles", "organization_proposals", "organization_commitments",
     "organization_events",
     "catalog_items", "inventory_accounts", "production_recipes",
@@ -168,7 +167,12 @@ class PostgresConnection:
         if needs_id:
             statement = f"{statement.rstrip(';')} RETURNING id"
 
-        cursor = self._connection.execute(statement, execute_params)
+        if execute_params:
+            cursor = self._connection.execute(statement, execute_params)
+        else:
+            # Passing an empty tuple makes psycopg parse literal percent signs
+            # as placeholders (for example LIKE '%学生%').
+            cursor = self._connection.execute(statement)
         rowcount = cursor.rowcount
         inserted_row = cursor.fetchone() if needs_id and rowcount else None
         lastrowid = inserted_row["id"] if inserted_row else None

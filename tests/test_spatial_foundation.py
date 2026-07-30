@@ -83,10 +83,11 @@ class SpatialFoundationTest(unittest.TestCase):
         )
         main.SOCIAL_SCHEMA_READY = False
         main.WORLD_SCHEMA_READY = False
-        main.ensure_campus_state_table(connection)
-        main.ensure_space_system(connection)
-        main.ensure_external_information_system(connection)
-        main.ensure_world_runtime_tables(connection)
+        main.ensure_campus_state_table(connection, allow_ddl=True)
+        main.ensure_space_system(connection, allow_ddl=True)
+        main.ensure_agent_news_system(connection, allow_ddl=True)
+        main.ensure_external_information_system(connection, allow_ddl=True)
+        main.ensure_world_runtime_tables(connection, allow_ddl=True)
         connection.commit()
         connection.close()
 

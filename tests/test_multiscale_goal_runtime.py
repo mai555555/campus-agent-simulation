@@ -33,11 +33,11 @@ class MultiscaleGoalRuntimeTest(unittest.TestCase):
             """
         )
         main.SOCIAL_SCHEMA_READY = False
-        main.ensure_social_system_tables(self.conn)
-        main.ensure_campus_state_table(self.conn)
-        main.ensure_space_system(self.conn)
+        main.ensure_social_system_tables(self.conn, allow_ddl=True)
+        main.ensure_campus_state_table(self.conn, allow_ddl=True)
+        main.ensure_space_system(self.conn, allow_ddl=True)
         main.WORLD_SCHEMA_READY = False
-        main.ensure_world_runtime_tables(self.conn)
+        main.ensure_world_runtime_tables(self.conn, allow_ddl=True)
         self.world_time = datetime.fromisoformat("2026-07-28T15:30:00+08:00")
 
     def tearDown(self):
