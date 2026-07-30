@@ -3138,7 +3138,9 @@ def update_world_runtime_status(conn, status):
 
 
 def _world_event_json_default(value):
-    if isinstance(value, (date, datetime)):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, Decimal):
         return float(value)
