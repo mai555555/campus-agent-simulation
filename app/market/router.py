@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Optional
+
 import json
 
 from fastapi import APIRouter, Query
@@ -80,7 +84,7 @@ def list_market_frictions(limit: int = Query(default=100, ge=1, le=500)):
 def get_market_quote(
     item_name: str,
     location: str,
-    resident_id: int | None = None,
+    resident_id: Optional[int] = None,
 ):
     with get_connection() as conn:
         mechanism = find_market_mechanism(

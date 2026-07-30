@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 import os
 from pathlib import Path
 import re
@@ -38,7 +40,7 @@ def get_database_url() -> str:
     return f"sqlite+pysqlite:///{db_path.resolve()}"
 
 
-def create_database_engine(database_url: str | None = None) -> Engine:
+def create_database_engine(database_url: Optional[str] = None) -> Engine:
     url = database_url or get_database_url()
     options: dict = {"pool_pre_ping": True}
     if url.startswith("sqlite"):

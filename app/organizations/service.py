@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -160,7 +162,7 @@ def _record_event(
     organization_id: int,
     event_type: str,
     details: dict,
-    proposal_id: int | None = None,
+    proposal_id: Optional[int] = None,
     severity: str = "info",
 ) -> None:
     conn.execute(
@@ -526,8 +528,8 @@ def create_organization_commitment(
     due_at: str,
     counterparty_actor_key: str = "",
     amount_minor: int = 0,
-    proposal_id: int | None = None,
-    metadata: dict | None = None,
+    proposal_id: Optional[int] = None,
+    metadata: Optional[dict] = None,
 ) -> dict:
     existing = conn.execute(
         "SELECT * FROM organization_commitments WHERE commitment_key = ?",
@@ -597,7 +599,7 @@ def record_organization_relationship_evidence(
     relation_type: str,
     trust_delta: int = 0,
     influence_delta: int = 0,
-    evidence: dict | None = None,
+    evidence: Optional[dict] = None,
 ) -> dict:
     if from_organization_id == to_organization_id:
         raise ValueError("组织不能与自身建立外部关系")

@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Optional
+
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
@@ -48,11 +52,11 @@ class RawObservationRequest(BaseModel):
     payload: dict
     observed_at: str
     parser_version: str
-    sync_run_id: int | None = None
+    sync_run_id: Optional[int] = None
     request_fingerprint: str = ""
     http_status: int = 200
     content_type: str = "application/json"
-    ingested_at: str | None = None
+    ingested_at: Optional[str] = None
 
 
 class NormalizeEventRequest(BaseModel):
@@ -62,27 +66,27 @@ class NormalizeEventRequest(BaseModel):
     title: str
     summary: str
     occurred_at: str
-    published_at: str | None = None
-    effective_from: str | None = None
-    effective_to: str | None = None
-    expires_at: str | None = None
+    published_at: Optional[str] = None
+    effective_from: Optional[str] = None
+    effective_to: Optional[str] = None
+    expires_at: Optional[str] = None
     geo_scope: dict = Field(default_factory=dict)
     campus_scope: dict = Field(default_factory=dict)
     affected_spaces: list[str] = Field(default_factory=list)
     affected_roles: list[str] = Field(default_factory=list)
     affected_organizations: list[str] = Field(default_factory=list)
     affected_economic_sectors: list[str] = Field(default_factory=list)
-    magnitude: float | None = None
+    magnitude: Optional[float] = None
     direction: str = "neutral"
     unit: str = ""
     severity: float = Field(default=0, ge=0, le=1)
     novelty: float = Field(default=0, ge=0, le=1)
-    confidence: float | None = Field(default=None, ge=0, le=1)
+    confidence: Optional[float] = Field(default=None, ge=0, le=1)
     verification_state: str = "unverified"
     payload: dict = Field(default_factory=dict)
     semantic_key: str = ""
-    correction_of: int | None = None
-    replaces_event_id: int | None = None
+    correction_of: Optional[int] = None
+    replaces_event_id: Optional[int] = None
 
 
 class SnapshotRequest(BaseModel):
@@ -97,8 +101,8 @@ class SnapshotRequest(BaseModel):
 class ModeRequest(BaseModel):
     branch_key: str = "main"
     mode: str
-    snapshot_id: int | None = None
-    replay_start_world_time: str | None = None
+    snapshot_id: Optional[int] = None
+    replay_start_world_time: Optional[str] = None
     replay_speed: float = Field(default=1, gt=0)
     simulation_seed: int = 0
 
@@ -110,17 +114,17 @@ class ExposureRequest(BaseModel):
     channel: str
     scheduled_at: str
     credibility_at_delivery: float = Field(ge=0, le=1)
-    sender_resident_id: int | None = None
-    parent_exposure_id: int | None = None
+    sender_resident_id: Optional[int] = None
+    parent_exposure_id: Optional[int] = None
     distortion: dict = Field(default_factory=dict)
     attention_cost: float = Field(default=0, ge=0)
-    correction_of_exposure_id: int | None = None
+    correction_of_exposure_id: Optional[int] = None
 
 
 class GovernanceReviewRequest(BaseModel):
     reviewer: str
     decision: str
-    reviewed_at: str | None = None
+    reviewed_at: Optional[str] = None
     license_approved: bool = False
     purpose_approved: bool = False
     retention_approved: bool = False
@@ -133,7 +137,7 @@ class ExperimentBindingRequest(BaseModel):
     branch_key: str = "main"
     external_mode: str
     simulation_seed: int
-    snapshot_id: int | None = None
+    snapshot_id: Optional[int] = None
     metadata: dict = Field(default_factory=dict)
 
 
