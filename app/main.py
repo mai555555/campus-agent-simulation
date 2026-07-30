@@ -2,6 +2,7 @@ import json
 import hashlib
 from pathlib import Path
 from datetime import date, datetime, timezone, timedelta
+from decimal import Decimal
 import random
 import re
 import requests
@@ -3139,6 +3140,10 @@ def update_world_runtime_status(conn, status):
 def _world_event_json_default(value):
     if isinstance(value, (date, datetime)):
         return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, set):
+        return sorted(value)
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
