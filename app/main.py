@@ -7302,11 +7302,38 @@ def world_tick_due(runtime):
     return (get_world_now() - last).total_seconds() >= interval
 
 
+def world_runtime_auto_start_enabled():
+    return os.getenv("WORLD_RUNTIME_AUTO_START", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def ensure_world_runtime_running_unless_manually_paused(conn, runtime):
+    if runtime.get("status") != "paused" or not world_runtime_auto_start_enabled():
+        return runtime
+    if get_simulation_state_value(conn, "world_runtime_manual_pause", "false") == "true":
+        return runtime
+    runtime = update_world_runtime_status(conn, "running")
+    append_world_event(
+        conn,
+        "world_runtime_auto_start",
+        "世界运行已自动恢复",
+        "服务启动后自动恢复校园平行世界后台运行。",
+        payload={"source": "world_runner_loop"},
+    )
+    conn.commit()
+    return runtime
+
+
 def world_runner_loop():
     while True:
         try:
             with get_connection() as conn:
                 runtime = get_world_runtime(conn)
+                runtime = ensure_world_runtime_running_unless_manually_paused(conn, runtime)
             if world_tick_due(runtime):
                 advance_world_tick(reason="background")
         except Exception as exc:
@@ -9352,6 +9379,7 @@ def upsert_observer_session(payload: ObserverSessionRequest):
 def start_world_runtime(authorization: Optional[str] = Header(default=None)):
     require_admin_token(authorization)
     with get_connection() as conn:
+        set_simulation_state_value(conn, "world_runtime_manual_pause", "false")
         runtime = update_world_runtime_status(conn, "running")
         append_world_event(conn, "admin_world_start", "世界运行已启动", "admin 启动了校园平行世界后台运行。")
         conn.commit()
@@ -9362,6 +9390,7 @@ def start_world_runtime(authorization: Optional[str] = Header(default=None)):
 def pause_world_runtime(authorization: Optional[str] = Header(default=None)):
     require_admin_token(authorization)
     with get_connection() as conn:
+        set_simulation_state_value(conn, "world_runtime_manual_pause", "true")
         runtime = update_world_runtime_status(conn, "paused")
         append_world_event(conn, "admin_world_pause", "世界运行已暂停", "admin 暂停了校园平行世界后台运行。")
         conn.commit()
