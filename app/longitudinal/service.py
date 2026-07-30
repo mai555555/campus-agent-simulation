@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+from app.json_utils import json_dumps
 from datetime import datetime, timezone
 
 
 def _json(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return json_dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def _load(value, fallback):

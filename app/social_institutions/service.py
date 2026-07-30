@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from datetime import datetime, timedelta, timezone
 import hashlib
-import json
+from app.json_utils import json_dumps
 
 from app.economy.service import post_money_transfer_minor
 
@@ -13,7 +14,7 @@ RULE_VERSION = "social-institution-v1"
 
 
 def _json(value) -> str:
-    return json.dumps(value or {}, ensure_ascii=False, sort_keys=True)
+    return json_dumps(value or {}, ensure_ascii=False, sort_keys=True)
 
 
 def _load(value, default=None):

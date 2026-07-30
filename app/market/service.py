@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 import hashlib
-import json
+from app.json_utils import json_dumps
 from datetime import datetime, timedelta, timezone
 
 from app.budget.service import budget_runtime_available, calculate_budget_state
@@ -19,7 +19,7 @@ RULE_VERSION = "market-pricing-v1"
 
 
 def _json(value) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return json_dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def _now(value=None) -> datetime:

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 from typing import Optional
 
-import json
+from app.json_utils import json_dumps
 from datetime import datetime, timedelta, timezone
 
 from app.economy.service import MINOR_PER_COIN, post_money_transfer_minor
@@ -23,7 +24,7 @@ SEEDED_MEMBERS = {
 
 
 def _json(value) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return json_dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def _parse_time(value) -> datetime:

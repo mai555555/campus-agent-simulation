@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 from typing import Optional
 
-import json
+from app.json_utils import json_dumps
 from datetime import date, datetime, timedelta, timezone
 
 from app.economy.service import (
@@ -34,7 +35,7 @@ CONTRACT_DEFAULTS = (
 
 
 def _json(value) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return json_dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def _now(value=None) -> datetime:
