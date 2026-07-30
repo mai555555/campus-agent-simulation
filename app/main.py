@@ -60,6 +60,25 @@ from app.social_institutions.router import router as social_institution_router
 from app.social_institutions.service import process_social_institution_runtime
 from app.macro.router import router as macro_router
 from app.macro.service import process_macro_runtime
+from app.adaptation.router import router as adaptation_router
+from app.adaptation.learning import process_adaptive_learning
+from app.adaptation.norms import process_norm_emergence
+from app.adaptation.institutions import process_institution_evolution
+from app.resilience.router import router as resilience_router
+from app.resilience.service import process_resilience_runtime
+from app.population.router import router as population_router
+from app.population.service import (
+    population_runtime_available,
+    process_population_runtime,
+)
+from app.external_world.router import router as external_world_router
+from app.external_world.service import (
+    external_world_available,
+    process_external_world_runtime,
+)
+from app.external_world.adapters import FixedRSSAdapter, OpenMeteoAdapter
+from app.longitudinal.router import router as longitudinal_router
+from app.longitudinal.service import process_longitudinal_runtime
 from app.body_router import router as body_router
 from app.capability_router import router as capability_router
 from app.capability_runtime import (
@@ -116,6 +135,11 @@ app.include_router(credit_router)
 app.include_router(public_policy_router)
 app.include_router(social_institution_router)
 app.include_router(macro_router)
+app.include_router(adaptation_router)
+app.include_router(resilience_router)
+app.include_router(population_router)
+app.include_router(external_world_router)
+app.include_router(longitudinal_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -1877,55 +1901,22 @@ def fetch_met_no_weather(latitude=CHENGDU_LATITUDE, longitude=CHENGDU_LONGITUDE)
 
 
 def fetch_real_weather(latitude=CHENGDU_LATITUDE, longitude=CHENGDU_LONGITUDE):
-    url = "https://api.open-meteo.com/v1/forecast"
-    params = {
-        "latitude": latitude,
-        "longitude": longitude,
-        "current": "temperature_2m,precipitation,rain,weather_code,wind_speed_10m,relative_humidity_2m",
-        "timezone": "Asia/Shanghai",
-        "forecast_days": 1,
-    }
-    last_error = None
-    data = None
-    for attempt in range(2):
-        try:
-            response = requests.get(
-                url,
-                params=params,
-                headers={"User-Agent": "campus-agent-simulation/1.0"},
-                timeout=12,
-            )
-            response.raise_for_status()
-            data = response.json()
-            break
-        except requests.RequestException as exc:
-            last_error = exc
-            logger.warning("Real weather request failed on attempt %s: %s", attempt + 1, exc)
-
-    if data is None:
-        logger.warning("Open-Meteo unavailable, trying Met.no fallback: %s", last_error)
-        return fetch_met_no_weather(latitude, longitude)
-    current = data.get("current", {})
-    weather_code = int(current.get("weather_code", 0))
-    precipitation = float(current.get("precipitation", 0) or 0)
-    rain = float(current.get("rain", 0) or 0)
-    rainfall = max(0, min(100, int(round(max(precipitation, rain) * 20))))
-    temperature = int(round(float(current.get("temperature_2m", 24))))
-    weather = WEATHER_CODE_MAP.get(weather_code, "多云")
-    if temperature >= 32 and weather in {"晴", "多云"}:
-        weather = "闷热"
+    record = OpenMeteoAdapter().fetch(
+        {
+            "latitude": latitude,
+            "longitude": longitude,
+            "timezone": "Asia/Shanghai",
+            "timeout_seconds": 12,
+        }
+    )[0]
+    payload = record["payload"]
     return {
-        "weather": weather,
-        "temperature": temperature,
-        "rainfall": rainfall,
+        "weather": payload["weather"],
+        "temperature": payload["temperature"],
+        "rainfall": payload["rainfall"],
         "weather_source": "open-meteo",
-        "weather_observed_at": str(current.get("time", "")),
-        "raw": {
-            "weather_code": weather_code,
-            "wind_speed_10m": current.get("wind_speed_10m"),
-            "relative_humidity_2m": current.get("relative_humidity_2m"),
-            "precipitation": precipitation,
-        },
+        "weather_observed_at": record["observed_at"],
+        "raw": payload,
     }
 
 
@@ -4611,11 +4602,24 @@ steps 保持 3 条以内，时间必须落在计划窗口内。
 def ensure_current_action_plans(conn, world_time):
     ensure_world_runtime_tables(conn)
     window_start, window_end = get_world_plan_window(world_time)
+    lifecycle_join = ""
+    lifecycle_filter = ""
+    if population_runtime_available(conn):
+        lifecycle_join = (
+            "LEFT JOIN population_profiles lifecycle "
+            "ON lifecycle.resident_id = r.id"
+        )
+        lifecycle_filter = (
+            "WHERE lifecycle.resident_id IS NULL "
+            "OR lifecycle.lifecycle_status = 'active'"
+        )
     residents = conn.execute(
-        """
+        f"""
         SELECT r.id, r.name, r.role, r.personality, r.goal, r.money, r.location, p.strategy
         FROM residents r
         LEFT JOIN agent_profiles p ON p.resident_id = r.id
+        {lifecycle_join}
+        {lifecycle_filter}
         ORDER BY r.id
         """
     ).fetchall()
@@ -5876,6 +5880,9 @@ def build_runtime_perception(conn, agent, world_time, day, slot, plan, step, obs
         "local_observations": cognitive_context["observations"],
         "beliefs": cognitive_context["beliefs"],
         "spatial_memories": cognitive_context["spatial_memories"],
+        "adaptive_memories": cognitive_context["adaptive_memories"],
+        "learned_strategies": cognitive_context["strategy_states"],
+        "norm_beliefs": cognitive_context["norm_beliefs"],
         "received_information": cognitive_context["received_information"],
         "information_boundary": (
             "仅包含亲历、自身状态、局部观察、已接收消息和由这些证据形成的信念；"
@@ -6639,6 +6646,17 @@ def select_world_tick_agents(conn, runtime):
             "ON spatial.resident_id = r.id"
         )
         movement_column = "COALESCE(spatial.movement_status, 'idle') AS movement_status"
+    lifecycle_join = ""
+    lifecycle_filter = ""
+    if population_runtime_available(conn):
+        lifecycle_join = (
+            "LEFT JOIN population_profiles lifecycle "
+            "ON lifecycle.resident_id = r.id"
+        )
+        lifecycle_filter = (
+            "WHERE lifecycle.resident_id IS NULL "
+            "OR lifecycle.lifecycle_status = 'active'"
+        )
     agents = [
         dict(row)
         for row in conn.execute(
@@ -6648,6 +6666,8 @@ def select_world_tick_agents(conn, runtime):
             FROM residents r
             LEFT JOIN agent_profiles p ON p.resident_id = r.id
             {movement_join}
+            {lifecycle_join}
+            {lifecycle_filter}
             ORDER BY r.id
             """
         ).fetchall()
@@ -6834,6 +6854,7 @@ def advance_world_tick(reason="background"):
             day_sync = sync_current_day_with_world_date(conn, world_time)
             day = day_sync["day"]
             slot = world_slot_from_hour(world_time.hour)
+            population_updates = process_population_runtime(conn, world_time)
             ensure_result = ensure_current_action_plans(conn, world_time)
             env = sync_world_time_environment(conn, world_time)
             tick_index_row = conn.execute("SELECT COALESCE(MAX(tick_index), 0) AS value FROM world_ticks").fetchone()
@@ -6861,10 +6882,31 @@ def advance_world_tick(reason="background"):
                 day=day,
                 slot=slot,
             )
-            weather_sync = maybe_auto_sync_real_weather(conn, world_time, tick_id=tick_id, day=day, slot=slot)
-            if not weather_sync.get("skipped") and not weather_sync.get("failed"):
-                env = get_campus_environment(conn, day)
-            external_sync = maybe_auto_sync_external_information(conn, world_time, tick_id=tick_id, day=day, slot=slot)
+            if external_world_available(conn):
+                external_world_updates = process_external_world_runtime(
+                    conn,
+                    world_time,
+                    branch_key=active_world_branch_key(conn),
+                )
+                weather_sync = {
+                    "skipped": True,
+                    "reason": "delegated_to_external_ingestion",
+                }
+                external_sync = {
+                    "skipped": True,
+                    "reason": "delegated_to_external_ingestion",
+                }
+            else:
+                external_world_updates = {"available": False}
+                weather_sync = maybe_auto_sync_real_weather(
+                    conn, world_time, tick_id=tick_id, day=day, slot=slot
+                )
+                if not weather_sync.get("skipped") and not weather_sync.get("failed"):
+                    env = get_campus_environment(conn, day)
+                external_sync = maybe_auto_sync_external_information(
+                    conn, world_time, tick_id=tick_id, day=day, slot=slot
+                )
+            resilience_updates = process_resilience_runtime(conn, world_time)
             start_event = append_world_event(
                 conn,
                 "world_tick_started",
@@ -6884,6 +6926,9 @@ def advance_world_tick(reason="background"):
                         "applied_count": len(delayed_effects["applied"]),
                         "failed_count": len(delayed_effects["failed"]),
                     },
+                    "resilience_updates": resilience_updates,
+                    "population_updates": population_updates,
+                    "external_world_updates": external_world_updates,
                     "day_sync": day_sync,
                 },
                 day=day,
@@ -7012,6 +7057,24 @@ def advance_world_tick(reason="background"):
                 results.append(item)
                 if not item["success"]:
                     failed += 1
+            adaptive_learning = process_adaptive_learning(
+                conn,
+                world_time=world_time,
+                tick_id=tick_id,
+                tick_number=tick_index,
+                branch_key=active_world_branch_key(conn),
+                resident_ids=[int(agent["id"]) for agent in selected_agents],
+            )
+            norm_emergence = process_norm_emergence(
+                conn,
+                branch_key=active_world_branch_key(conn),
+                tick_number=tick_index,
+                world_time=world_time,
+            )
+            institution_evolution = process_institution_evolution(
+                conn, world_time
+            )
+            longitudinal_updates = process_longitudinal_runtime(conn, world_time)
             completed_at = get_world_now().isoformat()
             conn.execute(
                 """
@@ -7053,6 +7116,13 @@ def advance_world_tick(reason="background"):
                     "public_policy_updates": public_policy_updates,
                     "social_institution_updates": social_institution_updates,
                     "macro_updates": macro_updates,
+                    "adaptive_learning": adaptive_learning,
+                    "norm_emergence": norm_emergence,
+                    "institution_evolution": institution_evolution,
+                    "resilience_updates": resilience_updates,
+                    "population_updates": population_updates,
+                    "external_world_updates": external_world_updates,
+                    "longitudinal_updates": longitudinal_updates,
                     "organization_event_count": len(organization_events),
                     "spatial_movements": {
                         "advanced_count": len(movement_results),
@@ -7110,6 +7180,13 @@ def advance_world_tick(reason="background"):
                 "public_policy_updates": public_policy_updates,
                 "social_institution_updates": social_institution_updates,
                 "macro_updates": macro_updates,
+                "adaptive_learning": adaptive_learning,
+                "norm_emergence": norm_emergence,
+                "institution_evolution": institution_evolution,
+                "resilience_updates": resilience_updates,
+                "population_updates": population_updates,
+                "external_world_updates": external_world_updates,
+                "longitudinal_updates": longitudinal_updates,
                 "organization_events": organization_events,
                 "spatial_movements": movement_results,
                 "body_states": body_states,
@@ -7505,6 +7582,79 @@ MACRO_SNAPSHOT_STATE_TABLES = {
     "macro_reconciliation_checks": "id",
 }
 
+ADAPTATION_SNAPSHOT_STATE_TABLES = {
+    "constraint_rules": "id",
+    "constraint_evaluations": "id",
+    "boundary_attempts": "id",
+    "constraint_consequences": "id",
+    "experience_records": "id",
+    "adaptive_memories": "id",
+    "memory_revisions": "id",
+    "strategy_states": "id",
+    "learning_updates": "id",
+    "norm_signals": "id",
+    "norm_candidates": "id",
+    "norm_evidence": "id",
+    "agent_norm_beliefs": "resident_id, norm_id",
+    "norm_state_transitions": "id",
+    "norm_responses": "id",
+    "rule_primitives": "id",
+    "institutional_rule_proposals": "id",
+    "rule_deliberations": "id",
+    "evolved_rule_versions": "id",
+    "rule_effect_reviews": "id",
+}
+
+RESILIENCE_SNAPSHOT_STATE_TABLES = {
+    "shock_definitions": "id",
+    "shock_instances": "id",
+    "shock_impacts": "id",
+    "resident_shock_exposures": "id",
+    "recovery_actions": "id",
+    "shock_state_transitions": "id",
+}
+
+POPULATION_SNAPSHOT_STATE_TABLES = {
+    "population_profiles": "resident_id",
+    "population_events": "id",
+    "resident_role_assignments": "id",
+    "resident_residency_periods": "id",
+    "membership_transitions": "id",
+    "population_effects": "id",
+}
+
+EXTERNAL_WORLD_SNAPSHOT_STATE_TABLES = {
+    "external_sources": "id",
+    "external_sync_runs": "id",
+    "external_raw_observations": "id",
+    "external_source_locks": "source_id",
+    "external_event_catalog": "event_type",
+    "external_events": "id",
+    "external_event_links": "id",
+    "external_data_snapshots": "id",
+    "external_snapshot_items": "snapshot_id, external_event_id",
+    "external_runtime_modes": "branch_key",
+    "external_exposures": "id",
+    "external_replay_deliveries": "id",
+    "external_impact_rules": "id",
+    "external_event_impacts": "id",
+    "external_state_reconciliations": "id",
+    "external_governance_reviews": "id",
+    "external_access_audit": "id",
+    "external_runtime_health": "branch_key",
+    "external_snapshot_exports": "id",
+    "external_experiment_bindings": "id",
+}
+
+LONGITUDINAL_SNAPSHOT_STATE_TABLES = {
+    "longitudinal_profiles": "resident_id",
+    "life_course_stages": "id",
+    "life_turning_points": "id",
+    "path_dependency_links": "id",
+    "longitudinal_aggregations": "id",
+    "trajectory_reconciliations": "id",
+}
+
 
 def snapshot_table_exists(conn, table_name):
     return bool(conn.execute(f"PRAGMA table_info({table_name})").fetchall())
@@ -7529,6 +7679,11 @@ def snapshot_state_tables(conn):
             **PUBLIC_POLICY_SNAPSHOT_STATE_TABLES,
             **SOCIAL_INSTITUTION_SNAPSHOT_STATE_TABLES,
             **MACRO_SNAPSHOT_STATE_TABLES,
+            **ADAPTATION_SNAPSHOT_STATE_TABLES,
+            **RESILIENCE_SNAPSHOT_STATE_TABLES,
+            **POPULATION_SNAPSHOT_STATE_TABLES,
+            **EXTERNAL_WORLD_SNAPSHOT_STATE_TABLES,
+            **LONGITUDINAL_SNAPSHOT_STATE_TABLES,
         }
     ):
         return {
@@ -7548,6 +7703,11 @@ def snapshot_state_tables(conn):
             **PUBLIC_POLICY_SNAPSHOT_STATE_TABLES,
             **SOCIAL_INSTITUTION_SNAPSHOT_STATE_TABLES,
             **MACRO_SNAPSHOT_STATE_TABLES,
+            **ADAPTATION_SNAPSHOT_STATE_TABLES,
+            **RESILIENCE_SNAPSHOT_STATE_TABLES,
+            **POPULATION_SNAPSHOT_STATE_TABLES,
+            **EXTERNAL_WORLD_SNAPSHOT_STATE_TABLES,
+            **LONGITUDINAL_SNAPSHOT_STATE_TABLES,
         }
     if all(
         snapshot_table_exists(conn, table_name)
@@ -7815,6 +7975,16 @@ def create_world_snapshot_record(
         schema_version = "world-snapshot-v18-social-institutions"
     if all(table in state for table in MACRO_SNAPSHOT_STATE_TABLES):
         schema_version = "world-snapshot-v19-macro-reconciliation"
+    if all(table in state for table in ADAPTATION_SNAPSHOT_STATE_TABLES):
+        schema_version = "world-snapshot-v23-institution-evolution"
+    if all(table in state for table in RESILIENCE_SNAPSHOT_STATE_TABLES):
+        schema_version = "world-snapshot-v24-shock-recovery"
+    if all(table in state for table in POPULATION_SNAPSHOT_STATE_TABLES):
+        schema_version = "world-snapshot-v25-population-mobility"
+    if all(table in state for table in EXTERNAL_WORLD_SNAPSHOT_STATE_TABLES):
+        schema_version = "world-snapshot-v30-external-governance"
+    if all(table in state for table in LONGITUDINAL_SNAPSHOT_STATE_TABLES):
+        schema_version = "world-snapshot-v31-longitudinal-paths"
     state_json = canonical_json(state)
     event_cursor = int(event_row["value"] or 0)
     effective_branch_key = branch_key or runtime.get("active_branch_key") or "main"
@@ -7898,7 +8068,117 @@ def snapshot_row_or_error(conn, snapshot_id):
     state = load_json_text(row["state_json"], {})
     if not isinstance(state, dict):
         raise ValueError("世界快照状态格式无效")
-    if row["schema_version"] == "world-snapshot-v19-macro-reconciliation":
+    if row["schema_version"] == "world-snapshot-v31-longitudinal-paths":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+            **SUPPLY_SNAPSHOT_STATE_TABLES,
+            **LABOR_SNAPSHOT_STATE_TABLES,
+            **BUDGET_SNAPSHOT_STATE_TABLES,
+            **MARKET_SNAPSHOT_STATE_TABLES,
+            **CREDIT_SNAPSHOT_STATE_TABLES,
+            **PUBLIC_POLICY_SNAPSHOT_STATE_TABLES,
+            **SOCIAL_INSTITUTION_SNAPSHOT_STATE_TABLES,
+            **MACRO_SNAPSHOT_STATE_TABLES,
+            **ADAPTATION_SNAPSHOT_STATE_TABLES,
+            **RESILIENCE_SNAPSHOT_STATE_TABLES,
+            **POPULATION_SNAPSHOT_STATE_TABLES,
+            **EXTERNAL_WORLD_SNAPSHOT_STATE_TABLES,
+            **LONGITUDINAL_SNAPSHOT_STATE_TABLES,
+        }
+    elif row["schema_version"] == "world-snapshot-v30-external-governance":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+            **SUPPLY_SNAPSHOT_STATE_TABLES,
+            **LABOR_SNAPSHOT_STATE_TABLES,
+            **BUDGET_SNAPSHOT_STATE_TABLES,
+            **MARKET_SNAPSHOT_STATE_TABLES,
+            **CREDIT_SNAPSHOT_STATE_TABLES,
+            **PUBLIC_POLICY_SNAPSHOT_STATE_TABLES,
+            **SOCIAL_INSTITUTION_SNAPSHOT_STATE_TABLES,
+            **MACRO_SNAPSHOT_STATE_TABLES,
+            **ADAPTATION_SNAPSHOT_STATE_TABLES,
+            **RESILIENCE_SNAPSHOT_STATE_TABLES,
+            **POPULATION_SNAPSHOT_STATE_TABLES,
+            **EXTERNAL_WORLD_SNAPSHOT_STATE_TABLES,
+        }
+    elif row["schema_version"] == "world-snapshot-v25-population-mobility":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+            **SUPPLY_SNAPSHOT_STATE_TABLES,
+            **LABOR_SNAPSHOT_STATE_TABLES,
+            **BUDGET_SNAPSHOT_STATE_TABLES,
+            **MARKET_SNAPSHOT_STATE_TABLES,
+            **CREDIT_SNAPSHOT_STATE_TABLES,
+            **PUBLIC_POLICY_SNAPSHOT_STATE_TABLES,
+            **SOCIAL_INSTITUTION_SNAPSHOT_STATE_TABLES,
+            **MACRO_SNAPSHOT_STATE_TABLES,
+            **ADAPTATION_SNAPSHOT_STATE_TABLES,
+            **RESILIENCE_SNAPSHOT_STATE_TABLES,
+            **POPULATION_SNAPSHOT_STATE_TABLES,
+        }
+    elif row["schema_version"] == "world-snapshot-v24-shock-recovery":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+            **SUPPLY_SNAPSHOT_STATE_TABLES,
+            **LABOR_SNAPSHOT_STATE_TABLES,
+            **BUDGET_SNAPSHOT_STATE_TABLES,
+            **MARKET_SNAPSHOT_STATE_TABLES,
+            **CREDIT_SNAPSHOT_STATE_TABLES,
+            **PUBLIC_POLICY_SNAPSHOT_STATE_TABLES,
+            **SOCIAL_INSTITUTION_SNAPSHOT_STATE_TABLES,
+            **MACRO_SNAPSHOT_STATE_TABLES,
+            **ADAPTATION_SNAPSHOT_STATE_TABLES,
+            **RESILIENCE_SNAPSHOT_STATE_TABLES,
+        }
+    elif row["schema_version"] == "world-snapshot-v23-institution-evolution":
+        expected_tables = {
+            **SNAPSHOT_STATE_TABLES,
+            **SPATIAL_SNAPSHOT_STATE_TABLES,
+            **BODY_SNAPSHOT_STATE_TABLES,
+            **PERCEPTION_SNAPSHOT_STATE_TABLES,
+            **CAPABILITY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_SNAPSHOT_STATE_TABLES,
+            **ECONOMY_CONTROL_SNAPSHOT_STATE_TABLES,
+            **ORGANIZATION_SNAPSHOT_STATE_TABLES,
+            **SUPPLY_SNAPSHOT_STATE_TABLES,
+            **LABOR_SNAPSHOT_STATE_TABLES,
+            **BUDGET_SNAPSHOT_STATE_TABLES,
+            **MARKET_SNAPSHOT_STATE_TABLES,
+            **CREDIT_SNAPSHOT_STATE_TABLES,
+            **PUBLIC_POLICY_SNAPSHOT_STATE_TABLES,
+            **SOCIAL_INSTITUTION_SNAPSHOT_STATE_TABLES,
+            **MACRO_SNAPSHOT_STATE_TABLES,
+            **ADAPTATION_SNAPSHOT_STATE_TABLES,
+        }
+    elif row["schema_version"] == "world-snapshot-v19-macro-reconciliation":
         expected_tables = {
             **SNAPSHOT_STATE_TABLES,
             **SPATIAL_SNAPSHOT_STATE_TABLES,
@@ -10944,30 +11224,24 @@ def fetch_external_information(limit=5):
     errors = []
     for source_name, source_url in EXTERNAL_RSS_SOURCES:
         try:
-            response = requests.get(
-                source_url,
-                timeout=5,
-                headers={"User-Agent": "CampusAgentSimulation/1.0 (+campus simulation)"},
+            records = FixedRSSAdapter().fetch(
+                {
+                    "feed_url": source_url,
+                    "limit": limit,
+                    "timeout_seconds": 5,
+                }
             )
-            response.raise_for_status()
-            root = ElementTree.fromstring(response.content)
-            items = []
-            for node in root.findall("./channel/item")[:limit]:
-                title = (node.findtext("title") or "").strip()
-                summary = re.sub(r"<[^>]+>", "", node.findtext("description") or "").strip()
-                link = (node.findtext("link") or "").strip()
-                published_at = (node.findtext("pubDate") or "").strip()
-                if title:
-                    items.append(
-                        {
-                            "title": title[:180],
-                            "summary": (summary or title)[:400],
-                            "source_name": source_name,
-                            "source_url": link,
-                            "published_at": published_at,
-                            "category": classify_external_information(f"{title} {summary}"),
-                        }
-                    )
+            items = [
+                {
+                    "title": record["payload"]["title"],
+                    "summary": record["payload"]["summary"],
+                    "source_name": source_name,
+                    "source_url": record["payload"]["link"],
+                    "published_at": record["payload"]["published_at_text"],
+                    "category": record["payload"]["category"],
+                }
+                for record in records
+            ]
             if items:
                 return items
             errors.append(f"{source_name}: no RSS items")

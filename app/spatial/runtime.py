@@ -4,6 +4,12 @@ import json
 from datetime import datetime, timedelta, timezone
 from math import dist
 
+from app.adaptation.service import (
+    constraint_runtime_available,
+    evaluate_space_constraint,
+    latest_explicit_constraint_response,
+    resolve_boundary_attempt,
+)
 from app.spatial.planner import RouteNotFoundError, edge_travel_minutes, plan_route
 
 
@@ -138,6 +144,60 @@ def _check_destination_admission(conn, target_node, world_time, resident_id):
         "location": location,
         "occupancy": int(occupancy),
         "capacity": capacity,
+    }
+
+
+def _evaluate_destination_constraint(
+    conn,
+    target_node,
+    world_time,
+    resident_id,
+    requested_response="auto",
+):
+    if not constraint_runtime_available(conn):
+        admission = _check_destination_admission(
+            conn, target_node, world_time, resident_id
+        )
+        return {
+            **admission,
+            "physically_possible": True,
+            "officially_permitted": bool(admission["allowed"]),
+            "service_available": bool(admission["allowed"]),
+            "selected_response": (
+                "enter"
+                if admission["allowed"]
+                else ("queue" if admission.get("code") == "space_full" else "blocked")
+            ),
+        }
+    evaluation = evaluate_space_constraint(
+        conn,
+        resident_id=resident_id,
+        target_node=target_node,
+        world_time=world_time,
+        requested_response=requested_response,
+    )
+    return {
+        **evaluation,
+        "allowed": bool(evaluation["officially_permitted"])
+        and not bool(evaluation["full"]),
+        "code": (
+            ""
+            if bool(evaluation["officially_permitted"]) and not bool(evaluation["full"])
+            else (
+                "space_full"
+                if bool(evaluation["full"])
+                else "location_closed"
+            )
+        ),
+        "reason": (
+            ""
+            if bool(evaluation["officially_permitted"]) and not bool(evaluation["full"])
+            else (
+                f"{evaluation['location']}当前容量紧张"
+                if bool(evaluation["full"])
+                else f"{evaluation['location']}当前没有正式进入许可"
+            )
+        ),
     }
 
 
@@ -358,6 +418,7 @@ def start_spatial_movement(
     world_time=None,
     replan_reason="",
     force_replan=False,
+    constraint_response="auto",
 ):
     if not spatial_runtime_available(conn):
         return None
@@ -367,9 +428,15 @@ def start_spatial_movement(
     target = _destination_node(nodes, destination)
     if not target:
         raise ValueError("地点不存在")
-    admission = _check_destination_admission(conn, target, now, resident_id)
-    if not admission["allowed"] and admission["code"] != "space_full":
-        raise SpatialAdmissionError(admission["code"], admission["reason"])
+    admission = _evaluate_destination_constraint(
+        conn,
+        target,
+        now,
+        resident_id,
+        requested_response=constraint_response,
+    )
+    if not admission["physically_possible"]:
+        raise SpatialAdmissionError("physically_blocked", "目标地点物理上不可达")
     if (
         context["movement_status"] in ACTIVE_MOVEMENT_STATUSES
         and int(context["target_node_id"] or 0) == int(target["id"])
@@ -457,6 +524,7 @@ def start_spatial_movement(
         "base_speed_m_per_min": float(context["base_speed_m_per_min"]),
         "effective_speed_m_per_min": context["effective_speed_m_per_min"],
         "route": route,
+        "constraint_evaluation": admission,
         "description": (
             f"{context['resident_name']} 开始从 {context['legacy_location']} "
             f"前往 {target['name']}，路线约 {route['distance_meters']:.0f} 米，"
@@ -631,6 +699,7 @@ def advance_active_movements(conn, world_time, tick_number):
         traveled = 0.0
         replan_reason = ""
         admission_denied = None
+        boundary_attempt = None
         abandoned = None
 
         while time_left > 0 and index < len(path) - 1:
@@ -642,15 +711,36 @@ def advance_active_movements(conn, world_time, tick_number):
                 break
             target_node = node_by_id[to_id]
             if to_id == int(state["target_node_id"]):
-                admission = _check_destination_admission(
+                admission = _evaluate_destination_constraint(
                     conn,
                     target_node,
                     world_time,
                     state["resident_id"],
+                    requested_response=latest_explicit_constraint_response(
+                        conn,
+                        state["resident_id"],
+                        target_node["id"],
+                    ),
                 )
                 if not admission["allowed"]:
-                    admission_denied = admission
-                    break
+                    if constraint_runtime_available(conn):
+                        boundary_attempt = resolve_boundary_attempt(
+                            conn, admission, world_time
+                        )
+                        if not boundary_attempt["admitted"]:
+                            admission_denied = {
+                                **admission,
+                                "code": (
+                                    "boundary_bypass_failed"
+                                    if admission["selected_response"] == "bypass"
+                                    else admission["code"]
+                                ),
+                                "attempt": boundary_attempt,
+                            }
+                            break
+                    else:
+                        admission_denied = admission
+                        break
             remaining_segment = dist(
                 (float(state["x"]), float(state["y"]), float(state["z"])),
                 (
@@ -829,6 +919,7 @@ def advance_active_movements(conn, world_time, tick_number):
                 "target_node_id": state["target_node_id"],
                 "route_distance_meters": route_distance,
                 "admission": admission_denied or {"allowed": True},
+                "boundary_attempt": boundary_attempt,
             },
         )
         results.append(
@@ -840,9 +931,15 @@ def advance_active_movements(conn, world_time, tick_number):
                     "spatial_admission_waiting"
                     if admission_denied
                     else (
-                    "spatial_agent_arrived"
-                    if arrived
-                    else "spatial_agent_movement_progress"
+                        "spatial_boundary_bypassed"
+                        if arrived
+                        and boundary_attempt
+                        and boundary_attempt["strategy"] == "bypass"
+                        else (
+                            "spatial_agent_arrived"
+                            if arrived
+                            else "spatial_agent_movement_progress"
+                        )
                     )
                 ),
                 "current_node_id": int(state["current_node_id"]),
@@ -856,6 +953,7 @@ def advance_active_movements(conn, world_time, tick_number):
                 "y": state["y"],
                 "z": state["z"],
                 "admission": admission_denied or {"allowed": True},
+                "boundary_attempt": boundary_attempt,
             }
         )
     return results

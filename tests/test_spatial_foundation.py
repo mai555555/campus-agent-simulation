@@ -687,7 +687,7 @@ class SpatialFoundationTest(unittest.TestCase):
         self.assertGreater(progress[0]["distance_traveled_meters"], 0)
         connection.close()
 
-    def test_closed_destination_rejects_but_full_destination_allows_queueing_trip(self):
+    def test_closed_and_full_destinations_remain_physical_movement_candidates(self):
         started_at = datetime(2026, 7, 29, 8, 0, tzinfo=timezone.utc)
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
@@ -695,14 +695,24 @@ class SpatialFoundationTest(unittest.TestCase):
         connection.execute(
             "UPDATE campus_spaces SET status = '维护中' WHERE location = '图书馆'"
         )
-        with self.assertRaisesRegex(SpatialAdmissionError, "未开放") as closed:
-            start_spatial_movement(
-                connection,
-                2,
-                "图书馆",
-                world_time=started_at,
-            )
-        self.assertEqual(closed.exception.code, "location_closed")
+        closed = start_spatial_movement(
+            connection,
+            2,
+            "图书馆",
+            world_time=started_at,
+        )
+        self.assertEqual(closed["movement_status"], "moving")
+        self.assertFalse(
+            bool(closed["constraint_evaluation"]["officially_permitted"])
+        )
+        connection.execute(
+            """
+            UPDATE agent_spatial_states
+            SET movement_status = 'idle', target_node_id = NULL, path = '[]',
+                path_index = 0, progress = 0, remaining_distance_meters = 0
+            WHERE resident_id = 2
+            """
+        )
         connection.execute(
             """
             UPDATE campus_spaces SET status = '开放', capacity = 0
@@ -843,7 +853,7 @@ class SpatialFoundationTest(unittest.TestCase):
             )
             self.assertEqual(
                 snapshot["schema_version"],
-                "world-snapshot-v19-macro-reconciliation",
+                "world-snapshot-v31-longitudinal-paths",
             )
             original = connection.execute(
                 "SELECT current_node_id, x, z FROM agent_spatial_states WHERE resident_id = 1"

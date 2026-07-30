@@ -343,6 +343,9 @@ def get_agent_cognitive_context(conn, resident_id, branch_key="main", limit=8):
             "beliefs": [],
             "spatial_memories": [],
             "received_information": [],
+            "adaptive_memories": [],
+            "strategy_states": [],
+            "norm_beliefs": [],
         }
     observations = conn.execute(
         """
@@ -387,11 +390,23 @@ def get_agent_cognitive_context(conn, resident_id, branch_key="main", limit=8):
             """,
             (resident_id, limit),
         ).fetchall()
+    adaptive = {
+        "adaptive_memories": [],
+        "strategy_states": [],
+        "norm_beliefs": [],
+    }
+    if conn.execute("PRAGMA table_info(adaptive_memories)").fetchall():
+        from app.adaptation.learning import get_adaptive_cognitive_context
+
+        adaptive = get_adaptive_cognitive_context(
+            conn, resident_id, branch_key=branch_key, limit=limit
+        )
     return {
         "observations": [dict(row) for row in observations],
         "beliefs": [dict(row) for row in beliefs],
         "spatial_memories": [dict(row) for row in memories],
         "received_information": [dict(row) for row in information],
+        **adaptive,
     }
 
 
