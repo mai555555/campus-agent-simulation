@@ -60,6 +60,27 @@ class WorldTickCompatibilityTests(unittest.TestCase):
         self.assertEqual(payload["fractional"], 12.5)
         self.assertEqual(payload["nested"]["ratio"], 0.75)
 
+    def test_simulation_log_serializes_postgres_datetime_values(self):
+        observed_at = datetime(2026, 7, 30, 9, 38, tzinfo=timezone.utc)
+        log_id = main.record_simulation_log(
+            self.conn,
+            1,
+            {"external": {"observed_at": observed_at}},
+            {"decision": {"action": "observe"}, "memory_context": {"memories": []}},
+            {"result": {"at": observed_at}},
+            {"feedback": {"at": observed_at}},
+            state_before={"seen_at": observed_at},
+            state_after={"seen_at": observed_at},
+        )
+        stored = self.conn.execute(
+            "SELECT perception, execution FROM simulation_action_logs WHERE id = ?",
+            (log_id,),
+        ).fetchone()
+        perception = json.loads(stored["perception"])
+        execution = json.loads(stored["execution"])
+        self.assertEqual(perception["external"]["observed_at"], observed_at.isoformat())
+        self.assertEqual(execution["result"]["at"], observed_at.isoformat())
+
     def test_action_resource_state_defaults_legacy_null_values(self):
         class LegacyConnection:
             def execute(self, *_args, **_kwargs):
