@@ -1,0 +1,150 @@
+from __future__ import annotations
+
+import re
+from xml.etree import ElementTree
+
+import requests
+
+
+WEATHER_CODE_MAP = {
+    0: "晴",
+    1: "晴",
+    2: "多云",
+    3: "多云",
+    45: "雾",
+    48: "雾",
+    51: "小雨",
+    53: "小雨",
+    55: "小雨",
+    61: "小雨",
+    63: "中雨",
+    65: "大雨",
+    71: "小雪",
+    73: "小雪",
+    75: "大雪",
+    80: "小雨",
+    81: "中雨",
+    82: "大雨",
+    95: "雷雨",
+    96: "雷雨",
+    99: "雷雨",
+}
+
+
+def classify_public_report(text):
+    normalized = str(text or "").lower()
+    if any(word in normalized for word in ("ai", "人工智能", "科技", "技术")):
+        return "technology"
+    if any(word in normalized for word in ("就业", "招聘", "创业", "商业", "经济")):
+        return "career"
+    if any(word in normalized for word in ("教育", "大学", "考试", "课程", "学生")):
+        return "education"
+    return "general"
+
+
+class OpenMeteoAdapter:
+    adapter_key = "open-meteo-v1"
+
+    def fetch(self, config):
+        latitude = float(config.get("latitude", 30.5728))
+        longitude = float(config.get("longitude", 104.0668))
+        response = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": latitude,
+                "longitude": longitude,
+                "current": (
+                    "temperature_2m,precipitation,rain,weather_code,"
+                    "wind_speed_10m,relative_humidity_2m"
+                ),
+                "timezone": config.get("timezone", "Asia/Shanghai"),
+                "forecast_days": 1,
+            },
+            headers={"User-Agent": "campus-agent-simulation/1.0"},
+            timeout=min(30, int(config.get("timeout_seconds", 12))),
+        )
+        response.raise_for_status()
+        current = response.json().get("current", {})
+        weather_code = int(current.get("weather_code", 0))
+        precipitation = float(current.get("precipitation", 0) or 0)
+        rain = float(current.get("rain", 0) or 0)
+        rainfall = max(0, min(100, int(round(max(precipitation, rain) * 20))))
+        temperature = int(round(float(current.get("temperature_2m", 24))))
+        weather = WEATHER_CODE_MAP.get(weather_code, "多云")
+        if temperature >= 32 and weather in {"晴", "多云"}:
+            weather = "闷热"
+        observed_at = str(current.get("time", ""))
+        return [
+            {
+                "source_record_id": (
+                    f"weather:{observed_at}:{weather_code}:{temperature}:{rainfall}"
+                ),
+                "observed_at": observed_at,
+                "payload": {
+                    "weather": weather,
+                    "temperature": temperature,
+                    "rainfall": rainfall,
+                    "weather_code": weather_code,
+                    "wind_speed_10m": current.get("wind_speed_10m"),
+                    "relative_humidity_2m": current.get(
+                        "relative_humidity_2m"
+                    ),
+                    "precipitation": precipitation,
+                },
+            }
+        ]
+
+
+class FixedRSSAdapter:
+    adapter_key = "fixed-rss-v1"
+
+    def fetch(self, config):
+        source_url = config["feed_url"]
+        limit = min(20, max(1, int(config.get("limit", 5))))
+        response = requests.get(
+            source_url,
+            timeout=min(30, int(config.get("timeout_seconds", 8))),
+            headers={
+                "User-Agent": "CampusAgentSimulation/1.0 (+campus simulation)"
+            },
+        )
+        response.raise_for_status()
+        root = ElementTree.fromstring(response.content)
+        records = []
+        for index, node in enumerate(root.findall("./channel/item")[:limit]):
+            title = (node.findtext("title") or "").strip()
+            summary = re.sub(
+                r"<[^>]+>", "", node.findtext("description") or ""
+            ).strip()
+            link = (node.findtext("link") or "").strip()
+            published_at = (node.findtext("pubDate") or "").strip()
+            guid = (node.findtext("guid") or link or f"item:{index}").strip()
+            if not title:
+                continue
+            records.append(
+                {
+                    "source_record_id": guid,
+                    "observed_at": "",
+                    "payload": {
+                        "title": title[:180],
+                        "summary": (summary or title)[:400],
+                        "link": link,
+                        "published_at_text": published_at,
+                        "category": classify_public_report(f"{title} {summary}"),
+                    },
+                }
+            )
+        return records
+
+
+ADAPTERS = {
+    OpenMeteoAdapter.adapter_key: OpenMeteoAdapter(),
+    FixedRSSAdapter.adapter_key: FixedRSSAdapter(),
+}
+
+
+def get_adapter(adapter_key):
+    adapter = ADAPTERS.get(adapter_key)
+    if not adapter:
+        raise ValueError(f"未注册外部来源适配器：{adapter_key}")
+    return adapter
