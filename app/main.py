@@ -7376,7 +7376,7 @@ def world_runner_loop():
             if world_tick_due(runtime):
                 advance_world_tick(reason="background")
         except Exception as exc:
-            logger.warning("World runner loop skipped one cycle: %s", exc)
+            logger.exception("World runner loop skipped one cycle")
         time.sleep(5)
 
 
