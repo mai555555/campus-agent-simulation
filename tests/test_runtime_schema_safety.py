@@ -90,6 +90,34 @@ class RuntimeSchemaSafetyTest(unittest.TestCase):
         )
         runner.start.assert_called_once_with()
 
+    def test_runner_auto_starts_default_paused_runtime(self):
+        conn = self._prepared_connection()
+        runtime = main.get_world_runtime(conn)
+
+        resumed = main.ensure_world_runtime_running_unless_manually_paused(conn, runtime)
+
+        self.assertEqual(resumed["status"], "running")
+        event = conn.execute(
+            "SELECT event_type FROM world_event_stream ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        self.assertEqual(event["event_type"], "world_runtime_auto_start")
+        conn.close()
+
+    def test_runner_respects_manual_pause_marker(self):
+        conn = self._prepared_connection()
+        main.set_simulation_state_value(conn, "world_runtime_manual_pause", "true")
+        conn.commit()
+        runtime = main.get_world_runtime(conn)
+
+        resumed = main.ensure_world_runtime_running_unless_manually_paused(conn, runtime)
+
+        self.assertEqual(resumed["status"], "paused")
+        event = conn.execute(
+            "SELECT event_type FROM world_event_stream ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        self.assertIsNone(event)
+        conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

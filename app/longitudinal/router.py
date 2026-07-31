@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 
 from app.db import get_connection
@@ -17,7 +21,7 @@ def resident_life_course(resident_id: int):
 
 
 @router.get("/residents/{resident_id}/turning-points")
-def resident_turning_points(resident_id: int, evidence_layer: str | None = None):
+def resident_turning_points(resident_id: int, evidence_layer: Optional[str] = None):
     with get_connection() as conn:
         if evidence_layer:
             rows = conn.execute(

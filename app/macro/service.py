@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from datetime import date, datetime, time, timedelta, timezone
 import hashlib
 import json
@@ -223,9 +225,9 @@ def _save_metric(
     group_type: str = "overall",
     group_key: str = "all",
     explanation: str = "",
-    components: list[dict] | None = None,
+    components: Optional[list[dict]] = None,
     quality_status: str = "verified",
-    metadata: dict | None = None,
+    metadata: Optional[dict] = None,
 ) -> int:
     definition_id = metric_ids[metric_key]
     conn.execute(

@@ -108,6 +108,20 @@ from services.llm_service import ask_llm, is_llm_configured
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 logger = logging.getLogger(__name__)
 
+
+def _json_default(value):
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def json_dumps(value, *args, **kwargs):
+    kwargs.setdefault("default", _json_default)
+    return json.dumps(value, *args, **kwargs)
+
+
 from tools.city_tools import (
     VALID_LOCATIONS,
     add_event,
@@ -588,11 +602,11 @@ def record_goal_revision(conn, goal_id, resident_id, revision_type, before=None,
             get_current_day(conn),
             tick_id,
             revision_type,
-            json.dumps(before or {}, ensure_ascii=False),
-            json.dumps(after or {}, ensure_ascii=False),
+            json_dumps(before or {}, ensure_ascii=False),
+            json_dumps(after or {}, ensure_ascii=False),
             reason[:240],
             trigger_type,
-            json.dumps({"source": "multiscale-goal-runtime-v1"}, ensure_ascii=False),
+            json_dumps({"source": "multiscale-goal-runtime-v1"}, ensure_ascii=False),
         ),
     )
 
@@ -1017,7 +1031,7 @@ def seed_campus_organizations(conn):
             (name, organization_type, goal, budget, resources, schedule)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (name, organization_type, goal, budget, json.dumps(resources, ensure_ascii=False), json.dumps(schedule, ensure_ascii=False)),
+            (name, organization_type, goal, budget, json_dumps(resources, ensure_ascii=False), json_dumps(schedule, ensure_ascii=False)),
         )
 
 
@@ -1180,11 +1194,11 @@ def append_social_interaction_event(
         """,
         (
             get_current_day(conn), tick_id, world_event_id, relationship_change_event_id,
-            actor_resident_id, target_resident_id, json.dumps(participants, ensure_ascii=False),
+            actor_resident_id, target_resident_id, json_dumps(participants, ensure_ascii=False),
             location or "", interaction_type or "interaction", channel or "in_person",
             clamp(intensity), max(-100, min(100, int(valence))), visibility or "local",
             disclosure_state or "ordinary", resource_context or "", institution_context or "",
-            summary or "", json.dumps(evidence or {}, ensure_ascii=False),
+            summary or "", json_dumps(evidence or {}, ensure_ascii=False),
         ),
     )
 
@@ -1304,9 +1318,9 @@ def record_social_relation_interpretation(conn, from_id, to_id, tick_id=None, pe
         (
             get_current_day(conn), tick_id, from_id, to_id, perspective,
             interpretation["label"], interpretation["confidence"],
-            json.dumps(interpretation["candidates"], ensure_ascii=False),
-            json.dumps(interpretation["evidence"], ensure_ascii=False),
-            json.dumps(interpretation["metrics"], ensure_ascii=False),
+            json_dumps(interpretation["candidates"], ensure_ascii=False),
+            json_dumps(interpretation["evidence"], ensure_ascii=False),
+            json_dumps(interpretation["metrics"], ensure_ascii=False),
             interpretation["interpretation_boundary"],
         ),
     )
@@ -1667,7 +1681,7 @@ def update_agent_profile_after_action(conn, resident_id, action, reason, success
         SET energy = ?, time_budget = ?, mood = ?, current_task = ?, perception = ?
         WHERE resident_id = ?
         """,
-        (new_energy, new_time_budget, new_mood, task_label, json.dumps(perception, ensure_ascii=False), resident_id),
+        (new_energy, new_time_budget, new_mood, task_label, json_dumps(perception, ensure_ascii=False), resident_id),
     )
     body_effects = apply_action_body_effects(
         conn,
@@ -2124,7 +2138,7 @@ def record_learning(conn, resident_id, action, outcome, score_delta, lesson):
         SET skills = ?, strategy = ?
         WHERE resident_id = ?
         """,
-        (json.dumps(skills, ensure_ascii=False), json.dumps(strategy, ensure_ascii=False), resident_id),
+        (json_dumps(skills, ensure_ascii=False), json_dumps(strategy, ensure_ascii=False), resident_id),
     )
     conn.execute(
         """
@@ -2251,7 +2265,7 @@ def create_collaboration(conn, leader_id, member_ids, title, goal):
         INSERT INTO collaborations (title, leader_id, member_ids, goal, status, score)
         VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (title, leader_id, json.dumps(ids, ensure_ascii=False), goal, "active", score),
+        (title, leader_id, json_dumps(ids, ensure_ascii=False), goal, "active", score),
     )
     roles = {str(member_id): ("负责人" if member_id == leader_id else "成员") for member_id in ids}
     group_cursor = conn.execute(
@@ -2259,7 +2273,7 @@ def create_collaboration(conn, leader_id, member_ids, title, goal):
         INSERT INTO group_goals (name, group_type, leader_id, member_ids, roles, shared_goal, deadline_day, current_plan)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (title, "协作小组", leader_id, json.dumps(ids, ensure_ascii=False), json.dumps(roles, ensure_ascii=False), goal, get_current_day(conn) + 10, "成员按各自任务推进，并在每日模拟后汇总进度。"),
+        (title, "协作小组", leader_id, json_dumps(ids, ensure_ascii=False), json_dumps(roles, ensure_ascii=False), goal, get_current_day(conn) + 10, "成员按各自任务推进，并在每日模拟后汇总进度。"),
     )
     for from_id in ids:
         for to_id in ids:
@@ -2274,7 +2288,7 @@ def create_collaboration(conn, leader_id, member_ids, title, goal):
 def record_group_membership_event(conn, group_id, resident_id, action, reason, member_ids):
     conn.execute(
         "INSERT INTO group_membership_events (day, group_id, resident_id, action, reason, member_ids) VALUES (?, ?, ?, ?, ?, ?)",
-        (get_current_day(conn), group_id, resident_id, action, reason or "", json.dumps(member_ids, ensure_ascii=False)),
+        (get_current_day(conn), group_id, resident_id, action, reason or "", json_dumps(member_ids, ensure_ascii=False)),
     )
 
 
@@ -2289,7 +2303,7 @@ def join_group_goal(conn, resident_id, group_id):
     members.append(resident_id)
     roles = load_json_text(group["roles"], {})
     roles[str(resident_id)] = "成员"
-    conn.execute("UPDATE group_goals SET member_ids = ?, roles = ? WHERE id = ?", (json.dumps(members, ensure_ascii=False), json.dumps(roles, ensure_ascii=False), group_id))
+    conn.execute("UPDATE group_goals SET member_ids = ?, roles = ? WHERE id = ?", (json_dumps(members, ensure_ascii=False), json_dumps(roles, ensure_ascii=False), group_id))
     record_group_membership_event(conn, group_id, resident_id, "join", f"加入群体：{group['name']}", members)
     for member_id in members:
         if member_id != resident_id:
@@ -2312,7 +2326,7 @@ def leave_group_goal(conn, resident_id, group_id):
     members.remove(resident_id)
     roles = load_json_text(group["roles"], {})
     roles.pop(str(resident_id), None)
-    conn.execute("UPDATE group_goals SET member_ids = ?, roles = ? WHERE id = ?", (json.dumps(members, ensure_ascii=False), json.dumps(roles, ensure_ascii=False), group_id))
+    conn.execute("UPDATE group_goals SET member_ids = ?, roles = ? WHERE id = ?", (json_dumps(members, ensure_ascii=False), json_dumps(roles, ensure_ascii=False), group_id))
     record_group_membership_event(conn, group_id, resident_id, "leave", f"离开群体：{group['name']}", members)
     add_event(conn, get_current_day(conn), "group_leave", f"Agent {resident_id} 退出小组「{group['name']}」。")
     return {"group_id": group_id, "group_name": group["name"], "member_ids": members, "message": "退出小组成功"}
@@ -2344,7 +2358,7 @@ def create_competition(conn, participant_ids, title, metric):
         INSERT INTO competitions (title, participant_ids, metric, winner_id, result)
         VALUES (?, ?, ?, ?, ?)
         """,
-        (title, json.dumps(participant_ids, ensure_ascii=False), metric, winner["id"], result),
+        (title, json_dumps(participant_ids, ensure_ascii=False), metric, winner["id"], result),
     )
     for item in scores:
         won = item["id"] == winner["id"]
@@ -2756,7 +2770,7 @@ def seed_world_update_schedules(conn):
 
 
 def canonical_json(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json_dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def content_checksum(value):
@@ -3046,7 +3060,7 @@ def seed_agent_personality_traits(conn):
             SET strategy = ?
             WHERE resident_id = ?
             """,
-            (json.dumps(strategy, ensure_ascii=False), resident_id),
+            (json_dumps(strategy, ensure_ascii=False), resident_id),
         )
 
 
@@ -3206,7 +3220,7 @@ def append_world_event(
             location or "",
             title,
             content,
-            json.dumps(payload or {}, ensure_ascii=False, default=_world_event_json_default),
+            json_dumps(payload or {}, ensure_ascii=False, default=_world_event_json_default),
             source_type or "runtime",
             str(source_id or ""),
             parent_event_id,
@@ -4720,7 +4734,7 @@ def ensure_current_action_plans(conn, world_time):
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                     """,
-                    (json.dumps(existing_plan, ensure_ascii=False), existing["id"]),
+                    (json_dumps(existing_plan, ensure_ascii=False), existing["id"]),
                 )
                 backfilled_plans += 1
             continue
@@ -4743,7 +4757,7 @@ def ensure_current_action_plans(conn, world_time):
                           prompt_version = 'world-runtime-v4', status = 'active',
                           updated_at = CURRENT_TIMESTAMP
             """,
-            (resident["id"], window_start.isoformat(), window_end.isoformat(), json.dumps(plan, ensure_ascii=False)),
+            (resident["id"], window_start.isoformat(), window_end.isoformat(), json_dumps(plan, ensure_ascii=False)),
         )
         conn.execute(
             """
@@ -4923,8 +4937,8 @@ def create_campus_event(conn, day, title, event_type, intensity, target_spaces=N
             title,
             event_type,
             intensity,
-            json.dumps(targets, ensure_ascii=False),
-            json.dumps(final_effects, ensure_ascii=False),
+            json_dumps(targets, ensure_ascii=False),
+            json_dumps(final_effects, ensure_ascii=False),
         ),
     )
     updates = apply_campus_event_effects(conn, day, final_effects)
@@ -5147,7 +5161,7 @@ def perceive_environment(conn, resident_id):
     }
     conn.execute(
         "UPDATE agent_profiles SET perception = ? WHERE resident_id = ?",
-        (json.dumps(perception, ensure_ascii=False), resident_id),
+        (json_dumps(perception, ensure_ascii=False), resident_id),
     )
     add_memory(
         conn,
@@ -5217,13 +5231,13 @@ def record_simulation_log(conn, resident_id, perception, decision_data, executio
             get_current_day(conn),
             resident_id,
             tick_id,
-            json.dumps(perception or {}, ensure_ascii=False),
-            json.dumps(memory_context.get("memories", []), ensure_ascii=False),
-            json.dumps(decision_data.get("decision", {}), ensure_ascii=False),
-            json.dumps(execution or {}, ensure_ascii=False),
-            json.dumps(feedback or {}, ensure_ascii=False),
-            json.dumps(state_before or {}, ensure_ascii=False),
-            json.dumps(state_after or {}, ensure_ascii=False),
+            json_dumps(perception or {}, ensure_ascii=False),
+            json_dumps(memory_context.get("memories", []), ensure_ascii=False),
+            json_dumps(decision_data.get("decision", {}), ensure_ascii=False),
+            json_dumps(execution or {}, ensure_ascii=False),
+            json_dumps(feedback or {}, ensure_ascii=False),
+            json_dumps(state_before or {}, ensure_ascii=False),
+            json_dumps(state_after or {}, ensure_ascii=False),
         ),
     )
     return cursor.lastrowid
@@ -5283,14 +5297,14 @@ def decide_agent_action(conn, resident_id):
 你正在驱动一个校园封闭世界中的 Agent。
 
 当前日期：第 {day} 天
-校园环境：{json.dumps(env, ensure_ascii=False)}
-空间状态（容量、开放状态和事件）：{json.dumps(get_space_snapshot(conn, day), ensure_ascii=False)}
-当前 Agent：{json.dumps(dict(resident), ensure_ascii=False)}
-其他 Agent：{json.dumps(rows_to_dicts(other_agents), ensure_ascii=False)}
-可加入或协作的活跃小组：{json.dumps(rows_to_dicts(active_groups), ensure_ascii=False)}
-近期记忆和事件：{json.dumps(context, ensure_ascii=False)}
-Agent 六模块状态：{json.dumps(module_state, ensure_ascii=False)}
-当前日程提示：{json.dumps(schedule_context, ensure_ascii=False)}。日程、天气、关系和资源都是你需要权衡的信息，不是强制命令。你必须自主选择行动，也要在 reason 中说明是否愿意承担暂缓日程、绕开拥挤或消耗资源的后果。
+校园环境：{json_dumps(env, ensure_ascii=False)}
+空间状态（容量、开放状态和事件）：{json_dumps(get_space_snapshot(conn, day), ensure_ascii=False)}
+当前 Agent：{json_dumps(dict(resident), ensure_ascii=False)}
+其他 Agent：{json_dumps(rows_to_dicts(other_agents), ensure_ascii=False)}
+可加入或协作的活跃小组：{json_dumps(rows_to_dicts(active_groups), ensure_ascii=False)}
+近期记忆和事件：{json_dumps(context, ensure_ascii=False)}
+Agent 六模块状态：{json_dumps(module_state, ensure_ascii=False)}
+当前日程提示：{json_dumps(schedule_context, ensure_ascii=False)}。日程、天气、关系和资源都是你需要权衡的信息，不是强制命令。你必须自主选择行动，也要在 reason 中说明是否愿意承担暂缓日程、绕开拥挤或消耗资源的后果。
 
 请只返回严格 JSON，不要解释，不要 Markdown。
 可选 action 只能是：move、chat、buy_sell、submit_policy、observe、create_group、join_group、leave_group。
@@ -5549,7 +5563,7 @@ def mark_plan_step_executed(conn, plan, step, world_time, execution):
         SET plan_json = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
-        (json.dumps(plan, ensure_ascii=False), plan_row_id),
+        (json_dumps(plan, ensure_ascii=False), plan_row_id),
     )
 
 
@@ -5685,7 +5699,7 @@ def update_trajectory_from_outcome(conn, resident_id, goal_ids, action, location
             """,
             (
                 f"最近在{location}执行 {action}，计划关系：{adherence}",
-                json.dumps(evidence, ensure_ascii=False),
+                json_dumps(evidence, ensure_ascii=False),
                 row["id"],
             ),
         )
@@ -5735,13 +5749,13 @@ def record_plan_outcome(conn, agent, plan, step, decision, action, destination, 
             tick_id,
             day,
             step_key,
-            json.dumps(step, ensure_ascii=False),
-            json.dumps({"action": action, "location": destination, "decision": decision}, ensure_ascii=False),
+            json_dumps(step, ensure_ascii=False),
+            json_dumps({"action": action, "location": destination, "decision": decision}, ensure_ascii=False),
             adherence,
             deviation_type,
             deviation_reason[:240],
             content[:300],
-            json.dumps({"world_event_id": event_id}, ensure_ascii=False),
+            json_dumps({"world_event_id": event_id}, ensure_ascii=False),
         ),
     )
     outcome = conn.execute(
@@ -5770,7 +5784,7 @@ def record_plan_outcome(conn, agent, plan, step, decision, action, destination, 
             """,
             (
                 sum(int(item["delta"]) for item in progress_updates),
-                json.dumps(
+                json_dumps(
                     {"world_event_id": event_id, "goal_progress": progress_updates},
                     ensure_ascii=False,
                 ),
@@ -5825,7 +5839,7 @@ def generate_observed_agent_detail(conn, agent, step, world_time, tick_id, base_
 Agent：{agent['name']}，{agent['role']}
 当前位置：{agent['location']}
 长期目标：{agent['goal']}
-当前计划步骤：{json.dumps(step, ensure_ascii=False)}
+当前计划步骤：{json_dumps(step, ensure_ascii=False)}
 
 要求：
 - 只写 1 句中文，80 字以内。
@@ -6100,7 +6114,7 @@ Agent:
 - long_goal: {agent['goal']}
 
 感知上下文：
-{json.dumps(perception, ensure_ascii=False)}
+{json_dumps(perception, ensure_ascii=False)}
 
 现实约束：
 - 必须尊重当前时间段、空间开放时间、天气和拥挤度。
@@ -6429,7 +6443,7 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
             SET current_task = ?, perception = ?
             WHERE resident_id = ?
             """,
-            (goal[:120], json.dumps(perception, ensure_ascii=False), agent["id"]),
+            (goal[:120], json_dumps(perception, ensure_ascii=False), agent["id"]),
         )
         event = append_world_event(
             conn,
@@ -7276,7 +7290,7 @@ def advance_world_tick(reason="background"):
                     conn,
                     "world_tick_failed",
                     "世界 tick 失败",
-                    f"后台世界推进失败：{type(exc).__name__}",
+                    f"后台世界推进失败：{type(exc).__name__}: {str(exc)[:180]}",
                     payload={"error": str(exc), "reason": reason},
                 )
                 conn.commit()
@@ -7309,11 +7323,38 @@ def world_tick_due(runtime):
     return (get_world_now() - last).total_seconds() >= interval
 
 
+def world_runtime_auto_start_enabled():
+    return os.getenv("WORLD_RUNTIME_AUTO_START", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def ensure_world_runtime_running_unless_manually_paused(conn, runtime):
+    if runtime.get("status") != "paused" or not world_runtime_auto_start_enabled():
+        return runtime
+    if get_simulation_state_value(conn, "world_runtime_manual_pause", "false") == "true":
+        return runtime
+    runtime = update_world_runtime_status(conn, "running")
+    append_world_event(
+        conn,
+        "world_runtime_auto_start",
+        "世界运行已自动恢复",
+        "服务启动后自动恢复校园平行世界后台运行。",
+        payload={"source": "world_runner_loop"},
+    )
+    conn.commit()
+    return runtime
+
+
 def world_runner_loop():
     while True:
         try:
             with get_connection() as conn:
                 runtime = get_world_runtime(conn)
+                runtime = ensure_world_runtime_running_unless_manually_paused(conn, runtime)
             if world_tick_due(runtime):
                 advance_world_tick(reason="background")
         except Exception as exc:
@@ -9250,7 +9291,7 @@ def create_calibration_observation(payload: CalibrationObservationRequest):
                 payload.location,
                 payload.role_group,
                 payload.sample_size,
-                json.dumps(payload.metadata, ensure_ascii=False),
+                json_dumps(payload.metadata, ensure_ascii=False),
             ),
         )
         conn.commit()
@@ -9298,8 +9339,8 @@ def get_calibration_report():
             (
                 report_key,
                 summary,
-                json.dumps({}, ensure_ascii=False),
-                json.dumps({"mean_relative_error": mean_error, "comparisons": comparisons[:40]}, ensure_ascii=False),
+                json_dumps({}, ensure_ascii=False),
+                json_dumps({"mean_relative_error": mean_error, "comparisons": comparisons[:40]}, ensure_ascii=False),
             ),
         )
         conn.commit()
@@ -9359,6 +9400,7 @@ def upsert_observer_session(payload: ObserverSessionRequest):
 def start_world_runtime(authorization: Optional[str] = Header(default=None)):
     require_admin_token(authorization)
     with get_connection() as conn:
+        set_simulation_state_value(conn, "world_runtime_manual_pause", "false")
         runtime = update_world_runtime_status(conn, "running")
         append_world_event(conn, "admin_world_start", "世界运行已启动", "admin 启动了校园平行世界后台运行。")
         conn.commit()
@@ -9369,6 +9411,7 @@ def start_world_runtime(authorization: Optional[str] = Header(default=None)):
 def pause_world_runtime(authorization: Optional[str] = Header(default=None)):
     require_admin_token(authorization)
     with get_connection() as conn:
+        set_simulation_state_value(conn, "world_runtime_manual_pause", "true")
         runtime = update_world_runtime_status(conn, "paused")
         append_world_event(conn, "admin_world_pause", "世界运行已暂停", "admin 暂停了校园平行世界后台运行。")
         conn.commit()
@@ -10759,8 +10802,8 @@ def create_group_goal(payload: GroupGoalRequest):
                 payload.name,
                 payload.group_type,
                 payload.leader_id,
-                json.dumps(ids, ensure_ascii=False),
-                json.dumps(roles, ensure_ascii=False),
+                json_dumps(ids, ensure_ascii=False),
+                json_dumps(roles, ensure_ascii=False),
                 payload.shared_goal,
                 payload.deadline_day or day + 10,
                 payload.current_plan,
@@ -10963,7 +11006,7 @@ def classify_campus_news_candidate(event_type, action="", content="", payload=No
         for key, value in payload.items()
         if key not in {"runtime_decision", "preconditions", "causal_settlement"}
     }
-    text = f"{event_type} {action} {content} {json.dumps(factual_payload, ensure_ascii=False)}"
+    text = f"{event_type} {action} {content} {json_dumps(factual_payload, ensure_ascii=False)}"
     if action in {"conflict", "late", "request_leave"} or any(word in text for word in ("冲突", "紧张", "请假", "迟到")):
         return "反常行为", 90
     if (
@@ -11294,7 +11337,7 @@ def agent_newspaper_posts(day: Optional[int] = None):
 @app.get("/api/newspaper/ai-today")
 def ai_newspaper_today():
     data = newspaper_today()
-    prompt = f"请把下面校园封闭世界数据写成一份简短校园日报，分为标题、环境、主要事件、趋势判断：{json.dumps(data, ensure_ascii=False)}"
+    prompt = f"请把下面校园封闭世界数据写成一份简短校园日报，分为标题、环境、主要事件、趋势判断：{json_dumps(data, ensure_ascii=False)}"
     return {"day": data["title"], "newspaper": ask_llm(prompt), "source": data}
 
 
@@ -11388,7 +11431,7 @@ def deliver_external_information(
     perception["external_information"] = feed[:4]
     conn.execute(
         "UPDATE agent_profiles SET perception = ? WHERE resident_id = ?",
-        (json.dumps(perception, ensure_ascii=False), resident_id),
+        (json_dumps(perception, ensure_ascii=False), resident_id),
     )
     day = get_current_day(conn)
     add_memory(
@@ -11652,7 +11695,7 @@ def run_simulate_ai_day(progress=None):
             "[simulate-day] %s | %s | %s",
             event,
             message,
-            json.dumps(data, ensure_ascii=False, default=str),
+            json_dumps(data, ensure_ascii=False, default=str),
         )
         if progress:
             progress({"event": event, "message": message, **data})
@@ -11937,6 +11980,6 @@ def simulate_ai_day_stream():
             event = events.get()
             if event is None:
                 break
-            yield json.dumps(event, ensure_ascii=False) + "\n"
+            yield json_dumps(event, ensure_ascii=False) + "\n"
 
     return StreamingResponse(stream_events(), media_type="application/x-ndjson; charset=utf-8")

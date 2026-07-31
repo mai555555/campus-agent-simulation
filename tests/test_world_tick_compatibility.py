@@ -2,6 +2,7 @@ import json
 import sqlite3
 import unittest
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import app.main as main
 from app.models import SCHEMA_SQL
@@ -38,6 +39,47 @@ class WorldTickCompatibilityTests(unittest.TestCase):
         ).fetchone()
         payload = json.loads(stored["payload"])
         self.assertEqual(payload["nested"]["observed_at"], observed_at.isoformat())
+
+    def test_world_event_payload_serializes_postgres_decimal_values(self):
+        event = main.append_world_event(
+            self.conn,
+            "runtime_test",
+            "运行时兼容测试",
+            "PostgreSQL NUMERIC 字段可以写入事件 payload。",
+            payload={
+                "whole": Decimal("12"),
+                "fractional": Decimal("12.5"),
+                "nested": {"ratio": Decimal("0.75")},
+            },
+        )
+        stored = self.conn.execute(
+            "SELECT payload FROM world_event_stream WHERE id = ?", (event["id"],)
+        ).fetchone()
+        payload = json.loads(stored["payload"])
+        self.assertEqual(payload["whole"], 12)
+        self.assertEqual(payload["fractional"], 12.5)
+        self.assertEqual(payload["nested"]["ratio"], 0.75)
+
+    def test_simulation_log_serializes_postgres_datetime_values(self):
+        observed_at = datetime(2026, 7, 30, 9, 38, tzinfo=timezone.utc)
+        log_id = main.record_simulation_log(
+            self.conn,
+            1,
+            {"external": {"observed_at": observed_at}},
+            {"decision": {"action": "observe"}, "memory_context": {"memories": []}},
+            {"result": {"at": observed_at}},
+            {"feedback": {"at": observed_at}},
+            state_before={"seen_at": observed_at},
+            state_after={"seen_at": observed_at},
+        )
+        stored = self.conn.execute(
+            "SELECT perception, execution FROM simulation_action_logs WHERE id = ?",
+            (log_id,),
+        ).fetchone()
+        perception = json.loads(stored["perception"])
+        execution = json.loads(stored["execution"])
+        self.assertEqual(perception["external"]["observed_at"], observed_at.isoformat())
+        self.assertEqual(execution["result"]["at"], observed_at.isoformat())
 
     def test_action_resource_state_defaults_legacy_null_values(self):
         class LegacyConnection:

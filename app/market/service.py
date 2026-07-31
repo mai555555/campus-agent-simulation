@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
@@ -326,9 +328,9 @@ def quote_market_offer(conn, mechanism_id: int, world_time=None) -> dict:
 def find_market_mechanism(
     conn,
     *,
-    item_name: str | None = None,
-    provider_actor_key: str | None = None,
-    location: str | None = None,
+    item_name: Optional[str] = None,
+    provider_actor_key: Optional[str] = None,
+    location: Optional[str] = None,
 ):
     clauses = ["mechanism.status = 'active'"]
     params = []
@@ -534,7 +536,7 @@ def record_market_demand(
     *,
     resident_id: int,
     evaluation: dict,
-    action_execution_id: int | None = None,
+    action_execution_id: Optional[int] = None,
     world_time=None,
 ) -> dict:
     now = _now(world_time)
@@ -613,7 +615,7 @@ def fulfill_market_goods_trade(
     *,
     resident_id: int,
     evaluation: dict,
-    action_execution_id: int | None,
+    action_execution_id: Optional[int],
     source_type: str = "world_action_execution",
     consume_immediately: bool = True,
 ) -> dict:

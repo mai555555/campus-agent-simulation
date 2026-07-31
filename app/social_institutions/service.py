@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -563,9 +565,9 @@ def transmit_information(
     recipient_resident_id: int,
     channel_key: str,
     world_time=None,
-    sender_resident_id: int | None = None,
+    sender_resident_id: Optional[int] = None,
     sender_actor_key: str = "",
-    parent_transmission_id: int | None = None,
+    parent_transmission_id: Optional[int] = None,
     evidence_type: str = "broadcast",
     evidence_id: str = "",
     location: str = "",
@@ -854,11 +856,11 @@ def submit_institutional_case(
     rule_key: str,
     subject_resident_id: int,
     world_time=None,
-    submitted_by_resident_id: int | None = None,
-    organization_id: int | None = None,
-    evidence: dict | None = None,
+    submitted_by_resident_id: Optional[int] = None,
+    organization_id: Optional[int] = None,
+    evidence: Optional[dict] = None,
     requested_outcome: str = "",
-    parent_case_id: int | None = None,
+    parent_case_id: Optional[int] = None,
     bypass_attempted: bool = False,
 ) -> dict:
     now = _now(world_time)

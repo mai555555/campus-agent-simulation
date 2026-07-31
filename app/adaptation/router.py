@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Optional
+
 import json
 
 from fastapi import APIRouter, HTTPException
@@ -24,7 +28,7 @@ class RuleProposalRequest(BaseModel):
     scope_type: str
     scope_key: str
     parameters: dict
-    source_norm_id: int | None = None
+    source_norm_id: Optional[int] = None
     requested_budget_minor: int = Field(default=0, ge=0)
     monitoring_plan: dict = Field(default_factory=dict)
     review_after_days: int = Field(default=30, ge=1)
@@ -59,13 +63,13 @@ def get_constraint_rules():
 
 
 @router.get("/constraint-evaluations")
-def get_constraint_evaluations(resident_id: int | None = None, limit: int = 100):
+def get_constraint_evaluations(resident_id: Optional[int] = None, limit: int = 100):
     with get_connection() as conn:
         return list_constraint_evaluations(conn, resident_id, limit)
 
 
 @router.get("/boundary-attempts")
-def get_boundary_attempts(resident_id: int | None = None, limit: int = 100):
+def get_boundary_attempts(resident_id: Optional[int] = None, limit: int = 100):
     with get_connection() as conn:
         if resident_id is None:
             rows = conn.execute(
@@ -84,7 +88,7 @@ def get_boundary_attempts(resident_id: int | None = None, limit: int = 100):
 
 
 @router.get("/constraint-consequences")
-def get_constraint_consequences(attempt_id: int | None = None, limit: int = 100):
+def get_constraint_consequences(attempt_id: Optional[int] = None, limit: int = 100):
     with get_connection() as conn:
         if attempt_id is None:
             rows = conn.execute(
@@ -103,7 +107,7 @@ def get_constraint_consequences(attempt_id: int | None = None, limit: int = 100)
 
 
 @router.get("/memories")
-def get_adaptive_memories(resident_id: int | None = None, limit: int = 100):
+def get_adaptive_memories(resident_id: Optional[int] = None, limit: int = 100):
     with get_connection() as conn:
         params = []
         where = ""
@@ -127,7 +131,7 @@ def get_adaptive_memories(resident_id: int | None = None, limit: int = 100):
 
 
 @router.get("/strategies")
-def get_strategy_states(resident_id: int | None = None, limit: int = 100):
+def get_strategy_states(resident_id: Optional[int] = None, limit: int = 100):
     with get_connection() as conn:
         if resident_id is None:
             rows = conn.execute(
@@ -146,7 +150,7 @@ def get_strategy_states(resident_id: int | None = None, limit: int = 100):
 
 
 @router.get("/learning-updates")
-def get_learning_updates(resident_id: int | None = None, limit: int = 100):
+def get_learning_updates(resident_id: Optional[int] = None, limit: int = 100):
     with get_connection() as conn:
         if resident_id is None:
             rows = conn.execute(
@@ -165,7 +169,7 @@ def get_learning_updates(resident_id: int | None = None, limit: int = 100):
 
 
 @router.get("/norms")
-def get_norm_candidates(state: str | None = None, limit: int = 100):
+def get_norm_candidates(state: Optional[str] = None, limit: int = 100):
     with get_connection() as conn:
         if state is None:
             rows = conn.execute(
@@ -184,7 +188,7 @@ def get_norm_candidates(state: str | None = None, limit: int = 100):
 
 
 @router.get("/norm-signals")
-def get_norm_signals(behavior_key: str | None = None, limit: int = 100):
+def get_norm_signals(behavior_key: Optional[str] = None, limit: int = 100):
     with get_connection() as conn:
         if behavior_key is None:
             rows = conn.execute(
@@ -219,7 +223,7 @@ def get_norm_evidence(norm_id: int):
 
 
 @router.get("/norm-beliefs")
-def get_norm_beliefs(resident_id: int | None = None, limit: int = 100):
+def get_norm_beliefs(resident_id: Optional[int] = None, limit: int = 100):
     with get_connection() as conn:
         if resident_id is None:
             rows = conn.execute(
@@ -249,7 +253,7 @@ def get_rule_primitives():
 
 
 @router.get("/rule-proposals")
-def get_rule_proposals(status: str | None = None, limit: int = 100):
+def get_rule_proposals(status: Optional[str] = None, limit: int = 100):
     with get_connection() as conn:
         if status is None:
             rows = conn.execute(
@@ -297,7 +301,7 @@ def create_rule_deliberation(
 
 
 @router.get("/rule-versions")
-def get_rule_versions(lineage_key: str | None = None, limit: int = 100):
+def get_rule_versions(lineage_key: Optional[str] = None, limit: int = 100):
     with get_connection() as conn:
         if lineage_key is None:
             rows = conn.execute(

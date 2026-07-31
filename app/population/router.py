@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -15,7 +19,7 @@ class PopulationEventRequest(BaseModel):
     event_key: str
     event_type: str
     effective_at: str
-    resident_id: int | None = None
+    resident_id: Optional[int] = None
     payload: dict = Field(default_factory=dict)
     source_type: str = "internal"
     source_id: str = ""
@@ -23,7 +27,7 @@ class PopulationEventRequest(BaseModel):
 
 
 @router.get("/profiles")
-def list_population_profiles(status: str | None = None):
+def list_population_profiles(status: Optional[str] = None):
     with get_connection() as conn:
         if status:
             rows = conn.execute(

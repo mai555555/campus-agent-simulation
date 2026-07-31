@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Optional
+
 import json
 
 from fastapi import APIRouter, Query
@@ -17,7 +21,7 @@ def list_catalog_items():
 
 
 @router.get("/inventory")
-def list_supply_inventory(owner_actor_key: str | None = None):
+def list_supply_inventory(owner_actor_key: Optional[str] = None):
     with get_connection() as conn:
         where, params = ("", ())
         if owner_actor_key:
@@ -37,7 +41,7 @@ def list_supply_inventory(owner_actor_key: str | None = None):
 
 @router.get("/production-batches")
 def list_production_batches(
-    status: str | None = Query(default=None, pattern="^(running|completed|failed|cancelled)$"),
+    status: Optional[str] = Query(default=None, pattern="^(running|completed|failed|cancelled)$"),
     limit: int = Query(default=50, ge=1, le=200),
 ):
     with get_connection() as conn:
@@ -90,4 +94,3 @@ def list_service_deliveries(limit: int = Query(default=50, ge=1, le=200)):
             item["result"] = json.loads(item.pop("result_json") or "{}")
             result.append(item)
         return result
-

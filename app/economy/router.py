@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Optional
+
 from fastapi import APIRouter, Query
 
 from app.db import get_connection
@@ -41,7 +45,7 @@ def list_economic_actors():
 
 
 @router.get("/accounts")
-def list_ledger_accounts(actor_key: str | None = None):
+def list_ledger_accounts(actor_key: Optional[str] = None):
     with get_connection() as conn:
         params = ()
         where = ""
@@ -79,7 +83,7 @@ def list_ledger_accounts(actor_key: str | None = None):
 @router.get("/transactions")
 def list_ledger_transactions(
     limit: int = Query(default=50, ge=1, le=200),
-    before_id: int | None = Query(default=None, ge=1),
+    before_id: Optional[int] = Query(default=None, ge=1),
 ):
     with get_connection() as conn:
         where = ""
@@ -165,7 +169,7 @@ def list_ledger_authorization_rules():
 
 @router.get("/audit-events")
 def list_ledger_audit_events(
-    status: str | None = Query(default=None, pattern="^(open|resolved)$"),
+    status: Optional[str] = Query(default=None, pattern="^(open|resolved)$"),
     limit: int = Query(default=50, ge=1, le=200),
 ):
     with get_connection() as conn:

@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Optional
+
 import json
 
 from fastapi import APIRouter, Query
@@ -34,7 +38,7 @@ def list_credit_products():
 
 
 @router.get("/profiles")
-def list_credit_profiles(resident_id: int | None = None):
+def list_credit_profiles(resident_id: Optional[int] = None):
     with get_connection() as conn:
         if resident_id is not None:
             return available_credit(conn, resident_id)
@@ -53,8 +57,8 @@ def list_credit_profiles(resident_id: int | None = None):
 
 @router.get("/contracts")
 def list_credit_contracts(
-    resident_id: int | None = None,
-    status: str | None = Query(
+    resident_id: Optional[int] = None,
+    status: Optional[str] = Query(
         default=None,
         pattern="^(active|late|defaulted|paid|restructured)$",
     ),
@@ -89,7 +93,7 @@ def list_credit_contracts(
 
 @router.get("/installments")
 def list_credit_installments(
-    contract_id: int | None = None,
+    contract_id: Optional[int] = None,
     limit: int = Query(default=100, ge=1, le=500),
 ):
     with get_connection() as conn:
@@ -145,7 +149,7 @@ def list_credit_events(limit: int = Query(default=100, ge=1, le=500)):
 
 
 @router.get("/savings-goals")
-def list_savings_goals(resident_id: int | None = None):
+def list_savings_goals(resident_id: Optional[int] = None):
     with get_connection() as conn:
         where, params = ("", ())
         if resident_id is not None:
