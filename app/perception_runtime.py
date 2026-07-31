@@ -292,16 +292,17 @@ def capture_tick_observations(conn, world_time, tick_id, day, branch_key="main")
                     world_time.isoformat(),
                     branch_key,
                     json.dumps(
-                        {
+                         {
                             "source_tick_id": event.get("tick_id"),
-                            "event_location": event.get("location"),
+                           "event_location": event.get("location"),
                             "event_occurred_at": event.get("occurred_at"),
                             "capability_adjustment": {
                                 "information_literacy": information_literacy,
                                 "language_access": language_access,
                                 "version": "capability-defaults-v1",
                             },
-                        }
+                        },
+                        default=str,
                     ),
                 ),
             ).rowcount

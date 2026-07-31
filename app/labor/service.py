@@ -34,7 +34,7 @@ CONTRACT_DEFAULTS = (
 
 
 def _json(value) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def _now(value=None) -> datetime:

@@ -648,7 +648,7 @@ def _record_trajectory(
             state["y"],
             state["z"],
             movement_status,
-            json.dumps(metadata),
+            json.dumps(metadata, default=str),
         ),
     )
 
