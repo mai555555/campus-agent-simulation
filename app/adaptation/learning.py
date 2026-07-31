@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 
 def _json(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def _load(value, fallback):
