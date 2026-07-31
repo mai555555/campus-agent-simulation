@@ -22,8 +22,8 @@ SEEDED_MEMBERS = {
 }
 
 
-def _json(value) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+def _json(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def _parse_time(value) -> datetime:

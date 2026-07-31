@@ -71,7 +71,7 @@ CONSUMPTION_TRANSACTION_TYPES = (
 
 
 def _json(value) -> str:
-    return json.dumps(value or {}, ensure_ascii=False, sort_keys=True)
+    return json.dumps(value or {}, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def _now(value=None) -> datetime:
