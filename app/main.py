@@ -3152,7 +3152,15 @@ def update_world_runtime_status(conn, status):
 
 
 def _world_event_json_default(value):
-    return _json_default(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, set):
+        return sorted(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def append_world_event(
