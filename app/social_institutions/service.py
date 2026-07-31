@@ -13,7 +13,7 @@ RULE_VERSION = "social-institution-v1"
 
 
 def _json(value) -> str:
-    return json.dumps(value or {}, ensure_ascii=False, sort_keys=True)
+    return json.dumps(value or {}, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def _load(value, default=None):

@@ -17,7 +17,7 @@ PUBLIC_FUND_CASH = f"{PUBLIC_FUND_ACTOR}:cash"
 
 
 def _json(value) -> str:
-    return json.dumps(value or {}, ensure_ascii=False, sort_keys=True)
+    return json.dumps(value or {}, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def _load(value, default=None):

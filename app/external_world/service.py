@@ -108,7 +108,13 @@ IMPACT_RULES = (
 
 
 def _json(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+    value,
+    ensure_ascii=False,
+    sort_keys=True,
+    separators=(",", ":"),
+    default=str,
+)
 
 
 def _load(value, fallback):
