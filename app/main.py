@@ -905,7 +905,12 @@ def ensure_multiscale_goal_structure(conn, resident, world_time, tick_id=None):
     else:
         long_goal = max(
             long_goals,
-            key=lambda goal: int(goal["priority"]) + int(goal["commitment"]) + int(goal["expected_utility"]) + random.uniform(-8, 8),
+            key=lambda goal: (
+    int(goal.get("priority") or 0)
+    + int(goal.get("commitment") or 0)
+    + int(goal.get("expected_utility") or 0)
+    + random.uniform(-8, 8)
+),
         )
         for competing_goal in long_goals:
             if competing_goal["id"] == long_goal["id"]:
