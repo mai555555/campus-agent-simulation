@@ -1366,8 +1366,8 @@ def advance_personal_goal(conn, resident_id, action, success):
     points = action_points.get(goal["category"], action_points["general"]).get(action, 1)
     if not success:
         points = 0
-    progress = clamp(int(goal["progress"]) + points)
-    status = "completed" if progress >= int(goal["target_progress"]) else "active"
+    progress = clamp(int(goal["progress"] or 0) + points)
+    status = "completed" if progress >= int(goal["target_progress"] or 100) else "active"
     conn.execute(
         """
         UPDATE long_term_goals
@@ -1397,8 +1397,8 @@ def advance_group_goals(conn, day, action_results):
         if participant_count == 0:
             continue
         increment = min(15, 2 + participant_count * 2)
-        progress = clamp(int(group["progress"]) + increment)
-        status = "completed" if progress >= int(group["target_progress"]) else "active"
+        progress = clamp(int(group["progress"] or 0) + increment)
+        status = "completed" if progress >= int(group["target_progress"] or 100) else "active"
         conn.execute("UPDATE group_goals SET progress = ?, status = ? WHERE id = ?", (progress, status, group["id"]))
         updates.append({"group_id": group["id"], "name": group["name"], "progress": progress, "status": status, "active_members": participant_count})
         if status == "completed":
