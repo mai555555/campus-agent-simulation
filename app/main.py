@@ -756,6 +756,19 @@ def multiscale_goal_templates(resident, long_goal):
 
 
 def ensure_goal_trajectory_episode(conn, goal, world_time):
+    lookup_params = (goal["resident_id"], goal["id"], goal["horizon"])
+    row = conn.execute(
+        """
+        SELECT * FROM trajectory_episodes
+        WHERE resident_id = ? AND goal_id = ? AND horizon = ?
+        """,
+        lookup_params,
+    ).fetchone()
+    if row:
+        return dict(row)
+
+    # Existing goal episodes are read far more often than they are created.
+    # Avoid a needless PostgreSQL unique-index write on every world tick.
     cursor = conn.execute(
         """
         INSERT INTO trajectory_episodes
@@ -778,7 +791,7 @@ def ensure_goal_trajectory_episode(conn, goal, world_time):
         SELECT * FROM trajectory_episodes
         WHERE resident_id = ? AND goal_id = ? AND horizon = ?
         """,
-        (goal["resident_id"], goal["id"], goal["horizon"]),
+        lookup_params,
     ).fetchone()
     return dict(row) if row else {"id": cursor.lastrowid}
 
@@ -10428,12 +10441,23 @@ def _life_course_episodes(timeline):
     return episodes
 
 
-def _life_course_latest_recorded_day(conn, resident_id):
+def _life_course_latest_recorded_day(conn, resident_id, timeline=None):
+    """Return the newest evidence that the current life-course view can show."""
+    if timeline is not None:
+        days = [int(item["day"]) for item in timeline if item.get("day") is not None]
+        return max(days) if days else None
+
     latest_days = []
-    for table in ("world_event_stream", "simulation_action_logs", "memories"):
+    branch_key = active_world_branch_key(conn)
+    table_filters = {
+        "world_event_stream": ("resident_id = ? AND branch_key = ?", (resident_id, branch_key)),
+        "simulation_action_logs": ("resident_id = ?", (resident_id,)),
+        "memories": ("resident_id = ?", (resident_id,)),
+    }
+    for table, (where, params) in table_filters.items():
         row = conn.execute(
-            f"SELECT MAX(day) AS latest_day FROM {table} WHERE resident_id = ?",
-            (resident_id,),
+            f"SELECT MAX(day) AS latest_day FROM {table} WHERE {where}",
+            params,
         ).fetchone()
         if row and row["latest_day"] is not None:
             latest_days.append(int(row["latest_day"]))
@@ -10503,7 +10527,7 @@ def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, l
     ]
     temporal_coverage = _life_course_temporal_coverage(
         get_current_day(conn),
-        _life_course_latest_recorded_day(conn, resident_id),
+        _life_course_latest_recorded_day(conn, resident_id, timeline=timeline),
         from_day=from_day,
         to_day=to_day,
     )
