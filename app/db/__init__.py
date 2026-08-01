@@ -174,7 +174,7 @@ class PostgresConnection:
             # as placeholders (for example LIKE '%学生%').
             cursor = self._connection.execute(statement)
         rowcount = cursor.rowcount
-        inserted_row = cursor.fetchone() if needs_id and rowcount else None
+        inserted_row = cursor.fetchone() if needs_id else None
         lastrowid = inserted_row["id"] if inserted_row else None
         return PostgresCursor(cursor, lastrowid, rowcount)
 
