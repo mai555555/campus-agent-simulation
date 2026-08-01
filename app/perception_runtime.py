@@ -125,6 +125,7 @@ def _upsert_belief(conn, observation, observed_at):
          confidence, last_observation_id, evidence_count, status, branch_key,
          first_formed_at, last_updated_at, metadata)
         VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'active', ?, ?, ?, ?)
+        RETURNING id
         """,
         (
             observation["observer_resident_id"],
@@ -140,7 +141,8 @@ def _upsert_belief(conn, observation, observed_at):
             json.dumps({"latest_modality": observation["modality"]}),
         ),
     )
-    return int(cursor.lastrowid)
+    inserted = cursor.fetchone()
+    return int(inserted["id"] if isinstance(inserted, dict) else inserted[0])
 
 
 def _store_spatial_memory(conn, observation, observed_at):
