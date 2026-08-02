@@ -161,6 +161,34 @@ class RuntimeSchemaSafetyTest(unittest.TestCase):
         self.assertEqual(runtime_updates, [])
         conn.close()
 
+    def test_world_action_rule_seed_is_idempotent_without_unique_constraint(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE world_action_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_key TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                rule_version TEXT NOT NULL,
+                preconditions_json TEXT NOT NULL,
+                required_resources_json TEXT NOT NULL,
+                duration_minutes INTEGER NOT NULL,
+                success_probability REAL NOT NULL,
+                direct_effects_json TEXT NOT NULL,
+                delayed_effects_json TEXT NOT NULL,
+                failure_policy_json TEXT NOT NULL
+            )
+            """
+        )
+
+        main.seed_world_action_rules(conn)
+        main.seed_world_action_rules(conn)
+
+        count = conn.execute("SELECT COUNT(*) AS total FROM world_action_rules").fetchone()
+        self.assertEqual(count["total"], len(main.DEFAULT_WORLD_ACTION_RULES))
+        conn.close()
+
     def test_runner_auto_starts_default_paused_runtime(self):
         conn = self._prepared_connection()
         runtime = main.get_world_runtime(conn)

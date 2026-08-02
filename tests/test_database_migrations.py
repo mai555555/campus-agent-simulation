@@ -184,16 +184,16 @@ class DatabaseMigrationFoundationTest(unittest.TestCase):
                 finally:
                     engine.dispose()
 
-    def test_legacy_upsert_dedupe_rejects_conflicting_seed_rules(self):
+    def test_legacy_upsert_index_migration_never_deletes_business_rows(self):
         migration = import_module(
             "app.db.migrations.versions.20260731_0034_legacy_runtime_upsert_indexes"
         )
-        with patch.object(migration.op, "execute") as execute:
-            migration._dedupe_identical_seed_rules()
+        migration_source = Path(migration.__file__).read_text()
+        indexed_tables = {table for _name, table, _columns in migration.UPSERT_INDEXES}
 
-        sql = str(execute.call_args.args[0])
-        self.assertIn("conflicting duplicate definitions", sql)
-        self.assertIn("count(DISTINCT jsonb_build_array", sql)
+        self.assertNotIn("DELETE FROM", migration_source.upper())
+        self.assertNotIn("agent_goals", indexed_tables)
+        self.assertNotIn("world_action_rules", indexed_tables)
 
     def test_migration_runner_rejects_empty_database(self):
         with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(

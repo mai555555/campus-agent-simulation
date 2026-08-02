@@ -2746,6 +2746,16 @@ def seed_world_runtime_rules(conn):
 
 def seed_world_action_rules(conn):
     for action_type, rule in DEFAULT_WORLD_ACTION_RULES.items():
+        existing = conn.execute(
+            """
+            SELECT id FROM world_action_rules
+            WHERE action_type = ? AND rule_version = 'action-rule-v1'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (action_type,),
+        ).fetchone()
+        if existing:
+            continue
         conn.execute(
             """
             INSERT OR IGNORE INTO world_action_rules
