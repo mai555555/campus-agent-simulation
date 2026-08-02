@@ -7536,6 +7536,7 @@ def world_runner_loop():
     while True:
         try:
             with get_connection() as conn:
+                ensure_world_runtime_tables(conn)
                 stale_tick_ids = reconcile_stale_world_ticks(conn)
                 if stale_tick_ids:
                     logger.warning("Recovered stale world ticks: %s", stale_tick_ids)
