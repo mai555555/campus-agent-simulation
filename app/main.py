@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import time
+from contextlib import contextmanager
 from queue import Queue
 from threading import Lock, Thread
 from uuid import uuid4
@@ -177,6 +178,8 @@ WORLD_SCHEMA_READY = False
 WORLD_TIMEZONE = "Asia/Shanghai"
 WORLD_TZ = timezone(timedelta(hours=8))
 WORLD_RUNTIME_ID = 1
+WORLD_TICK_ADVISORY_LOCK_ID = 7_436_177_031
+DEFAULT_WORLD_STALE_TICK_SECONDS = 30 * 60
 WORLD_EXTERNAL_SYNC_INTERVAL_SECONDS = 3600
 WORLD_WEATHER_SYNC_INTERVAL_SECONDS = 3600
 WORLD_CAMPUS_NEWS_WINDOW_SECONDS = 8 * 3600
@@ -3187,7 +3190,7 @@ def update_world_runtime_status(conn, status):
         (status, now, WORLD_RUNTIME_ID),
     )
     conn.commit()
-    return get_world_runtime(conn)
+    return read_world_runtime(conn)
 
 
 def _world_event_json_default(value):
@@ -4288,20 +4291,34 @@ def consume_auto_model_budget(conn, trigger_type, resident_id=None):
     if not is_llm_configured():
         log_model_call(conn, trigger_type, status="skipped:llm_unconfigured", resident_id=resident_id)
         return False
-    runtime = get_world_runtime(conn)
-    used = int(runtime["auto_model_calls_used"])
-    budget = int(runtime["daily_auto_model_budget"])
-    if used >= budget:
+    now = get_world_now()
+    budget_date = now.strftime("%Y-%m-%d")
+
+    def reserve_budget(budget_conn):
+        cursor = budget_conn.execute(
+            """
+            UPDATE world_runtime
+            SET auto_model_calls_used = CASE
+                    WHEN budget_date <> ? THEN 1
+                    ELSE auto_model_calls_used + 1
+                END,
+                budget_date = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND (budget_date <> ? OR auto_model_calls_used < daily_auto_model_budget)
+            RETURNING auto_model_calls_used
+            """,
+            (budget_date, budget_date, WORLD_RUNTIME_ID, budget_date),
+        )
+        return cursor.fetchone() is not None
+
+    if using_postgres():
+        with get_connection() as budget_conn:
+            reserved = reserve_budget(budget_conn)
+    else:
+        reserved = reserve_budget(conn)
+    if not reserved:
         log_model_call(conn, trigger_type, status="budget_exhausted", resident_id=resident_id)
         return False
-    conn.execute(
-        """
-        UPDATE world_runtime
-        SET auto_model_calls_used = auto_model_calls_used + 1, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-        """,
-        (WORLD_RUNTIME_ID,),
-    )
     return True
 
 
@@ -6967,19 +6984,135 @@ def maybe_auto_sync_real_weather(conn, world_time, tick_id=None, day=None, slot=
         return {"skipped": False, "failed": True, "error": str(exc), "event_id": event["id"]}
 
 
+@contextmanager
+def world_tick_database_lease():
+    """Hold a cross-process tick lease without locking application rows."""
+    if not using_postgres():
+        yield True
+        return
+    lease_conn = get_connection()
+    try:
+        row = lease_conn.execute(
+            "SELECT pg_try_advisory_xact_lock(?) AS acquired",
+            (WORLD_TICK_ADVISORY_LOCK_ID,),
+        ).fetchone()
+        yield bool(row and row["acquired"])
+    finally:
+        lease_conn.rollback()
+        lease_conn.close()
+
+
+def stale_world_tick_seconds():
+    try:
+        configured = int(
+            os.getenv(
+                "WORLD_STALE_TICK_SECONDS",
+                str(DEFAULT_WORLD_STALE_TICK_SECONDS),
+            )
+        )
+    except ValueError:
+        configured = DEFAULT_WORLD_STALE_TICK_SECONDS
+    return max(300, configured)
+
+
+def reconcile_stale_world_ticks(conn, now=None):
+    """Mark abandoned running rows failed after the configured safety window."""
+    now = now or get_world_now()
+    stale_ids = []
+    rows = conn.execute(
+        """
+        SELECT id, started_at FROM world_ticks
+        WHERE status = 'running'
+        ORDER BY id
+        """
+    ).fetchall()
+    for row in rows:
+        started_at = parse_world_datetime(row["started_at"])
+        if started_at is None:
+            continue
+        if (now - started_at).total_seconds() >= stale_world_tick_seconds():
+            stale_ids.append(int(row["id"]))
+    if not stale_ids:
+        return []
+    completed_at = now.isoformat()
+    message = "runner recovered a stale running tick"
+    for tick_id in stale_ids:
+        conn.execute(
+            """
+            UPDATE world_ticks
+            SET status = 'failed', error_message = ?, completed_at = ?
+            WHERE id = ? AND status = 'running'
+            """,
+            (message, completed_at, tick_id),
+        )
+    remaining = conn.execute(
+        "SELECT 1 FROM world_ticks WHERE status = 'running' LIMIT 1"
+    ).fetchone()
+    if remaining is None:
+        conn.execute(
+            """
+            UPDATE world_runtime
+            SET last_tick_started_at = '', updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (WORLD_RUNTIME_ID,),
+        )
+    return stale_ids
+
+
+def record_world_tick_failure(tick_id, reason, exc):
+    failed_at = get_world_now().isoformat()
+    with get_connection() as failure_conn:
+        if tick_id is not None:
+            failure_conn.execute(
+                """
+                UPDATE world_ticks
+                SET status = 'failed', error_message = ?, completed_at = ?
+                WHERE id = ? AND status = 'running'
+                """,
+                (f"{type(exc).__name__}: {str(exc)[:500]}", failed_at, tick_id),
+            )
+            failure_conn.execute(
+                """
+                UPDATE world_runtime
+                SET last_tick_started_at = '', last_tick_completed_at = ?,
+                    world_time = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (failed_at, failed_at, WORLD_RUNTIME_ID),
+            )
+        append_world_event(
+            failure_conn,
+            "world_tick_failed",
+            "世界 tick 失败",
+            f"后台世界推进失败：{type(exc).__name__}: {str(exc)[:180]}",
+            tick_id=tick_id,
+            payload={"error": str(exc), "reason": reason},
+        )
+        failure_conn.commit()
+
+
 def advance_world_tick(reason="background"):
     if not WORLD_TICK_LOCK.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="世界 tick 正在执行中")
     try:
+        with world_tick_database_lease() as acquired:
+            if not acquired:
+                raise HTTPException(status_code=409, detail="另一个服务实例正在执行世界 tick")
+            return _advance_world_tick_locked(reason)
+    finally:
+        WORLD_TICK_LOCK.release()
+
+
+def _advance_world_tick_locked(reason="background"):
+    tick_id = None
+    try:
         with get_connection() as conn:
-            runtime = get_world_runtime(conn)
+            runtime = read_world_runtime(conn)
             world_time = get_world_now()
             day_sync = sync_current_day_with_world_date(conn, world_time)
             day = day_sync["day"]
             slot = world_slot_from_hour(world_time.hour)
-            population_updates = process_population_runtime(conn, world_time)
-            ensure_result = ensure_current_action_plans(conn, world_time)
-            env = sync_world_time_environment(conn, world_time)
             tick_index_row = conn.execute("SELECT COALESCE(MAX(tick_index), 0) AS value FROM world_ticks").fetchone()
             tick_index = int(tick_index_row["value"]) + 1
             tick_cursor = conn.execute(
@@ -6998,6 +7131,12 @@ def advance_world_tick(reason="background"):
                 """,
                 (world_time.isoformat(), world_time.isoformat(), WORLD_RUNTIME_ID),
             )
+            # Make the running row durable and release the world_runtime row lock
+            # before plans, LLM calls, and subsystem processing begin.
+            conn.commit()
+            population_updates = process_population_runtime(conn, world_time)
+            ensure_result = ensure_current_action_plans(conn, world_time)
+            env = sync_world_time_environment(conn, world_time)
             delayed_effects = process_due_world_delayed_effects(
                 conn,
                 world_time,
@@ -7280,6 +7419,9 @@ def advance_world_tick(reason="background"):
                 source_id=tick_id,
                 parent_event_id=start_event["id"],
             )
+            # Commit completion state immediately to release the world_runtime
+            # row lock before slow post-tick operations (news, group behavior).
+            conn.commit()
             group_behavior = maybe_generate_group_behavior_event(conn, world_time, tick_id, day, slot)
             campus_news = maybe_publish_campus_news_from_world_window(conn, world_time, tick_id=tick_id, day=day)
             conn.commit()
@@ -7319,25 +7461,17 @@ def advance_world_tick(reason="background"):
                 "campus_news": campus_news,
                 "results": results,
             }
-    except HTTPException:
+    except HTTPException as exc:
+        if tick_id is not None:
+            record_world_tick_failure(tick_id, reason, exc)
         raise
     except Exception as exc:
         logger.exception("World tick failed")
-        with get_connection() as conn:
-            try:
-                append_world_event(
-                    conn,
-                    "world_tick_failed",
-                    "世界 tick 失败",
-                    f"后台世界推进失败：{type(exc).__name__}: {str(exc)[:180]}",
-                    payload={"error": str(exc), "reason": reason},
-                )
-                conn.commit()
-            except Exception:
-                conn.rollback()
+        try:
+            record_world_tick_failure(tick_id, reason, exc)
+        except Exception:
+            logger.exception("Failed to persist world tick failure state")
         raise
-    finally:
-        WORLD_TICK_LOCK.release()
 
 
 def parse_runtime_time(value):
@@ -7402,10 +7536,17 @@ def world_runner_loop():
     while True:
         try:
             with get_connection() as conn:
-                runtime = get_world_runtime(conn)
+                stale_tick_ids = reconcile_stale_world_ticks(conn)
+                if stale_tick_ids:
+                    logger.warning("Recovered stale world ticks: %s", stale_tick_ids)
+                    conn.commit()
+                runtime = read_world_runtime(conn)
                 runtime = ensure_world_runtime_running_unless_manually_paused(conn, runtime)
             if world_tick_due(runtime):
                 advance_world_tick(reason="background")
+        except HTTPException as exc:
+            if exc.status_code != 409:
+                logger.exception("World runner loop skipped one cycle")
         except Exception as exc:
             logger.exception("World runner loop skipped one cycle")
         time.sleep(5)
