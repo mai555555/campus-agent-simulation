@@ -48,20 +48,25 @@ def _account_balance(conn, account_key: str) -> int:
 
 
 def _ensure_credit_union(conn) -> dict:
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO economic_actors
-        (actor_key, actor_type, display_name, metadata_json)
-        VALUES (?, 'public', '校园信用合作社', ?)
-        """,
-        (
-            CREDIT_UNION_ACTOR,
-            _json({
-                "purpose": "funded_household_credit_and_mutual_aid",
-                "credit_creation": False,
-            }),
-        ),
-    )
+    existing = conn.execute(
+        "SELECT id FROM economic_actors WHERE actor_key = ?",
+        (CREDIT_UNION_ACTOR,),
+    ).fetchone()
+    if not existing:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO economic_actors
+            (actor_key, actor_type, display_name, metadata_json)
+            VALUES (?, 'public', '校园信用合作社', ?)
+            """,
+            (
+                CREDIT_UNION_ACTOR,
+                _json({
+                    "purpose": "funded_household_credit_and_mutual_aid",
+                    "credit_creation": False,
+                }),
+            ),
+        )
     for code, account_type, normal_side in (
         ("cash", "asset", "debit"),
         ("loan_receivable", "asset", "debit"),
@@ -283,20 +288,21 @@ def seed_credit_runtime(conn, world_time=None) -> dict:
             "SELECT id FROM savings_goals WHERE goal_key = ?",
             (goal_key,),
         ).fetchone()
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO savings_goals
-            (goal_key, resident_id, goal_type, target_amount_minor,
-             current_amount_minor, target_date, priority, metadata_json)
-            VALUES (?, ?, 'emergency_reserve', ?, ?, ?, 90, ?)
-            """,
-            (
-                goal_key, resident_id, target_minor,
-                _savings_balance(conn, resident_id),
-                (now.date() + timedelta(days=90)).isoformat(),
-                _json({"rule_version": RULE_VERSION}),
-            ),
-        )
+        if not goal_before:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO savings_goals
+                (goal_key, resident_id, goal_type, target_amount_minor,
+                 current_amount_minor, target_date, priority, metadata_json)
+                VALUES (?, ?, 'emergency_reserve', ?, ?, ?, 90, ?)
+                """,
+                (
+                    goal_key, resident_id, target_minor,
+                    _savings_balance(conn, resident_id),
+                    (now.date() + timedelta(days=90)).isoformat(),
+                    _json({"rule_version": RULE_VERSION}),
+                ),
+            )
         created_goals += int(goal_before is None)
         _ensure_borrower_accounts(conn, resident_id)
         _sync_budget_credit(conn, resident_id)
@@ -1272,22 +1278,13 @@ def _maybe_create_daily_shocks(conn, now: datetime) -> list[int]:
     return created
 
 
-def process_credit_runtime(conn, world_time=None) -> dict:
-    if not credit_runtime_available(conn):
-        return {
-            "available": False,
-            "interest_accruals": [],
-            "payments": [],
-            "late": [],
-            "defaulted": [],
-            "shocks": [],
-        }
-    now = _now(world_time)
+def _refresh_savings_goals(conn) -> None:
+    """Refresh goals safely even when a legacy database has duplicate accounts."""
     conn.execute(
         """
         UPDATE savings_goals
         SET current_amount_minor = COALESCE((
-                SELECT account.balance_minor
+                SELECT MAX(account.balance_minor)
                 FROM ledger_accounts account
                 JOIN economic_actors actor ON actor.id = account.actor_id
                 WHERE actor.resident_id = savings_goals.resident_id
@@ -1295,7 +1292,7 @@ def process_credit_runtime(conn, world_time=None) -> dict:
             ), 0),
             status = CASE
                 WHEN COALESCE((
-                    SELECT account.balance_minor
+                    SELECT MAX(account.balance_minor)
                     FROM ledger_accounts account
                     JOIN economic_actors actor ON actor.id = account.actor_id
                     WHERE actor.resident_id = savings_goals.resident_id
@@ -1307,6 +1304,20 @@ def process_credit_runtime(conn, world_time=None) -> dict:
         WHERE status IN ('active', 'achieved')
         """
     )
+
+
+def process_credit_runtime(conn, world_time=None) -> dict:
+    if not credit_runtime_available(conn):
+        return {
+            "available": False,
+            "interest_accruals": [],
+            "payments": [],
+            "late": [],
+            "defaulted": [],
+            "shocks": [],
+        }
+    now = _now(world_time)
+    _refresh_savings_goals(conn)
     accruals = []
     payments = []
     late = []

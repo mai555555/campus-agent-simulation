@@ -32,6 +32,12 @@ def _insert_actor(
     organization_id: Optional[int] = None,
     metadata: Optional[dict] = None,
 ):
+    existing = conn.execute(
+        "SELECT * FROM economic_actors WHERE actor_key = ?",
+        (actor_key,),
+    ).fetchone()
+    if existing:
+        return existing
     conn.execute(
         """
         INSERT OR IGNORE INTO economic_actors
@@ -64,6 +70,12 @@ def _insert_account(
     *,
     metadata: Optional[dict] = None,
 ):
+    existing = conn.execute(
+        "SELECT * FROM ledger_accounts WHERE account_key = ?",
+        (account_key,),
+    ).fetchone()
+    if existing:
+        return existing
     conn.execute(
         """
         INSERT OR IGNORE INTO ledger_accounts

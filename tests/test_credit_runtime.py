@@ -13,6 +13,7 @@ from app.budget.service import (
 from app.credit.schema import CREDIT_RUNTIME_SQL
 from app.credit.service import (
     CREDIT_UNION_CASH,
+    _refresh_savings_goals,
     accrue_contract_interest,
     available_credit,
     create_economic_shock,
@@ -127,6 +128,44 @@ class CreditRuntimeTest(unittest.TestCase):
         self.assertEqual(budget["credit_enabled"], 1)
         self.assertGreater(budget["credit_limit_minor"], 0)
         self.assertTrue(reconcile_ledger(self.conn)["balanced"])
+
+    def test_legacy_duplicate_savings_accounts_do_not_break_goal_refresh(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE economic_actors (
+                id INTEGER PRIMARY KEY,
+                resident_id INTEGER
+            );
+            CREATE TABLE ledger_accounts (
+                id INTEGER PRIMARY KEY,
+                actor_id INTEGER,
+                account_code TEXT,
+                balance_minor INTEGER
+            );
+            CREATE TABLE savings_goals (
+                id INTEGER PRIMARY KEY,
+                resident_id INTEGER,
+                target_amount_minor INTEGER,
+                current_amount_minor INTEGER,
+                status TEXT,
+                updated_at TEXT
+            );
+            INSERT INTO economic_actors VALUES (1, 1);
+            INSERT INTO ledger_accounts VALUES (1, 1, 'savings', 10);
+            INSERT INTO ledger_accounts VALUES (2, 1, 'savings', 20);
+            INSERT INTO ledger_accounts VALUES (3, 1, 'savings', 0);
+            INSERT INTO savings_goals VALUES (1, 1, 15, 0, 'active', '');
+            """
+        )
+
+        _refresh_savings_goals(conn)
+
+        goal = conn.execute("SELECT * FROM savings_goals WHERE id = 1").fetchone()
+        self.assertEqual(goal["current_amount_minor"], 20)
+        self.assertEqual(goal["status"], "achieved")
+        conn.close()
 
     def test_origination_records_cash_asset_and_liability_without_money_creation(self):
         lender_before = self.cash(CREDIT_UNION_CASH)

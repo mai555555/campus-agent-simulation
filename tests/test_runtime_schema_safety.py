@@ -1,5 +1,6 @@
 import sqlite3
 import unittest
+from contextlib import nullcontext
 from unittest.mock import Mock, patch
 
 import app.main as main
@@ -75,6 +76,7 @@ class RuntimeSchemaSafetyTest(unittest.TestCase):
         runner.is_alive.return_value = False
 
         with (
+            patch.dict("os.environ", {"WORLD_RUNNER_ENABLED": "true"}),
             patch.object(main, "Thread", return_value=runner) as thread_factory,
             patch.object(
                 main,
@@ -89,6 +91,75 @@ class RuntimeSchemaSafetyTest(unittest.TestCase):
             daemon=True,
         )
         runner.start.assert_called_once_with()
+
+    def test_startup_can_disable_runner_for_read_only_instance(self):
+        with (
+            patch.dict("os.environ", {"WORLD_RUNNER_ENABLED": "false"}),
+            patch.object(main, "Thread") as thread_factory,
+            patch.object(
+                main,
+                "get_connection",
+                side_effect=AssertionError("disabled runner must not access the database"),
+            ),
+        ):
+            main.start_world_runner_thread()
+
+        thread_factory.assert_not_called()
+        self.assertIsNone(main.WORLD_RUNNER_THREAD)
+
+    def test_read_world_runtime_does_not_write(self):
+        conn = self._prepared_connection()
+        statements = []
+        conn.set_trace_callback(statements.append)
+
+        runtime = main.read_world_runtime(conn)
+
+        writes = [
+            statement
+            for statement in statements
+            if statement.lstrip().upper().startswith(("INSERT ", "UPDATE ", "DELETE "))
+        ]
+        self.assertEqual(runtime["id"], main.WORLD_RUNTIME_ID)
+        self.assertEqual(writes, [])
+        conn.close()
+
+    def test_world_events_endpoint_does_not_write(self):
+        conn = self._prepared_connection()
+        statements = []
+        conn.set_trace_callback(statements.append)
+
+        with patch.object(main, "get_connection", return_value=nullcontext(conn)):
+            response = main.get_world_events()
+
+        writes = [
+            statement
+            for statement in statements
+            if statement.lstrip().upper().startswith(("INSERT ", "UPDATE ", "DELETE "))
+        ]
+        self.assertEqual(response["branch_key"], "main")
+        self.assertEqual(writes, [])
+        conn.close()
+
+    def test_observer_session_does_not_update_world_runtime(self):
+        conn = self._prepared_connection()
+        statements = []
+        conn.set_trace_callback(statements.append)
+        payload = main.ObserverSessionRequest(
+            user_id="local-observer",
+            session_type="observer",
+        )
+
+        with patch.object(main, "get_connection", return_value=nullcontext(conn)):
+            response = main.upsert_observer_session(payload)
+
+        runtime_updates = [
+            statement
+            for statement in statements
+            if statement.lstrip().upper().startswith("UPDATE WORLD_RUNTIME")
+        ]
+        self.assertEqual(response["session"]["user_id"], "local-observer")
+        self.assertEqual(runtime_updates, [])
+        conn.close()
 
     def test_runner_auto_starts_default_paused_runtime(self):
         conn = self._prepared_connection()

@@ -2,6 +2,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from importlib import import_module
 from pathlib import Path
 from unittest.mock import patch
 
@@ -182,6 +183,17 @@ class DatabaseMigrationFoundationTest(unittest.TestCase):
                     )
                 finally:
                     engine.dispose()
+
+    def test_legacy_upsert_dedupe_rejects_conflicting_seed_rules(self):
+        migration = import_module(
+            "app.db.migrations.versions.20260731_0034_legacy_runtime_upsert_indexes"
+        )
+        with patch.object(migration.op, "execute") as execute:
+            migration._dedupe_identical_seed_rules()
+
+        sql = str(execute.call_args.args[0])
+        self.assertIn("conflicting duplicate definitions", sql)
+        self.assertIn("count(DISTINCT jsonb_build_array", sql)
 
     def test_migration_runner_rejects_empty_database(self):
         with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(
