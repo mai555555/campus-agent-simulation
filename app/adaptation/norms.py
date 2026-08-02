@@ -32,6 +32,8 @@ def _load(value, fallback):
 
 def _now(value=None):
     parsed = value or datetime.now(timezone.utc)
+    if isinstance(parsed, str):
+        parsed = datetime.fromisoformat(parsed.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
@@ -393,4 +395,3 @@ def process_norm_emergence(conn, *, branch_key, tick_number, world_time):
         "signals_created": created,
         **detected,
     }
-

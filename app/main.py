@@ -756,6 +756,19 @@ def multiscale_goal_templates(resident, long_goal):
 
 
 def ensure_goal_trajectory_episode(conn, goal, world_time):
+    lookup_params = (goal["resident_id"], goal["id"], goal["horizon"])
+    row = conn.execute(
+        """
+        SELECT * FROM trajectory_episodes
+        WHERE resident_id = ? AND goal_id = ? AND horizon = ?
+        """,
+        lookup_params,
+    ).fetchone()
+    if row:
+        return dict(row)
+
+    # Existing goal episodes are read far more often than they are created.
+    # Avoid a needless PostgreSQL unique-index write on every world tick.
     cursor = conn.execute(
         """
         INSERT INTO trajectory_episodes
@@ -778,7 +791,7 @@ def ensure_goal_trajectory_episode(conn, goal, world_time):
         SELECT * FROM trajectory_episodes
         WHERE resident_id = ? AND goal_id = ? AND horizon = ?
         """,
-        (goal["resident_id"], goal["id"], goal["horizon"]),
+        lookup_params,
     ).fetchone()
     return dict(row) if row else {"id": cursor.lastrowid}
 
@@ -892,7 +905,12 @@ def ensure_multiscale_goal_structure(conn, resident, world_time, tick_id=None):
     else:
         long_goal = max(
             long_goals,
-            key=lambda goal: int(goal["priority"]) + int(goal["commitment"]) + int(goal["expected_utility"]) + random.uniform(-8, 8),
+            key=lambda goal: (
+    int(goal.get("priority") or 0)
+    + int(goal.get("commitment") or 0)
+    + int(goal.get("expected_utility") or 0)
+    + random.uniform(-8, 8)
+),
         )
         for competing_goal in long_goals:
             if competing_goal["id"] == long_goal["id"]:
@@ -1348,8 +1366,8 @@ def advance_personal_goal(conn, resident_id, action, success):
     points = action_points.get(goal["category"], action_points["general"]).get(action, 1)
     if not success:
         points = 0
-    progress = clamp(int(goal["progress"]) + points)
-    status = "completed" if progress >= int(goal["target_progress"]) else "active"
+    progress = clamp(int(goal["progress"] or 0) + points)
+    status = "completed" if progress >= int(goal["target_progress"] or 100) else "active"
     conn.execute(
         """
         UPDATE long_term_goals
@@ -1379,8 +1397,8 @@ def advance_group_goals(conn, day, action_results):
         if participant_count == 0:
             continue
         increment = min(15, 2 + participant_count * 2)
-        progress = clamp(int(group["progress"]) + increment)
-        status = "completed" if progress >= int(group["target_progress"]) else "active"
+        progress = clamp(int(group["progress"] or 0) + increment)
+        status = "completed" if progress >= int(group["target_progress"] or 100) else "active"
         conn.execute("UPDATE group_goals SET progress = ?, status = ? WHERE id = ?", (progress, status, group["id"]))
         updates.append({"group_id": group["id"], "name": group["name"], "progress": progress, "status": status, "active_members": participant_count})
         if status == "completed":
@@ -3152,7 +3170,15 @@ def update_world_runtime_status(conn, status):
 
 
 def _world_event_json_default(value):
-    return _json_default(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, set):
+        return sorted(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def append_world_event(
@@ -7350,7 +7376,7 @@ def world_runner_loop():
             if world_tick_due(runtime):
                 advance_world_tick(reason="background")
         except Exception as exc:
-            logger.warning("World runner loop skipped one cycle: %s", exc)
+            logger.exception("World runner loop skipped one cycle")
         time.sleep(5)
 
 
@@ -10420,12 +10446,23 @@ def _life_course_episodes(timeline):
     return episodes
 
 
-def _life_course_latest_recorded_day(conn, resident_id):
+def _life_course_latest_recorded_day(conn, resident_id, timeline=None):
+    """Return the newest evidence that the current life-course view can show."""
+    if timeline is not None:
+        days = [int(item["day"]) for item in timeline if item.get("day") is not None]
+        return max(days) if days else None
+
     latest_days = []
-    for table in ("world_event_stream", "simulation_action_logs", "memories"):
+    branch_key = active_world_branch_key(conn)
+    table_filters = {
+        "world_event_stream": ("resident_id = ? AND branch_key = ?", (resident_id, branch_key)),
+        "simulation_action_logs": ("resident_id = ?", (resident_id,)),
+        "memories": ("resident_id = ?", (resident_id,)),
+    }
+    for table, (where, params) in table_filters.items():
         row = conn.execute(
-            f"SELECT MAX(day) AS latest_day FROM {table} WHERE resident_id = ?",
-            (resident_id,),
+            f"SELECT MAX(day) AS latest_day FROM {table} WHERE {where}",
+            params,
         ).fetchone()
         if row and row["latest_day"] is not None:
             latest_days.append(int(row["latest_day"]))
@@ -10495,7 +10532,7 @@ def _build_life_course_overview(conn, resident_id, from_day=None, to_day=None, l
     ]
     temporal_coverage = _life_course_temporal_coverage(
         get_current_day(conn),
-        _life_course_latest_recorded_day(conn, resident_id),
+        _life_course_latest_recorded_day(conn, resident_id, timeline=timeline),
         from_day=from_day,
         to_day=to_day,
     )
