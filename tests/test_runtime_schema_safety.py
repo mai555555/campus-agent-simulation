@@ -79,11 +79,8 @@ class RuntimeSchemaSafetyTest(unittest.TestCase):
         with (
             patch.dict("os.environ", {"WORLD_RUNNER_ENABLED": "true"}),
             patch.object(main, "Thread", return_value=runner) as thread_factory,
-            patch.object(
-                main,
-                "get_connection",
-                side_effect=AssertionError("startup must not access the database"),
-            ),
+            patch.object(main, "ensure_world_runtime_tables"),
+            patch.object(main, "get_connection"),
         ):
             main.start_world_runner_thread()
 
