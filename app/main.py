@@ -3146,6 +3146,17 @@ def get_world_runtime(conn):
     return dict(conn.execute("SELECT * FROM world_runtime WHERE id = ?", (WORLD_RUNTIME_ID,)).fetchone())
 
 
+def read_world_runtime(conn):
+    """Read runtime state without refreshing timestamps or taking a row lock."""
+    row = conn.execute(
+        "SELECT * FROM world_runtime WHERE id = ?",
+        (WORLD_RUNTIME_ID,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("world_runtime is not initialized")
+    return dict(row)
+
+
 def active_world_branch_key(conn):
     row = conn.execute(
         "SELECT active_branch_key FROM world_runtime WHERE id = ?",
@@ -7350,6 +7361,16 @@ def world_runtime_auto_start_enabled():
     }
 
 
+def world_runner_enabled():
+    """Allow read-only app instances to run without a background world writer."""
+    return os.getenv("WORLD_RUNNER_ENABLED", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
 def ensure_world_runtime_running_unless_manually_paused(conn, runtime):
     if runtime.get("status") != "paused" or not world_runtime_auto_start_enabled():
         return runtime
@@ -7383,6 +7404,9 @@ def world_runner_loop():
 @app.on_event("startup")
 def start_world_runner_thread():
     global WORLD_RUNNER_THREAD
+    if not world_runner_enabled():
+        logger.info("World runner disabled by WORLD_RUNNER_ENABLED")
+        return
     with WORLD_RUNNER_LOCK:
         if WORLD_RUNNER_THREAD and WORLD_RUNNER_THREAD.is_alive():
             return
@@ -8731,10 +8755,8 @@ def decode_world_event(row):
 
 
 def runtime_response(conn):
-    day_sync = sync_current_day_with_world_date(conn, get_world_now())
-    if day_sync.get("advanced"):
-        conn.commit()
-    runtime = get_world_runtime(conn)
+    current_day = get_current_day(conn)
+    runtime = read_world_runtime(conn)
     latest_tick = conn.execute("SELECT * FROM world_ticks ORDER BY id DESC LIMIT 1").fetchone()
     latest_event = conn.execute(
         "SELECT id FROM world_event_stream WHERE branch_key = ? ORDER BY id DESC LIMIT 1",
@@ -8748,7 +8770,11 @@ def runtime_response(conn):
         "daily_auto_model_budget": runtime["daily_auto_model_budget"],
         "remaining_auto_model_calls": max(0, int(runtime["daily_auto_model_budget"]) - int(runtime["auto_model_calls_used"])),
     }
-    runtime["day_sync"] = day_sync
+    runtime["day_sync"] = {
+        "advanced": False,
+        "day": current_day,
+        "elapsed_days": 0,
+    }
     runtime["environment_config"] = get_active_environment_config(conn)
     active_branch = conn.execute(
         "SELECT * FROM world_branches WHERE branch_key = ?",
@@ -8781,7 +8807,6 @@ def get_world_runtime_api():
 @app.get("/api/world/environment-config")
 def get_current_environment_config_api():
     with get_connection() as conn:
-        ensure_world_runtime_tables(conn)
         return {"environment_config": get_active_environment_config(conn)}
 
 
@@ -8789,7 +8814,6 @@ def get_current_environment_config_api():
 def list_environment_configs(limit: int = 50):
     limit = max(1, min(limit, 200))
     with get_connection() as conn:
-        ensure_world_runtime_tables(conn)
         rows = conn.execute(
             """
             SELECT * FROM environment_configs
@@ -8880,7 +8904,6 @@ def activate_environment_config_api(
 def list_world_snapshots(limit: int = 30):
     limit = max(1, min(limit, 200))
     with get_connection() as conn:
-        ensure_world_runtime_tables(conn)
         rows = conn.execute(
             "SELECT * FROM world_snapshots ORDER BY id DESC LIMIT ?",
             (limit,),
@@ -8891,7 +8914,6 @@ def list_world_snapshots(limit: int = 30):
 @app.get("/api/world/update-schedules")
 def list_world_update_schedules():
     with get_connection() as conn:
-        ensure_world_runtime_tables(conn)
         rows = conn.execute(
             "SELECT * FROM world_update_schedules ORDER BY interval_seconds, id"
         ).fetchall()
@@ -8902,7 +8924,6 @@ def list_world_update_schedules():
 def list_world_update_runs(update_key: str = "", status: str = "", limit: int = 50):
     limit = max(1, min(limit, 200))
     with get_connection() as conn:
-        ensure_world_runtime_tables(conn)
         rows = conn.execute(
             """
             SELECT * FROM world_update_runs
@@ -8919,7 +8940,6 @@ def list_world_update_runs(update_key: str = "", status: str = "", limit: int = 
 @app.get("/api/world/snapshots/{snapshot_id}")
 def get_world_snapshot_api(snapshot_id: int, include_state: bool = False):
     with get_connection() as conn:
-        ensure_world_runtime_tables(conn)
         row = conn.execute(
             "SELECT * FROM world_snapshots WHERE id = ?",
             (snapshot_id,),
@@ -9046,7 +9066,6 @@ def restore_world_snapshot_api(
 @app.get("/api/world/branches")
 def list_world_branches():
     with get_connection() as conn:
-        ensure_world_runtime_tables(conn)
         rows = conn.execute(
             "SELECT * FROM world_branches ORDER BY id"
         ).fetchall()
@@ -9184,7 +9203,6 @@ def switch_world_branch_api(
 @app.get("/api/world/action-rules")
 def list_world_action_rules():
     with get_connection() as conn:
-        ensure_world_runtime_tables(conn)
         rows = conn.execute(
             """
             SELECT * FROM world_action_rules
@@ -9203,7 +9221,6 @@ def list_world_action_executions(
 ):
     limit = max(1, min(limit, 200))
     with get_connection() as conn:
-        ensure_world_runtime_tables(conn)
         rows = conn.execute(
             """
             SELECT * FROM world_action_executions
@@ -9234,7 +9251,6 @@ def list_world_action_executions(
 def list_world_delayed_effects(status: str = "", limit: int = 50):
     limit = max(1, min(limit, 200))
     with get_connection() as conn:
-        ensure_world_runtime_tables(conn)
         rows = conn.execute(
             """
             SELECT * FROM world_delayed_effects
@@ -9256,7 +9272,6 @@ def list_world_delayed_effects(status: str = "", limit: int = 50):
 def get_world_events(after_id: int = 0, limit: int = 50, branch_key: str = ""):
     limit = max(1, min(limit, 200))
     with get_connection() as conn:
-        ensure_world_runtime_tables(conn)
         selected_branch = branch_key or active_world_branch_key(conn)
         rows = conn.execute(
             """
@@ -9372,7 +9387,6 @@ def upsert_observer_session(payload: ObserverSessionRequest):
     if payload.focused_location and payload.focused_location not in VALID_LOCATIONS:
         raise HTTPException(status_code=400, detail="关注地点不存在")
     with get_connection() as conn:
-        ensure_world_runtime_tables(conn)
         if payload.focused_resident_id and not get_resident(conn, payload.focused_resident_id):
             raise HTTPException(status_code=404, detail="关注 Agent 不存在")
         now = get_world_now().isoformat()
@@ -9403,12 +9417,6 @@ def upsert_observer_session(payload: ObserverSessionRequest):
                 (payload.user_id, payload.session_type, payload.focused_resident_id, payload.focused_location, now, now),
             )
             session_id = cursor.lastrowid
-        log_model_call(
-            conn,
-            "observer",
-            status="session_recorded",
-            resident_id=payload.focused_resident_id,
-        )
         conn.commit()
         row = conn.execute("SELECT * FROM observer_sessions WHERE id = ?", (session_id,)).fetchone()
         return {"session": dict(row), "event": None}
@@ -9553,11 +9561,8 @@ def get_state():
 @app.get("/api/world/observer-state")
 def get_world_observer_state():
     with get_connection() as conn:
-        day_sync = sync_current_day_with_world_date(conn, get_world_now())
-        if day_sync.get("advanced"):
-            conn.commit()
-        day = day_sync["day"]
-        runtime = get_world_runtime(conn)
+        day = get_current_day(conn)
+        runtime = read_world_runtime(conn)
         branch_key = runtime.get("active_branch_key") or "main"
         residents = conn.execute(
             "SELECT id, name, role, location FROM residents ORDER BY id"

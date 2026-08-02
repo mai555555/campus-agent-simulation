@@ -9,6 +9,7 @@ LLM_API_KEY=你的API_KEY
 LLM_API_URL=https://api.tourmaster.ch/v1beta/models/gemini-3.1-flash-lite:generateContent
 DATABASE_URL=
 DB_PATH=data/city.db
+WORLD_RUNNER_ENABLED=true
 ADMIN_TOKEN=本地_admin_token
 ```
 
@@ -21,6 +22,7 @@ ADMIN_TOKEN=本地_admin_token
 | `DATABASE_URL` | 否 | 设置后使用 PostgreSQL；不设置则使用 SQLite |
 | `DATABASE_SCHEMA` | 否 | PostgreSQL schema，默认 `public`；初始化、运行时与 Alembic 必须一致 |
 | `DB_PATH` | 否 | SQLite 文件路径，默认 `data/city.db` |
+| `WORLD_RUNNER_ENABLED` | 否 | 默认 `true`；共享数据库的本地只读实例必须设为 `false`，避免与生产 runner 重复写入 |
 | `ADMIN_TOKEN` | 推荐 | World Runtime admin 接口 Bearer token；未设置时本地开发会放行并写 warning |
 | `PORT` | 部署时常用 | Uvicorn 监听端口 |
 
@@ -234,6 +236,11 @@ DATABASE_URL=postgresql://user:password@host:5432/dbname
 ```
 
 如果使用 Supabase，可以直接执行 [`supabase_schema.sql`](supabase_schema.sql) 建表；完整流程见 [`SUPABASE.md`](SUPABASE.md)。
+
+Supabase 的 Direct Connection、Session Pooler 和 Transaction Pooler 是不同的完整连接串。
+不能只把 Direct Connection 的端口手动改为 `6543`；使用 pooler 时必须从 Dashboard 的
+**Connect** 面板复制完整 URI，因为主机名和用户名也不同。应用运行时优先使用 Transaction
+Pooler，`pg_dump`、恢复和需要 session 语义的迁移使用 Session Pooler 或 Direct Connection。
 
 已有 Supabase 项目升级到 World Runtime v1 时，重新执行最新的 [`supabase_schema.sql`](supabase_schema.sql) 即可。所有新增表都使用 `create table if not exists` 和 `create index if not exists`，不会清空已有数据。
 
