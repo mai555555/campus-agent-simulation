@@ -788,16 +788,20 @@ def generate_clarifications(conn, world_time=None) -> list[int]:
     now = _now(world_time)
     rows = conn.execute(
         """
-        SELECT claim.*, COUNT(DISTINCT exposure.resident_id) exposed,
-               MAX(version.distortion_score) max_distortion
-        FROM information_claims claim
-        JOIN information_versions version ON version.claim_id = claim.id
-        JOIN information_exposures exposure ON exposure.claim_id = claim.id
-        WHERE claim.claim_type IN ('gossip', 'rumor')
-          AND claim.truth_status IN ('unverified', 'disputed')
-        GROUP BY claim.id
-        HAVING COUNT(DISTINCT exposure.resident_id) >= 3
-           AND MAX(version.distortion_score) >= 25
+        SELECT c.*, stats.exposed, stats.max_distortion
+        FROM information_claims c
+        JOIN (
+            SELECT ver.claim_id,
+                   COUNT(DISTINCT exposure.resident_id) AS exposed,
+                   MAX(ver.distortion_score) AS max_distortion
+            FROM information_versions ver
+            JOIN information_exposures exposure ON exposure.claim_id = ver.claim_id
+            GROUP BY ver.claim_id
+            HAVING COUNT(DISTINCT exposure.resident_id) >= 3
+               AND MAX(ver.distortion_score) >= 25
+        ) stats ON stats.claim_id = c.id
+        WHERE c.claim_type IN ('gossip', 'rumor')
+          AND c.truth_status IN ('unverified', 'disputed')
         """
     ).fetchall()
     created = []
