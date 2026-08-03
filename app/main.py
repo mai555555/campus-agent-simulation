@@ -4311,11 +4311,7 @@ def consume_auto_model_budget(conn, trigger_type, resident_id=None):
         )
         return cursor.fetchone() is not None
 
-    if using_postgres():
-        with get_connection() as budget_conn:
-            reserved = reserve_budget(budget_conn)
-    else:
-        reserved = reserve_budget(conn)
+    reserved = reserve_budget(conn)
     if not reserved:
         log_model_call(conn, trigger_type, status="budget_exhausted", resident_id=resident_id)
         return False
@@ -6991,14 +6987,23 @@ def world_tick_database_lease():
         yield True
         return
     lease_conn = get_connection()
+    acquired = False
     try:
         row = lease_conn.execute(
-            "SELECT pg_try_advisory_xact_lock(?) AS acquired",
+            "SELECT pg_try_advisory_lock(?) AS acquired",
             (WORLD_TICK_ADVISORY_LOCK_ID,),
         ).fetchone()
-        yield bool(row and row["acquired"])
+        acquired = bool(row and row["acquired"])
+        yield acquired
     finally:
-        lease_conn.rollback()
+        if acquired:
+            try:
+                lease_conn.execute(
+                    "SELECT pg_advisory_unlock(?)",
+                    (WORLD_TICK_ADVISORY_LOCK_ID,),
+                )
+            except Exception:
+                pass
         lease_conn.close()
 
 
