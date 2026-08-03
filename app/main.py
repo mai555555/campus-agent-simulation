@@ -7563,13 +7563,6 @@ def start_world_runner_thread():
     if not world_runner_enabled():
         logger.info("World runner disabled by WORLD_RUNNER_ENABLED")
         return
-    # Ensure schema exists once at startup, before the runner loop begins.
-    try:
-        with get_connection() as init_conn:
-            ensure_world_runtime_tables(init_conn)
-    except Exception:
-        logger.exception("Failed to initialize world runtime tables at startup")
-        return
     with WORLD_RUNNER_LOCK:
         if WORLD_RUNNER_THREAD and WORLD_RUNNER_THREAD.is_alive():
             return
