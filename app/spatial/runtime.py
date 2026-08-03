@@ -479,9 +479,9 @@ def start_spatial_movement(
         UPDATE agent_spatial_states
         SET origin_node_id = current_node_id,
             target_node_id = ?,
-            x = (SELECT x FROM spatial_nodes WHERE id = current_node_id),
-            y = (SELECT y FROM spatial_nodes WHERE id = current_node_id),
-            z = (SELECT z FROM spatial_nodes WHERE id = current_node_id),
+            x = COALESCE((SELECT x FROM spatial_nodes WHERE id = current_node_id LIMIT 1), x),
+            y = COALESCE((SELECT y FROM spatial_nodes WHERE id = current_node_id LIMIT 1), y),
+            z = COALESCE((SELECT z FROM spatial_nodes WHERE id = current_node_id LIMIT 1), z),
             movement_status = 'moving',
             path = ?,
             path_index = 0,
