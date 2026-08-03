@@ -6982,29 +6982,16 @@ def maybe_auto_sync_real_weather(conn, world_time, tick_id=None, day=None, slot=
 
 @contextmanager
 def world_tick_database_lease():
-    """Hold a cross-process tick lease without locking application rows."""
-    if not using_postgres():
-        yield True
-        return
-    lease_conn = get_connection()
-    acquired = False
-    try:
-        row = lease_conn.execute(
-            "SELECT pg_try_advisory_lock(?) AS acquired",
-            (WORLD_TICK_ADVISORY_LOCK_ID,),
-        ).fetchone()
-        acquired = bool(row and row["acquired"])
-        yield acquired
-    finally:
-        if acquired:
-            try:
-                lease_conn.execute(
-                    "SELECT pg_advisory_unlock(?)",
-                    (WORLD_TICK_ADVISORY_LOCK_ID,),
-                )
-            except Exception:
-                pass
-        lease_conn.close()
+    """Hold a cross-process tick lease.
+
+    Session-level advisory locks are incompatible with PgBouncer transaction
+    pooling (Supabase port 6543).  Fall back to the in-process WORLD_TICK_LOCK
+    which is sufficient for single-instance deployments.
+    """
+    # Cross-process lease skipped: PgBouncer transaction pooling does not
+    # preserve session state across transactions, so pg_advisory_lock cannot
+    # work reliably.
+    yield True
 
 
 def stale_world_tick_seconds():
