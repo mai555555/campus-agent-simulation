@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from datetime import datetime, timezone
 import hashlib
-import json
+from app.json_utils import json_dumps
 
 
 CURRENCY = "campus_coin"
@@ -14,7 +15,7 @@ AUTHORIZATION_RULE_VERSION = "economy-authorization-v1"
 
 
 def _json(value) -> str:
-    return json.dumps(value or {}, ensure_ascii=False, sort_keys=True, default=str)
+    return json_dumps(value or {}, ensure_ascii=False, sort_keys=True)
 
 
 def _now() -> str:

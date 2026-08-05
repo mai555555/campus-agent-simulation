@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from app.json_utils import json_dumps
 from datetime import datetime, timezone
 
 from app.organizations.service import submit_organization_proposal
@@ -54,7 +55,7 @@ PRIMITIVE_SEEDS = (
 
 
 def _json(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    return json_dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def _load(value, fallback):
@@ -456,4 +457,3 @@ def process_institution_evolution(conn, world_time=None):
                 (row["id"],),
             )
     return {"available": True, "enacted": enacted, "rejected": rejected}
-

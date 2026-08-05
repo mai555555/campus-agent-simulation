@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from app.json_utils import json_dumps
 from datetime import datetime, timezone
 
 from app.capability_runtime import (
@@ -15,7 +16,7 @@ ROLE_EVENTS = {"transfer_program", "teacher_transfer", "job_change"}
 
 
 def _json(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    return json_dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def _load(value, fallback):

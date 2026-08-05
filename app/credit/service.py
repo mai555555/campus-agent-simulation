@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 import hashlib
-import json
+from app.json_utils import json_dumps
 import math
 from datetime import date, datetime, timedelta, timezone
 
@@ -21,7 +21,7 @@ CREDIT_UNION_CASH = f"{CREDIT_UNION_ACTOR}:cash"
 
 
 def _json(value) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    return json_dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def _now(value=None) -> datetime:

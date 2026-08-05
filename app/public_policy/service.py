@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 import hashlib
-import json
+from app.json_utils import json_dumps
 
 from app.economy.service import (
     ensure_ledger_account,
@@ -17,7 +18,7 @@ PUBLIC_FUND_CASH = f"{PUBLIC_FUND_ACTOR}:cash"
 
 
 def _json(value) -> str:
-    return json.dumps(value or {}, ensure_ascii=False, sort_keys=True, default=str)
+    return json_dumps(value or {}, ensure_ascii=False, sort_keys=True)
 
 
 def _load(value, default=None):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from app.json_utils import json_dumps
 from datetime import datetime, timedelta, timezone
 
 
@@ -17,7 +18,7 @@ SOCIAL_SIGNAL_TYPES = {
 
 
 def _json(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    return json_dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def _load(value, fallback):
@@ -394,4 +395,3 @@ def process_norm_emergence(conn, *, branch_key, tick_number, world_time):
         "signals_created": created,
         **detected,
     }
-

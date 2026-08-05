@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import hashlib
 import json
+import hashlib
+from app.json_utils import json_dumps
 import re
 from datetime import datetime, timedelta, timezone
 from html import unescape
@@ -108,13 +109,7 @@ IMPACT_RULES = (
 
 
 def _json(value):
-    return json.dumps(
-    value,
-    ensure_ascii=False,
-    sort_keys=True,
-    separators=(",", ":"),
-    default=str,
-)
+    return json_dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _load(value, fallback):

@@ -4,7 +4,7 @@ from typing import Optional
 
 from datetime import date, datetime, time, timedelta, timezone
 import hashlib
-import json
+from app.json_utils import json_dumps
 
 from app.economy.service import reconcile_ledger
 
@@ -71,7 +71,7 @@ CONSUMPTION_TRANSACTION_TYPES = (
 
 
 def _json(value) -> str:
-    return json.dumps(value or {}, ensure_ascii=False, sort_keys=True, default=str)
+    return json_dumps(value or {}, ensure_ascii=False, sort_keys=True)
 
 
 def _now(value=None) -> datetime:

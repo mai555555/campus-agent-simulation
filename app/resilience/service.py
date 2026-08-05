@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import hashlib
 import json
+import hashlib
+from app.json_utils import json_dumps
 from datetime import datetime, timedelta, timezone
 
 
@@ -21,7 +22,7 @@ SHOCK_SEEDS = (
 
 
 def _json(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    return json_dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def _load(value, fallback):
