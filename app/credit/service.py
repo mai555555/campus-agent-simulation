@@ -1287,7 +1287,7 @@ def process_credit_runtime(conn, world_time=None) -> dict:
         """
         UPDATE savings_goals
         SET current_amount_minor = COALESCE((
-                SELECT account.balance_minor
+                SELECT SUM(account.balance_minor)
                 FROM ledger_accounts account
                 JOIN economic_actors actor ON actor.id = account.actor_id
                 WHERE actor.resident_id = savings_goals.resident_id
@@ -1295,7 +1295,7 @@ def process_credit_runtime(conn, world_time=None) -> dict:
             ), 0),
             status = CASE
                 WHEN COALESCE((
-                    SELECT account.balance_minor
+                    SELECT SUM(account.balance_minor)
                     FROM ledger_accounts account
                     JOIN economic_actors actor ON actor.id = account.actor_id
                     WHERE actor.resident_id = savings_goals.resident_id

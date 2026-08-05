@@ -7380,9 +7380,17 @@ def world_runner_loop():
         time.sleep(5)
 
 
+def world_runner_enabled() -> bool:
+    value = os.getenv("WORLD_RUNNER_ENABLED", "true").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
 @app.on_event("startup")
 def start_world_runner_thread():
     global WORLD_RUNNER_THREAD
+    if not world_runner_enabled():
+        logger.info("World runner is disabled by WORLD_RUNNER_ENABLED.")
+        return
     with WORLD_RUNNER_LOCK:
         if WORLD_RUNNER_THREAD and WORLD_RUNNER_THREAD.is_alive():
             return
