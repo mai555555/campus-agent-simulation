@@ -194,6 +194,29 @@ class EnvironmentFoundationTest(unittest.TestCase):
         ).fetchone()
         self.assertEqual(stored_tick["status"], "complete")
 
+    def test_world_tick_failure_persists_failed_status(self):
+        world_time = datetime.fromisoformat("2026-08-03T06:00:00+08:00")
+        with patch.object(main, "get_connection", return_value=self.conn), patch.object(
+            main, "get_world_now", return_value=world_time
+        ), patch.object(
+            main,
+            "process_population_runtime",
+            side_effect=RuntimeError("population exploded"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "population exploded"):
+                main.advance_world_tick(reason="test-failure")
+
+        tick = self.conn.execute(
+            "SELECT status, error_message, completed_at FROM world_ticks ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        event = self.conn.execute(
+            "SELECT tick_id, event_type FROM world_event_stream ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        self.assertEqual(tick["status"], "failed")
+        self.assertIn("RuntimeError: population exploded", tick["error_message"])
+        self.assertTrue(tick["completed_at"])
+        self.assertEqual(event["event_type"], "world_tick_failed")
+
     def test_new_config_version_can_be_activated_and_applied(self):
         config = json.loads(json.dumps(main.default_environment_config(), ensure_ascii=False))
         config["spaces"][0]["capacity"] = 321

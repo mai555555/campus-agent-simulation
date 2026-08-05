@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
 from typing import Optional
 
 from datetime import datetime, timedelta, timezone
 import hashlib
-from app.json_utils import json_dumps
+import json
 
 from app.economy.service import post_money_transfer_minor
 
@@ -14,7 +13,7 @@ RULE_VERSION = "social-institution-v1"
 
 
 def _json(value) -> str:
-    return json_dumps(value or {}, ensure_ascii=False, sort_keys=True)
+    return json.dumps(value or {}, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def _load(value, default=None):
@@ -789,20 +788,20 @@ def generate_clarifications(conn, world_time=None) -> list[int]:
     now = _now(world_time)
     rows = conn.execute(
         """
-        SELECT claim.*, aggregate.exposed, aggregate.max_distortion
-        FROM information_claims claim
+        SELECT c.*, stats.exposed, stats.max_distortion
+        FROM information_claims c
         JOIN (
-            SELECT version.claim_id,
-                   COUNT(DISTINCT exposure.resident_id) exposed,
-                   MAX(version.distortion_score) max_distortion
-            FROM information_versions version
-            JOIN information_exposures exposure ON exposure.claim_id = version.claim_id
-            GROUP BY version.claim_id
+            SELECT ver.claim_id,
+                   COUNT(DISTINCT exposure.resident_id) AS exposed,
+                   MAX(ver.distortion_score) AS max_distortion
+            FROM information_versions ver
+            JOIN information_exposures exposure ON exposure.claim_id = ver.claim_id
+            GROUP BY ver.claim_id
             HAVING COUNT(DISTINCT exposure.resident_id) >= 3
-               AND MAX(version.distortion_score) >= 25
-        ) aggregate ON aggregate.claim_id = claim.id
-        WHERE claim.claim_type IN ('gossip', 'rumor')
-          AND claim.truth_status IN ('unverified', 'disputed')
+               AND MAX(ver.distortion_score) >= 25
+        ) stats ON stats.claim_id = c.id
+        WHERE c.claim_type IN ('gossip', 'rumor')
+          AND c.truth_status IN ('unverified', 'disputed')
         """
     ).fetchall()
     created = []

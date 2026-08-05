@@ -1,6 +1,7 @@
 import sqlite3
 import unittest
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
 import app.main as main
@@ -161,6 +162,34 @@ class RuntimeSchemaSafetyTest(unittest.TestCase):
         self.assertEqual(runtime_updates, [])
         conn.close()
 
+    def test_world_action_rule_seed_is_idempotent_without_unique_constraint(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE world_action_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_key TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                rule_version TEXT NOT NULL,
+                preconditions_json TEXT NOT NULL,
+                required_resources_json TEXT NOT NULL,
+                duration_minutes INTEGER NOT NULL,
+                success_probability REAL NOT NULL,
+                direct_effects_json TEXT NOT NULL,
+                delayed_effects_json TEXT NOT NULL,
+                failure_policy_json TEXT NOT NULL
+            )
+            """
+        )
+
+        main.seed_world_action_rules(conn)
+        main.seed_world_action_rules(conn)
+
+        count = conn.execute("SELECT COUNT(*) AS total FROM world_action_rules").fetchone()
+        self.assertEqual(count["total"], len(main.DEFAULT_WORLD_ACTION_RULES))
+        conn.close()
+
     def test_runner_auto_starts_default_paused_runtime(self):
         conn = self._prepared_connection()
         runtime = main.get_world_runtime(conn)
@@ -188,6 +217,83 @@ class RuntimeSchemaSafetyTest(unittest.TestCase):
         ).fetchone()
         self.assertIsNone(event)
         conn.close()
+
+    def test_reconcile_stale_world_tick_marks_it_failed(self):
+        conn = self._prepared_connection()
+        now = datetime.fromisoformat("2026-08-03T06:00:00+08:00")
+        cursor = conn.execute(
+            """
+            INSERT INTO world_ticks
+            (tick_index, world_time, day, slot, reason, status, started_at)
+            VALUES (1, ?, 1, '00:00-08:00', 'test', 'running', ?)
+            """,
+            (now.isoformat(), (now - timedelta(hours=1)).isoformat()),
+        )
+        conn.execute(
+            "UPDATE world_runtime SET last_tick_started_at = ? WHERE id = ?",
+            ((now - timedelta(hours=1)).isoformat(), main.WORLD_RUNTIME_ID),
+        )
+
+        with patch.dict("os.environ", {"WORLD_STALE_TICK_SECONDS": "1800"}):
+            recovered = main.reconcile_stale_world_ticks(conn, now=now)
+
+        tick = conn.execute(
+            "SELECT status, error_message, completed_at FROM world_ticks WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        runtime = main.read_world_runtime(conn)
+        self.assertEqual(recovered, [cursor.lastrowid])
+        self.assertEqual(tick["status"], "failed")
+        self.assertIn("stale", tick["error_message"])
+        self.assertTrue(tick["completed_at"])
+        self.assertEqual(runtime["last_tick_started_at"], "")
+        conn.close()
+
+    def test_record_world_tick_failure_updates_tick_and_event(self):
+        conn = self._prepared_connection()
+        cursor = conn.execute(
+            """
+            INSERT INTO world_ticks
+            (tick_index, world_time, day, slot, reason, status)
+            VALUES (1, '2026-08-03T06:00:00+08:00', 1, '00:00-08:00', 'test', 'running')
+            """
+        )
+        conn.commit()
+
+        with patch.object(main, "get_connection", return_value=nullcontext(conn)):
+            main.record_world_tick_failure(cursor.lastrowid, "test", ValueError("boom"))
+
+        tick = conn.execute(
+            "SELECT status, error_message, completed_at FROM world_ticks WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        event = conn.execute(
+            "SELECT tick_id, event_type FROM world_event_stream ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        self.assertEqual(tick["status"], "failed")
+        self.assertIn("ValueError: boom", tick["error_message"])
+        self.assertTrue(tick["completed_at"])
+        self.assertEqual(event["tick_id"], cursor.lastrowid)
+        self.assertEqual(event["event_type"], "world_tick_failed")
+        conn.close()
+
+    def test_database_lease_prevents_second_tick_runner(self):
+        @contextmanager
+        def unavailable_lease():
+            yield False
+
+        with (
+            patch.object(main, "world_tick_database_lease", unavailable_lease),
+            patch.object(
+                main,
+                "_advance_world_tick_locked",
+                side_effect=AssertionError("tick must not start without the lease"),
+            ),
+        ):
+            with self.assertRaises(main.HTTPException) as raised:
+                main.advance_world_tick(reason="test")
+
+        self.assertEqual(raised.exception.status_code, 409)
 
 
 if __name__ == "__main__":
