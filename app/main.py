@@ -9416,15 +9416,27 @@ def get_world_events(after_id: int = 0, limit: int = 50, branch_key: str = ""):
     limit = max(1, min(limit, 200))
     with get_connection() as conn:
         selected_branch = branch_key or active_world_branch_key(conn)
-        rows = conn.execute(
-            """
-            SELECT * FROM world_event_stream
-            WHERE id > ? AND branch_key = ?
-            ORDER BY id ASC
-            LIMIT ?
-            """,
-            (after_id, selected_branch, limit),
-        ).fetchall()
+        if after_id <= 0:
+            rows = conn.execute(
+                """
+                SELECT * FROM world_event_stream
+                WHERE branch_key = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (selected_branch, limit),
+            ).fetchall()
+            rows = list(reversed(rows))
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM world_event_stream
+                WHERE id > ? AND branch_key = ?
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (after_id, selected_branch, limit),
+            ).fetchall()
         events = [decode_world_event(row) for row in rows]
         return {
             "events": events,
