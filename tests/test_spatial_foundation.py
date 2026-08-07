@@ -514,7 +514,7 @@ class SpatialFoundationTest(unittest.TestCase):
         self.assertGreater(rest["after"]["attention"], rest["before"]["attention"])
         connection.close()
 
-    def test_body_preconditions_reject_intensive_action_when_exhausted(self):
+    def test_body_preconditions_allow_recovery_movement_when_exhausted(self):
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
@@ -523,10 +523,7 @@ class SpatialFoundationTest(unittest.TestCase):
         )
         move_checks = body_action_checks(connection, 1, "move")
         consume_checks = body_action_checks(connection, 1, "consume")
-        self.assertIn(
-            "too_fatigued",
-            [check["failure_code"] for check in move_checks if not check["passed"]],
-        )
+        self.assertTrue(all(check["passed"] for check in move_checks))
         self.assertTrue(all(check["passed"] for check in consume_checks))
         rule = main.get_world_action_rule(connection, "move")
         integrated, _ = main.evaluate_world_action_preconditions(
@@ -537,7 +534,7 @@ class SpatialFoundationTest(unittest.TestCase):
             rule,
             datetime(2026, 7, 29, 8, 0, tzinfo=timezone.utc),
         )
-        self.assertIn(
+        self.assertNotIn(
             "too_fatigued",
             [check["failure_code"] for check in integrated if not check["passed"]],
         )

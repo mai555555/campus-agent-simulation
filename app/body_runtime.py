@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 
 
 INTENSIVE_ACTIONS = {
-    "move",
     "attend_class",
     "club_activity",
     "collaborate",
@@ -78,7 +77,7 @@ def body_action_checks(conn, resident_id, action):
             "health_too_low",
             "健康状态不足以执行高强度行动",
         )
-    if action not in {"consume", "rest"}:
+    if action not in {"consume", "rest", "move"}:
         add(
             "body_hunger",
             float(state["hunger"]) < 94,

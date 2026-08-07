@@ -91,6 +91,7 @@ from app.body_runtime import (
     advance_body_states,
     apply_action_body_effects,
     body_action_checks,
+    get_body_state,
 )
 from app.perception_router import router as perception_router
 from app.perception_runtime import (
@@ -3345,6 +3346,19 @@ def evaluate_world_action_preconditions(conn, resident_id, action_type, location
     checks = []
     budget_choice = None
     market_choice = None
+    body_state = get_body_state(conn, resident_id) or {}
+    critical_recovery = (
+        action_type == "consume"
+        and float(body_state.get("hunger") or 0) >= 90
+    ) or (
+        action_type == "rest"
+        and (
+            float(body_state.get("fatigue") or 0) >= 88
+            or float(body_state.get("sleep_debt") or 0) >= 85
+            or float(body_state.get("health", 100) if body_state.get("health") is not None else 100) < 35
+            or float(body_state.get("attention", 100) if body_state.get("attention") is not None else 100) < 15
+        )
+    )
 
     def add_check(key, passed, actual, required, failure_code, reason):
         checks.append(
@@ -3483,11 +3497,15 @@ def evaluate_world_action_preconditions(conn, resident_id, action_type, location
                 )
                 add_check(
                     "budget_free_time",
-                    budget_choice["decision"] != "deferred",
+                    budget_choice["decision"] != "deferred" or critical_recovery,
                     budget_choice["free_time_minutes"],
                     budget_choice["required_time_minutes"],
                     "insufficient_free_time",
-                    budget_choice["rationale"],
+                    (
+                        "关键生理恢复行动允许越过当日自由时间门槛"
+                        if budget_choice["decision"] == "deferred" and critical_recovery
+                        else budget_choice["rationale"]
+                    ),
                 )
     for resource_key in ("energy", "time_budget", "money"):
         required = int(resources.get(resource_key, 0) or 0)
@@ -3497,6 +3515,8 @@ def evaluate_world_action_preconditions(conn, resident_id, action_type, location
             and budget_choice
             and budget_choice["emergency_override"]
         ):
+            available = True
+        if resource_key == "time_budget" and critical_recovery:
             available = True
         add_check(
             f"resource_{resource_key}",
@@ -5980,6 +6000,7 @@ def build_runtime_perception(conn, agent, world_time, day, slot, plan, step, obs
         (agent["id"],),
     ).fetchall()
     profile = conn.execute("SELECT energy, time_budget, mood, skills, strategy FROM agent_profiles WHERE resident_id = ?", (agent["id"],)).fetchone()
+    body_state = get_body_state(conn, agent["id"])
     return {
         "world_time": world_time.isoformat(),
         "slot": slot,
@@ -5992,6 +6013,7 @@ def build_runtime_perception(conn, agent, world_time, day, slot, plan, step, obs
             "mood": profile["mood"] if profile else "",
             "trait_bias": action_noise_for_agent(agent),
         },
+        "body_state": body_state or {},
         "local_crowd": int(location_counts.get(agent["location"], 0)),
         "open_locations": open_locations,
         "realistic_location_options": realistic_options,
@@ -6137,6 +6159,111 @@ def apply_realism_constraints_to_decision(conn, agent, decision, perception, wor
         decision["constraint_notes"] = notes
         reason = str(decision.get("reason") or "")
         decision["reason"] = f"{reason}（现实约束：{'；'.join(notes)}）"[:220]
+    return decision
+
+
+def apply_wellbeing_priority_to_decision(conn, agent, decision, world_time):
+    body_state = get_body_state(conn, agent["id"])
+    if not body_state:
+        return decision
+    decision = dict(decision or {})
+    action = str(decision.get("action") or "observe")
+    destination = str(decision.get("location") or agent["location"])
+    hour = world_time.hour
+    hunger = float(body_state.get("hunger") or 0)
+    fatigue = float(body_state.get("fatigue") or 0)
+    sleep_debt = float(body_state.get("sleep_debt") or 0)
+    health = float(
+        body_state.get("health", 100)
+        if body_state.get("health") is not None
+        else 100
+    )
+    attention = float(
+        body_state.get("attention", 100)
+        if body_state.get("attention") is not None
+        else 100
+    )
+
+    def recovery_decision(next_action, next_location, goal, reason):
+        return {
+            **decision,
+            "action": next_action,
+            "location": next_location,
+            "goal": goal,
+            "reason": reason,
+            "plan_relation": "rest",
+            "mode": f"{decision.get('mode') or 'rule'}+wellbeing-priority-v1",
+            "wellbeing_override": {
+                "previous_action": action,
+                "previous_location": destination,
+                "hunger": hunger,
+                "fatigue": fatigue,
+                "sleep_debt": sleep_debt,
+                "health": health,
+                "attention": attention,
+            },
+        }
+
+    food_locations = ["食堂", "商业街"]
+    open_food = [
+        location
+        for location in food_locations
+        if is_location_open_at_hour(location, hour)
+    ]
+    if hunger >= 90 and action != "consume":
+        if destination in food_locations and is_location_open_at_hour(destination, hour):
+            food_location = destination
+        elif agent["location"] in food_locations and is_location_open_at_hour(agent["location"], hour):
+            food_location = agent["location"]
+        elif open_food:
+            food_location = open_food[0]
+        else:
+            food_location = "宿舍区"
+            return recovery_decision(
+                "rest",
+                food_location,
+                "食堂暂不可用，先降低消耗并等待补给窗口",
+                "饥饿过高但当前无开放补给点，优先回到安全空间降低消耗。",
+            )
+        return recovery_decision(
+            "consume",
+            food_location,
+            "优先补充食物，恢复基础行动能力",
+            "饥饿已接近行动风险阈值，暂缓原计划并寻找可用食物。",
+        )
+
+    if health < 35 and action != "rest":
+        return recovery_decision(
+            "rest",
+            "宿舍区",
+            "健康状态偏低，先回宿舍休息恢复",
+            "健康状态不足以支撑普通行动，优先进入恢复节奏。",
+        )
+
+    if fatigue >= 88 and action != "rest":
+        return recovery_decision(
+            "rest",
+            "宿舍区",
+            "疲劳过高，先休息恢复体能",
+            "疲劳已达到行动风险阈值，暂缓原计划并回宿舍休息。",
+        )
+
+    if sleep_debt >= 85 and action not in {"rest", "reflect"}:
+        return recovery_decision(
+            "rest",
+            "宿舍区",
+            "睡眠债过高，优先补觉恢复注意力",
+            "睡眠债过高会持续拖累健康与注意力，先补充睡眠。",
+        )
+
+    if attention < 15 and action in {"attend_class", "collaborate", "observe"}:
+        return recovery_decision(
+            "rest",
+            "宿舍区",
+            "注意力不足，先恢复后再继续学习或协作",
+            "注意力已低于可靠行动阈值，先进入恢复动作。",
+        )
+
     return decision
 
 
@@ -6358,6 +6485,7 @@ def process_world_agent_tick(conn, agent, world_time, tick_id, day, slot, observ
     perception = build_runtime_perception(conn, agent, world_time, day, slot, plan, step, observed)
     decision = build_autonomous_tick_decision(conn, agent, perception, step)
     decision = apply_realism_constraints_to_decision(conn, agent, decision, perception, world_time)
+    decision = apply_wellbeing_priority_to_decision(conn, agent, decision, world_time)
     action = str(decision.get("action") or "observe")
     destination = str(decision.get("location") or agent["location"])
     goal = str(decision.get("goal") or plan.get("intent") or "观察校园环境")
