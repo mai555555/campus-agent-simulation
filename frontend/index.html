@@ -163,7 +163,7 @@
       height: 100%;
       opacity: 1;
       pointer-events: auto;
-      touch-action: pan-y pinch-zoom;
+      touch-action: none;
     }
 
     .observer-hud {
@@ -221,6 +221,141 @@
       display: grid;
       gap: 7px;
       align-content: start;
+    }
+
+    .hud-card h2 {
+      color: #f4fbf7;
+      text-shadow: 0 2px 12px rgba(0, 0, 0, .22);
+    }
+
+    .hud-card p {
+      color: #d2e5eb;
+    }
+
+    .student-monitor {
+      padding: 15px 16px;
+      color: #314252;
+      background: rgba(247, 250, 245, .88);
+      border: 1px solid rgba(255, 255, 255, .62);
+      border-radius: 12px;
+      box-shadow: 0 18px 44px rgba(27, 51, 66, .18);
+      backdrop-filter: blur(10px);
+      pointer-events: auto;
+    }
+
+    .student-monitor-head,
+    .monitor-row,
+    .monitor-stats {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .student-monitor h3 {
+      margin: 0;
+      font-size: 14px;
+      letter-spacing: .02em;
+    }
+
+    .monitor-time {
+      padding: 3px 9px;
+      color: #1769aa;
+      background: rgba(80, 160, 220, .1);
+      border: 1px solid rgba(80, 160, 220, .28);
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .monitor-stats {
+      margin: 14px 0;
+      padding-bottom: 14px;
+      border-bottom: 1px solid rgba(49, 66, 82, .12);
+    }
+
+    .monitor-stat {
+      flex: 1;
+      text-align: center;
+    }
+
+    .monitor-stat strong {
+      display: block;
+      font-size: 20px;
+      line-height: 1.1;
+      color: var(--stat-color, #45a878);
+    }
+
+    .monitor-stat span {
+      display: block;
+      margin-top: 4px;
+      color: #6f7f8d;
+      font-size: 11px;
+    }
+
+    .monitor-list {
+      display: grid;
+      gap: 9px;
+    }
+
+    .monitor-row {
+      position: relative;
+      width: 100%;
+      min-height: 0;
+      padding: 9px 0 9px 13px;
+      background: transparent;
+      border: 0;
+      border-left: 2px solid var(--row-color, #45a878);
+      border-radius: 0;
+      color: inherit;
+      text-align: left;
+    }
+
+    .monitor-row:hover {
+      background: rgba(255, 255, 255, .46);
+    }
+
+    .monitor-row>span {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .monitor-row strong {
+      display: block;
+      font-size: 13px;
+    }
+
+    .monitor-row small {
+      display: block;
+      margin-top: 2px;
+      color: #6f7f8d;
+      font-size: 11px;
+    }
+
+    .monitor-badge {
+      padding: 2px 7px;
+      border-radius: 999px;
+      color: var(--row-color, #45a878);
+      background: color-mix(in srgb, var(--row-color, #45a878) 13%, white);
+      border: 1px solid color-mix(in srgb, var(--row-color, #45a878) 28%, white);
+      font-size: 10px;
+      white-space: nowrap;
+    }
+
+    .monitor-progress {
+      height: 4px;
+      margin-top: 7px;
+      overflow: hidden;
+      background: rgba(49, 66, 82, .08);
+      border-radius: 999px;
+    }
+
+    .monitor-progress i {
+      display: block;
+      height: 100%;
+      width: var(--value, 50%);
+      background: var(--row-color, #45a878);
     }
 
     .hud-event {
@@ -2574,14 +2709,14 @@
     const colors = ["#d76b6b", "#5b89b4", "#d29a48", "#5e9f8c", "#8c6ab3", "#4c88a8", "#b7687b", "#7a9b4c", "#bd7850", "#5f78a6"];
     const avatarFiles = ["01_lin_xiaoxia.svg", "02_chen_yuhang.svg", "03_zhao_yiming.svg", "04_su_qing.svg", "05_zhou_boss.svg", "06_li_jie.svg", "07_wang_teacher.svg", "08_he_admin.svg", "09_zhang_chen.svg", "10_logistics.svg", "11_gu_nanxing.svg", "12_xu_jiayan.svg", "13_meng_yutong.svg", "14_shen_yizhou.svg", "15_tang_xiaotang.svg", "16_lu_ziang.svg", "17_qiao_anran.svg", "18_han_mo.svg", "19_bai_lu.svg", "20_qin_yue.svg"];
     const defaultSpaces = ["校务处", "教学楼", "商业街", "图书馆", "宿舍区", "食堂", "操场"].map((location, index) => ({ code: ["admin", "teaching", "business", "library", "dorm", "canteen", "playground"][index], name: location, location, status: "开放", effective_status: "开放", crowd_percent: 0, actual_agents: 0 }));
-    let world = { environment: { weather: "校园天气", temperature: "--", time_slot: "实时" }, spaces: { spaces: defaultSpaces }, events: [] }, worldRuntime = null, worldEvents = [], observerSessionId = null, lastWorldEventId = 0, observerStateLoaded = false, agents = [], agentOrderKeys = new Map(), spatialScene = { nodes: [], edges: [] }, spatialAgents = new Map(), spatialQueue = new Map(), bodyStates = new Map(), newsPosts = [], newspaperDay = null, newspaperArchive = { available_days: [] }, newspaperEdition = {}, newspaperView = "edition", newspaperRequestId = 0, externalInformation = [], selected = 0, character = null, turn = -.28, zoom = 1, autoOrbit = true, dragging = false, pointerTracking = false, pointerType = "", pointerX = 0, pointerDownX = 0, pointerDownY = 0, observedFocus = "校园全局", runtimeClockBase = null, runtimeClockSyncedAt = 0, relationshipMetric = "trust";
+    let world = { environment: { weather: "校园天气", temperature: "--", time_slot: "实时" }, spaces: { spaces: defaultSpaces }, events: [] }, worldRuntime = null, worldEvents = [], observerSessionId = null, lastWorldEventId = 0, observerStateLoaded = false, agents = [], agentOrderKeys = new Map(), spatialScene = { nodes: [], edges: [] }, spatialAgents = new Map(), spatialQueue = new Map(), bodyStates = new Map(), newsPosts = [], newspaperDay = null, newspaperArchive = { available_days: [] }, newspaperEdition = {}, newspaperView = "edition", newspaperRequestId = 0, externalInformation = [], selected = 0, character = null, turn = -.22, zoom = 1, mapPanX = 0, mapPanZ = 0, autoOrbit = false, dragging = false, pointerTracking = false, pointerType = "", pointerX = 0, pointerY = 0, pointerDownX = 0, pointerDownY = 0, observedFocus = "校园全局", runtimeClockBase = null, runtimeClockSyncedAt = 0, relationshipMetric = "trust";
     const adminToken = localStorage.getItem("ADMIN_TOKEN") || "";
     document.body.classList.toggle("admin-mode", Boolean(adminToken));
     const canvas = $("scene"), profileCanvas = $("profileScene"); let renderer, profileRenderer, webglAvailable = true; function canUseWebGL() { try { const probe = document.createElement("canvas"); return Boolean(probe.getContext("webgl2") || probe.getContext("webgl")); } catch { return false; } } function fallbackRenderer(target) { const ctx = target.getContext("2d"); return { setPixelRatio() { }, setClearColor() { }, setSize(w, h) { target.width = Math.max(1, Math.floor(w)); target.height = Math.max(1, Math.floor(h)); }, render() { }, ctx }; } try { if (!canUseWebGL()) throw new Error("WebGL context unavailable"); renderer = new THREE.WebGLRenderer({ canvas, antialias: true }); profileRenderer = new THREE.WebGLRenderer({ canvas: profileCanvas, antialias: true }); } catch (error) { webglAvailable = false; console.warn("WebGL unavailable, using 2D observer fallback", error.message); renderer = fallbackRenderer(canvas); profileRenderer = fallbackRenderer(profileCanvas); } renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); profileRenderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.setClearColor(0xdce8e6); profileRenderer.setClearColor(0xdce8e6);
-    const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(44, 1, .1, 100); function updateCameraZoomValue() { if ($("cameraZoomValue")) $("cameraZoomValue").textContent = `${Math.round(100 / zoom)}%`; } function setObserverCamera() { camera.position.set(0, 7.15 * zoom, 16.2 * zoom); camera.lookAt(0, -.95, 0); updateCameraZoomValue(); } function setObserverZoom(nextZoom) { zoom = Math.max(.68, Math.min(1.65, nextZoom)); autoOrbit = false; updateAutoViewButton(); setObserverCamera(); } function resetObserverCamera() { zoom = 1; turn = -.28; autoOrbit = true; updateAutoViewButton(); setObserverCamera(); } setObserverCamera(); const root = new THREE.Group(); scene.add(root);
+    const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(44, 1, .1, 100); function updateCameraZoomValue() { if ($("cameraZoomValue")) $("cameraZoomValue").textContent = `${Math.round(100 / zoom)}%`; } function setObserverCamera() { const target = new THREE.Vector3(mapPanX, -1, mapPanZ); camera.position.set(mapPanX, 7.15 * zoom, mapPanZ + 16.2 * zoom); camera.lookAt(target); updateCameraZoomValue(); } function setObserverZoom(nextZoom) { zoom = Math.max(.52, Math.min(2.25, nextZoom)); autoOrbit = false; updateAutoViewButton(); setObserverCamera(); } function panObserver(dx, dy) { const scale = zoom * .018; mapPanX = Math.max(-8, Math.min(8, mapPanX - dx * scale)); mapPanZ = Math.max(-7, Math.min(7, mapPanZ - dy * scale)); autoOrbit = false; updateAutoViewButton(); setObserverCamera(); } function resetObserverCamera() { zoom = 1; turn = -.22; mapPanX = 0; mapPanZ = 0; autoOrbit = false; updateAutoViewButton(); setObserverCamera(); } setObserverCamera(); const root = new THREE.Group(); scene.add(root);
     scene.add(new THREE.HemisphereLight(0xffffff, 0x3f6a5c, 2.5)); const sun = new THREE.DirectionalLight(0xffffff, 2.3); sun.position.set(4, 7, 5); scene.add(sun);
-    const ground = new THREE.Mesh(new THREE.PlaneGeometry(42, 36), new THREE.MeshStandardMaterial({ color: 0x7cb093, roughness: 1 })); ground.rotation.x = -Math.PI / 2; ground.position.y = -2.05; scene.add(ground);
-    const grid = new THREE.GridHelper(32, 28, 0x5b917b, 0x9bc8b3); grid.position.y = -2.04; scene.add(grid);
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(54, 42), new THREE.MeshStandardMaterial({ color: 0x4f8b58, roughness: 1 })); ground.rotation.x = -Math.PI / 2; ground.position.y = -2.05; scene.add(ground);
+    const grid = new THREE.GridHelper(40, 32, 0x5b917b, 0x9bc8b3); grid.position.y = -2.04; scene.add(grid);
     const profileScene = new THREE.Scene(), profileCamera = new THREE.PerspectiveCamera(36, 1, .1, 100), profileRoot = new THREE.Group(); profileCamera.position.set(0, .8, 6.5); profileCamera.lookAt(0, 0, 0); profileScene.add(profileRoot); profileScene.add(new THREE.HemisphereLight(0xffffff, 0x3f6a5c, 2.5)); const profileSun = new THREE.DirectionalLight(0xffffff, 2.1); profileSun.position.set(4, 6, 5); profileScene.add(profileSun); const profileGround = new THREE.Mesh(new THREE.PlaneGeometry(20, 20), new THREE.MeshStandardMaterial({ color: 0x7cb093 })); profileGround.rotation.x = -Math.PI / 2; profileGround.position.y = -1.04; profileScene.add(profileGround);
     function material(c) { return new THREE.MeshStandardMaterial({ color: c, roughness: .72 }); }
     function part(group, geometry, c, x, y, z, scale) { const m = new THREE.Mesh(geometry, material(c)); m.position.set(x, y, z); if (scale) m.scale.set(...scale); group.add(m); return m; }
@@ -2595,10 +2730,45 @@
     }
     const campusGroup = new THREE.Group(), routeGroup = new THREE.Group(), worldAgentGroup = new THREE.Group(), bubbleGroup = new THREE.Group(); root.add(campusGroup, routeGroup, worldAgentGroup, bubbleGroup);
     const raycaster = new THREE.Raycaster(), pointer = new THREE.Vector2(), clickableObjects = [];
-    const campusPositions = { "校务处": [-4.35, .75], "教学楼": [-.8, -1.3], "商业街": [2.05, .9], "图书馆": [4.1, -.85], "宿舍区": [-3.8, -3.45], "食堂": [-.7, 2.75], "操场": [3.35, 3.1] };
-    function spatialPosition(x, z) { return [Number(x || 0) * .03, Number(z || 0) * .03]; }
+    const campusPositions = { "校务处": [-5.2, -1.2], "教学楼": [-2.1, -3.05], "商业街": [2.2, 2.45], "图书馆": [3.95, -2.05], "宿舍区": [-5.0, 3.25], "食堂": [-1.2, 2.85], "操场": [5.05, 2.65] };
+    function spatialPosition(x, z) { return [Number(x || 0) * .04, Number(z || 0) * .04]; }
     function sceneNodeForLocation(location) { return (spatialScene.nodes || []).find(node => node.name === location || node.properties?.location === location); }
     function spacePosition(location) { const node = sceneNodeForLocation(location); return node ? spatialPosition(node.x, node.z) : (campusPositions[location] || [0, 0]); }
+    function addCampusInfrastructure() {
+      const pavement = new THREE.MeshStandardMaterial({ color: 0xc9d3d4, roughness: .92 });
+      const plaza = new THREE.MeshStandardMaterial({ color: 0xd9cfae, roughness: .9 });
+      const wallMaterial = new THREE.MeshStandardMaterial({ color: 0xe6dfcf, roughness: .88 });
+      const waterMaterial = new THREE.MeshStandardMaterial({ color: 0x69a9bd, roughness: .45, metalness: .03 });
+      const addPath = (x, z, w, d, rotation = 0) => { const path = new THREE.Mesh(new THREE.BoxGeometry(w, .045, d), pavement); path.position.set(x, -1.995, z); path.rotation.y = rotation; campusGroup.add(path); };
+      const addWall = (x, z, w, d) => { const wall = new THREE.Mesh(new THREE.BoxGeometry(w, .22, d), wallMaterial); wall.position.set(x, -1.86, z); campusGroup.add(wall); };
+      addWall(0, -4.8, 13.6, .12); addWall(0, 4.75, 13.6, .12); addWall(-6.8, 0, .12, 9.4); addWall(6.8, 0, .12, 9.4);
+      const gate = new THREE.Group();
+      const pillarMat = new THREE.MeshStandardMaterial({ color: 0xd2c7b8, roughness: .82 });
+      const signMat = new THREE.MeshStandardMaterial({ color: 0x2f5d70, roughness: .72 });
+      [-.55, .55].forEach(x => { const pillar = new THREE.Mesh(new THREE.BoxGeometry(.18, .9, .18), pillarMat); pillar.position.set(x, .38, 0); gate.add(pillar); });
+      const sign = new THREE.Mesh(new THREE.BoxGeometry(1.45, .2, .14), signMat); sign.position.set(0, .9, 0); gate.add(sign);
+      const gateLabel = makeTextSprite("智慧校园", { size: 12, bg: "rgba(47,93,112,.9)" }); gateLabel.position.set(0, 1.22, .04); gate.add(gateLabel);
+      gate.position.set(0, -1.96, -4.55); campusGroup.add(gate);
+      const pond = new THREE.Mesh(new THREE.CircleGeometry(.85, 40), waterMaterial); pond.scale.set(1.55, .72, 1); pond.rotation.x = -Math.PI / 2; pond.position.set(5.2, -1.985, -.55); campusGroup.add(pond);
+      const bridge = new THREE.Mesh(new THREE.BoxGeometry(1.65, .055, .28), pavement); bridge.position.set(5.15, -1.94, -.55); bridge.rotation.y = -.22; campusGroup.add(bridge);
+      addPath(0, 0, 13.8, .42, 0);
+      addPath(0, 0, .42, 8.5, 0);
+      addPath(0, -3.8, .56, 1.9, 0);
+      addPath(-3.55, 1.15, 6.0, .34, -.72);
+      addPath(3.45, 1.25, 5.8, .34, .7);
+      addPath(-3.5, -1.75, 5.6, .34, .58);
+      addPath(3.25, -1.65, 5.4, .34, -.55);
+      const plazaMesh = new THREE.Mesh(new THREE.CylinderGeometry(1.25, 1.25, .06, 48), plaza); plazaMesh.position.set(0, -1.955, 0); campusGroup.add(plazaMesh);
+      const fountain = new THREE.Group();
+      const basin = new THREE.Mesh(new THREE.CylinderGeometry(.62, .72, .18, 36), new THREE.MeshStandardMaterial({ color: 0x9fb4b8, roughness: .7 }));
+      const water = new THREE.Mesh(new THREE.CylinderGeometry(.48, .52, .035, 36), new THREE.MeshStandardMaterial({ color: 0x78b9d2, roughness: .35, metalness: .05 }));
+      const jet = new THREE.Mesh(new THREE.CylinderGeometry(.035, .055, .5, 12), new THREE.MeshStandardMaterial({ color: 0xd6eef5, roughness: .2 }));
+      basin.position.y = .09; water.position.y = .205; jet.position.y = .47; fountain.add(basin, water, jet); fountain.position.set(0, -1.93, 0); campusGroup.add(fountain);
+      const treePositions = [[-6.2, -2.8], [-5.8, -2.2], [-4.4, -2.55], [-3.2, -2.0], [-4.9, 1.85], [-4.0, 2.3], [-3.4, 3.65], [-.4, 3.75], [1.05, 3.85], [2.8, 3.95], [3.6, 1.25], [5.7, 1.25], [6.35, 2.15], [6.4, 3.55], [3.4, -3.2], [5.25, -2.7], [2.25, -3.75], [-1.2, -4.15]];
+      treePositions.forEach(([x, z], index) => { const tree = new THREE.Group(), trunk = new THREE.Mesh(new THREE.CylinderGeometry(.08, .12, .55, 8), new THREE.MeshStandardMaterial({ color: 0x6c4328, roughness: .9 })), crown = new THREE.Mesh(new THREE.IcosahedronGeometry(.42 + (index % 3) * .06, 1), new THREE.MeshStandardMaterial({ color: [0x0f5d32, 0x1d713b, 0x2b7f49][index % 3], roughness: .85 })); trunk.position.y = .25; crown.position.y = .76; tree.add(trunk, crown); tree.position.set(x, -1.98, z); campusGroup.add(tree); });
+      [[-2.2, .25], [2.2, -.28], [-.85, -1.1], [.95, 1.05]].forEach(([x, z]) => { const bench = new THREE.Group(), seat = new THREE.Mesh(new THREE.BoxGeometry(.62, .09, .18), new THREE.MeshStandardMaterial({ color: 0x8b6a34, roughness: .86 })), legs = new THREE.Mesh(new THREE.BoxGeometry(.5, .14, .04), new THREE.MeshStandardMaterial({ color: 0x4e3a25, roughness: .9 })); seat.position.y = .2; legs.position.y = .08; bench.add(seat, legs); bench.position.set(x, -1.98, z); campusGroup.add(bench); });
+      [[-3.0, .1], [3.0, .1], [.1, -2.3], [.1, 2.25], [-5.9, .9], [5.9, -.9]].forEach(([x, z]) => { const pole = new THREE.Mesh(new THREE.CylinderGeometry(.025, .035, .88, 10), new THREE.MeshStandardMaterial({ color: 0x1e2f38, roughness: .65 })); const lamp = new THREE.Mesh(new THREE.SphereGeometry(.09, 12, 8), new THREE.MeshBasicMaterial({ color: 0xf3f6e8 })); pole.position.set(x, -1.55, z); lamp.position.set(x, -1.06, z); campusGroup.add(pole, lamp); });
+    }
     function renderSpatialRoutes() { disposeGroup(routeGroup); const nodeById = new Map((spatialScene.nodes || []).map(node => [Number(node.id), node])); spatialAgents.forEach(state => { if (!["moving", "paused", "replanning"].includes(state.movement_status) || !Array.isArray(state.path) || state.path.length < 2) return; const points = [new THREE.Vector3(...[spatialPosition(state.x, state.z)[0], -1.9, spatialPosition(state.x, state.z)[1]])]; state.path.slice(Number(state.path_index || 0) + 1).forEach(nodeId => { const node = nodeById.get(Number(nodeId)); if (node) { const [x, z] = spatialPosition(node.x, node.z); points.push(new THREE.Vector3(x, -1.9, z)); } }); if (points.length < 2) return; const geometry = new THREE.BufferGeometry().setFromPoints(points), line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: 0xf2c14e, transparent: true, opacity: .88 })); routeGroup.add(line); }); }
     function agentScenePosition(agent, profile, count, x, z) { const state = spatialAgents.get(Number(agent.id)); if (state && ["moving", "paused", "replanning"].includes(state.movement_status)) { const [sx, sz] = spatialPosition(state.x, state.z); return [sx, -1.58, sz, true]; } const local = markerLocalPosition(profile, count); return [x + local[0], -1.95 + local[1], z + local[2], false]; }
     function disposeGroup(group) { group.traverse(item => { if (item.geometry) item.geometry.dispose?.(); if (item.material) { if (Array.isArray(item.material)) item.material.forEach(m => m.dispose?.()); else item.material.dispose?.(); } }); group.clear(); }
@@ -2617,6 +2787,7 @@
       const env = world?.environment || {}, isNight = ["晚上", "深夜"].includes(env.time_slot);
       renderer.setClearColor(isNight ? 0x102033 : 0xdce8e6); scene.fog = new THREE.Fog(isNight ? 0x102033 : 0xdce8e6, 12, 30);
       const profilesByLocation = {};
+      addCampusInfrastructure();
       spaces.forEach((space, index) => {
         const location = space.location || space.name, [x, z] = spacePosition(location), recent = (worldEvents || []).slice(-8).find(event => event.location === location), built = makeBuilding(space, index);
         built.group.position.set(x, -1.95, z); campusGroup.add(built.group); profilesByLocation[location] = built.profile; clickableObjects.push(built.body);
@@ -2689,7 +2860,21 @@
     function compactEventsForDisplay(events = []) { const compact = []; events.forEach(event => { const previous = compact[compact.length - 1], key = compactEventKey(event); if (previous && key && previous.compact_key === key) { previous.repeat_count = Number(previous.repeat_count || 1) + 1; previous.created_at = event.created_at || previous.created_at; previous.id = event.id || previous.id; return; } compact.push({ ...event, compact_key: key, display_content: eventContent(event) }); }); return compact; }
     function eventBubbleLabel(event) { if (event.event_type === "observer_model_detail") return "观察者触发"; return (event.payload?.action || event.event_type || "行动").slice(0, 12); }
     function eventBubbleColor(event) { return event.event_type === "observer_model_detail" ? "rgba(69,168,120,.92)" : "rgba(211,145,66,.88)"; }
-    function renderObserverHud() { const e = world?.environment || {}, runtime = worldRuntime || {}, status = runtime.status === "running" ? "运行中" : "已暂停", worldTime = formatWorldClock(true), worldDate = currentWorldClock().toLocaleDateString("zh-CN", { timeZone: "Asia/Shanghai" }); $("observerSubtitle").textContent = `${status} · ${worldDate} ${worldTime} · ${e.weather || "校园天气"} ${e.temperature ?? "--"}°C`; $("observerMetrics").innerHTML = [`时段 ${e.time_slot || "运行中"}`, `活跃 Agent ${agents.length}`, `当前观察 ${observedFocus}`, `事件 ${worldEvents.length}`].map(text => `<span class="hud-chip">${text}</span>`).join(""); const latest = compactEventsForDisplay(worldEvents).slice(-5).reverse(); $("observerEvents").innerHTML = latest.map(event => `<div class="hud-event"><strong>${eventTag(event)}${event.title || "世界事件"}${event.repeat_count > 1 ? ` · 重复 ${event.repeat_count} 次` : ""}</strong>${event.display_content || eventContent(event)}</div>`).join("") || '<div class="hud-event"><strong>正在监听世界</strong>等待 Agent 行动与校园事件。</div>'; $("observerFocusTitle").textContent = `观察：${observedFocus}`; $("observerFocusText").textContent = "点击空间或 Agent 可以切换观察焦点，世界会优先呈现被关注区域。"; }
+    function latestAgentEvent(agent) { return (worldEvents || []).slice().reverse().find(event => Number(event.resident_id) === Number(agent.id)); }
+    function agentActivityStatus(agent) { const event = latestAgentEvent(agent), action = event?.payload?.action || ""; if (["chat", "collaborate", "club_activity", "conflict"].includes(action)) return ["交互中", "#e85d75"]; if (["reflect", "observe"].includes(action)) return ["思考中", "#6aa7d8"]; if (["move", "consume", "rest", "queue", "attend_class"].includes(action)) return ["探索中", "#4f8b58"]; return ["探索中", "#4f8b58"]; }
+    function actionPhrase(agent, event) { const action = event?.payload?.action || "", location = event?.location || agent.location || "校园"; const deferred = event?.payload?.runtime_decision?.deferred_action; if (action === "move") return deferred ? `前往${location}，准备${deferred === "consume" ? "吃饭" : deferred === "rest" ? "休息" : "执行计划"}` : `前往${location}`; if (action === "consume") return `在${location}补充食物`; if (action === "rest") return `在${location}休息恢复`; if (action === "queue") return `在${location}排队等待`; if (action === "attend_class") return `在${location}上课`; if (action === "chat") return `在${location}轻量交流`; if (action === "collaborate") return `在${location}协作`; if (action === "reflect") return `在${location}整理状态`; if (action === "observe") return `观察${location}`; return location; }
+    function bodyRiskScore(agent) { const body = bodyStates.get(Number(agent.id)) || {}; const hunger = Number(body.hunger || 0), fatigue = Number(body.fatigue || 0), health = Number(body.health ?? 100), attention = Number(body.attention ?? 100); return Math.max(hunger, fatigue, 100 - health, 100 - attention); }
+    function bodyRiskLabel(agent) { const body = bodyStates.get(Number(agent.id)) || {}; if (!Object.keys(body).length) return bodyAlertLabel(agent).replace(/^ · /, "") || agent.role || "校园居民"; const risks = []; if (Number(body.hunger || 0) >= 75) risks.push("饥饿"); if (Number(body.fatigue || 0) >= 75) risks.push("疲劳"); if (Number(body.health ?? 100) < 55) risks.push("健康风险"); if (Number(body.attention ?? 100) < 35) risks.push("注意力低"); return risks.join("、") || "状态稳定"; }
+    function monitorProgress(agent) { const body = bodyStates.get(Number(agent.id)) || {}; if (!Object.keys(body).length) return 52 + (Number(agent.id || 0) % 9); return Math.max(8, Math.min(100, Math.round(bodyRiskScore(agent)))); }
+    function renderStudentMonitor() {
+      const counts = { "探索中": 0, "思考中": 0, "交互中": 0 };
+      agents.forEach(agent => { const [label] = agentActivityStatus(agent); counts[label] = (counts[label] || 0) + 1; });
+      const focusAgents = [...agents].sort((a, b) => bodyRiskScore(b) - bodyRiskScore(a)).slice(0, 4);
+      const worldTime = formatWorldClock(true);
+      return `<section class="student-monitor"><div class="student-monitor-head"><h3>学生状态监控</h3><span class="monitor-time">${escapeHtml(observedFocus)} · ${worldTime}</span></div><div class="monitor-stats"><div class="monitor-stat" style="--stat-color:#4f8b58"><strong>${counts["探索中"] || 0}</strong><span>探索中</span></div><div class="monitor-stat" style="--stat-color:#6aa7d8"><strong>${counts["思考中"] || 0}</strong><span>思考中</span></div><div class="monitor-stat" style="--stat-color:#e85d75"><strong>${counts["交互中"] || 0}</strong><span>交互中</span></div></div><div class="monitor-list">${focusAgents.map(agent => { const [statusLabel, color] = agentActivityStatus(agent), progress = monitorProgress(agent), event = latestAgentEvent(agent), target = actionPhrase(agent, event), risk = bodyRiskLabel(agent); return `<button class="monitor-row" style="--row-color:${color}" data-agent-id="${agent.id}"><span><strong>${escapeHtml(agent.name || "Agent")}</strong><small>${escapeHtml(target)} · ${escapeHtml(risk)}</small><span class="monitor-progress" style="--value:${progress}%"><i></i></span></span><b class="monitor-badge">${statusLabel}</b></button>`; }).join("") || '<div class="empty">等待 Agent 状态。</div>'}</div></section>`;
+    }
+    function bindStudentMonitor() { document.querySelectorAll(".monitor-row[data-agent-id]").forEach(row => row.onclick = () => { const index = agents.findIndex(agent => Number(agent.id) === Number(row.dataset.agentId)); if (index >= 0) openProfile(index); }); }
+    function renderObserverHud() { const e = world?.environment || {}, runtime = worldRuntime || {}, status = runtime.status === "running" ? "运行中" : "已暂停", worldTime = formatWorldClock(true), worldDate = currentWorldClock().toLocaleDateString("zh-CN", { timeZone: "Asia/Shanghai" }); $("observerSubtitle").textContent = `${status} · ${worldDate} ${worldTime} · ${e.weather || "校园天气"} ${e.temperature ?? "--"}°C`; $("observerMetrics").innerHTML = [`时段 ${e.time_slot || "运行中"}`, `活跃 Agent ${agents.length}`, `当前观察 ${observedFocus}`, `滚轮缩放 · 拖拽移动`].map(text => `<span class="hud-chip">${text}</span>`).join(""); $("observerEvents").innerHTML = renderStudentMonitor(); bindStudentMonitor(); $("observerFocusTitle").textContent = `观察：${observedFocus}`; $("observerFocusText").textContent = "拖拽可移动地图，滚轮可缩放；点击空间或 Agent 切换观察焦点。"; }
     function ensureRuntimePanel() { let panel = $("runtimePanel"); if (panel) return panel; panel = document.createElement("section"); panel.id = "runtimePanel"; panel.className = "runtime-panel"; panel.innerHTML = '<div class="runtime-card"><h2>世界运行时</h2><div class="runtime-state"><i id="runtimeDot" class="runtime-dot"></i><span id="runtimeStatus">正在连接</span></div><div class="runtime-meta" id="runtimeMeta">等待 runtime 数据</div><div class="runtime-actions admin-only"><button id="worldStart">启动</button><button id="worldPause">暂停</button><button id="worldTick">推进 tick</button></div></div><div class="runtime-card"><h2>实时事件流</h2><div class="event-stream" id="worldEventStream"><div class="empty" style="padding:8px 0">等待世界事件...</div></div></div>'; const pulse = $("worldPulse"), board = document.querySelector(".centerboard"); if (pulse) pulse.insertAdjacentElement("afterend", panel); else board.insertAdjacentElement("afterbegin", panel); $("worldStart").onclick = () => adminWorldAction("/api/admin/world/start"); $("worldPause").onclick = () => adminWorldAction("/api/admin/world/pause"); $("worldTick").onclick = () => adminWorldAction("/api/admin/world/tick"); return panel; }
     function renderWorldRuntime() { ensureRuntimePanel(); const runtime = worldRuntime || {}, status = runtime.status || "paused", budget = runtime.budget || {}, worldTime = formatWorldClock(false); $("runtimeDot").className = `runtime-dot ${status}`; $("runtimeStatus").textContent = status === "running" ? "后台运行中" : "已暂停"; $("runtimeMeta").textContent = `${worldTime} · tick ${runtime.latest_tick?.tick_index ?? "--"} · 自动模型 ${budget.auto_model_calls_used ?? 0}/${budget.daily_auto_model_budget ?? 100}`; $("dayLabel").textContent = `${status === "running" ? "运行中" : "已暂停"} · ${(world?.environment || {}).weather || "校园"} · ${worldTime}`; }
     function renderWorldEvents() { ensureRuntimePanel(); const box = $("worldEventStream"); const visible = compactEventsForDisplay(worldEvents).slice(-40).reverse(); box.innerHTML = visible.map(event => `<div class="event-entry ${event.event_type === "observer_model_detail" ? "observer-trigger" : ""}"><strong>${eventTag(event)}${event.title || "世界事件"}${event.repeat_count > 1 ? ` · 重复 ${event.repeat_count} 次` : ""}</strong>${event.display_content || eventContent(event)}<span class="progress-meta">${event.slot || ""}${event.location ? ` · ${event.location}` : ""}${event.resident_id ? ` · Agent ${event.resident_id}` : ""}${event.created_at ? ` · ${event.created_at}` : ""}</span></div>`).join("") || '<div class="empty" style="padding:8px 0">等待世界事件...</div>'; }
@@ -2727,7 +2912,10 @@
     async function runSimulation() { if (simulationRunning) { ensureSimulationDialog().showModal(); return; } simulationRunning = true; simulationProgressStarted = true; simulationFinalEvent = null; $("simulationProgress").innerHTML = ""; setSimulationButtons(); $("status").textContent = "Agent 正在完成今日自主行动..."; let finalEvent = null; try { appendSimulationProgress({ event: "progress", message: "正在创建模拟任务..." }); const start = await fetch("/api/simulate/ai-day/progress", { method: "POST" }); if (!start.ok) throw new Error("模拟任务创建失败"); const started = await readJsonResponse(start, "模拟任务创建接口"); let nextIndex = 0; (started.events || []).forEach(event => { appendSimulationProgress(event); nextIndex++; }); while (true) { await new Promise(resolve => setTimeout(resolve, 1000)); const response = await fetch(`/api/simulate/ai-day/progress/${started.job_id}?after=${nextIndex}`); if (!response.ok) throw new Error("模拟进度读取失败"); const payload = await readJsonResponse(response, "模拟进度接口"); (payload.events || []).forEach(event => appendSimulationProgress(event)); nextIndex = payload.next_index ?? nextIndex + (payload.events || []).length; if (payload.status === "complete") { finalEvent = payload.result || {}; break; } if (payload.status === "error") throw new Error(payload.error?.message || "模拟执行失败"); } await load(); simulationFinalEvent = finalEvent; const actions = simulationFinalEvent?.actions_count ?? agents.length; $("status").textContent = `第 ${world.current_day} 天已完成 · ${actions} 位 Agent 更新了状态`; } catch (e) { appendSimulationProgress({ event: "error", message: `操作失败：${e.message}` }); $("status").textContent = `操作失败：${e.message}`; } finally { simulationRunning = false; setSimulationButtons(); } }
     function scrollToData() { $("dataDashboard").scrollIntoView({ behavior: "smooth", block: "start" }); }
     function scrollToAgents() { scrollToData(); document.body.classList.add("mobile-agents"); setTimeout(() => $("agentPanel")?.scrollIntoView({ behavior: "smooth", block: "start" }), 260); }
-    function handleWorldPick(event) { const rect = canvas.getBoundingClientRect(); pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1; pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1; raycaster.setFromCamera(pointer, camera); const hit = raycaster.intersectObjects(clickableObjects, true)[0]; if (!hit) return; const data = hit.object.userData || {}; if (data.type === "agent" && data.agent) { const index = agents.findIndex(agent => Number(agent.id) === Number(data.agent.id)); if (index >= 0) openProfile(index); return; } if (data.type === "space" && data.location) { touchObserverSession({ location: data.location }); $("status").textContent = `正在观察${data.location}`; } }
+    function focusCameraOnLocation(location) { const [x, z] = spacePosition(location); mapPanX = x; mapPanZ = z; zoom = Math.min(1.25, Math.max(.72, zoom)); autoOrbit = false; updateAutoViewButton(); setObserverCamera(); }
+    function pickedWorldObject(event) { const rect = canvas.getBoundingClientRect(); pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1; pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1; raycaster.setFromCamera(pointer, camera); const hit = raycaster.intersectObjects(clickableObjects, true)[0]; return hit?.object?.userData || null; }
+    function handleWorldPick(event) { const data = pickedWorldObject(event); if (!data) return; if (data.type === "agent" && data.agent) { const index = agents.findIndex(agent => Number(agent.id) === Number(data.agent.id)); if (index >= 0) openProfile(index); return; } if (data.type === "space" && data.location) { touchObserverSession({ location: data.location }); $("status").textContent = `正在观察${data.location}`; } }
+    function handleWorldFocus(event) { const data = pickedWorldObject(event); if (data?.type === "space" && data.location) { focusCameraOnLocation(data.location); touchObserverSession({ location: data.location }); $("status").textContent = `已聚焦${data.location}`; } }
     function ensureMobileDock() { const dock = document.createElement("nav"); dock.className = "mobile-dock"; dock.innerHTML = '<button data-view="world">世界</button><button data-view="data">数据</button><button data-view="agents">居民</button><button data-view="paper">日报</button>'; dock.addEventListener("click", event => { const view = event.target.dataset.view; if (!view) return; document.body.classList.remove("mobile-overview", "mobile-agents"); if (view === "world") window.scrollTo({ top: 0, behavior: "smooth" }); if (view === "data") scrollToData(); if (view === "agents") { document.body.classList.add("mobile-agents"); scrollToAgents(); } if (view === "paper") $("newspaperOverlay").classList.add("open"); }); document.body.append(dock); }
     // Keep the primary scene visible while the Supabase-backed state is loading.
     ensureSceneStage();
@@ -2735,8 +2923,9 @@
     ensureMobileDock();
     function updateAutoViewButton() { if ($("toggleAutoView")) $("toggleAutoView").textContent = autoOrbit ? "暂停视角" : "自动视角"; }
     $("refresh").onclick = load; $("detailRefresh").onclick = load; $("simulate").onclick = simulate; $("detailSimulate").onclick = simulate; $("openNewspaper").onclick = () => { $("newspaperOverlay").classList.add("open"); loadNewsPosts(); }; $("closeNewspaper").onclick = () => $("newspaperOverlay").classList.remove("open"); $("paperPrev").onclick = () => newspaperArchive.previous_day && loadNewsPosts(newspaperArchive.previous_day); $("paperToday").onclick = () => loadNewsPosts(); $("paperNext").onclick = () => newspaperArchive.next_day && loadNewsPosts(newspaperArchive.next_day); document.querySelectorAll("[data-paper-view]").forEach(button => button.onclick = () => setNewspaperView(button.dataset.paperView)); $("closeProfile").onclick = () => $("profileOverlay").classList.remove("open"); $("toggleAutoView").onclick = () => { autoOrbit = !autoOrbit; updateAutoViewButton(); }; $("jumpToData").onclick = scrollToData; $("jumpToAgents").onclick = scrollToAgents; $("cameraZoomIn").onclick = () => setObserverZoom(zoom - .12); $("cameraZoomOut").onclick = () => setObserverZoom(zoom + .12); $("cameraReset").onclick = resetObserverCamera; $("hudWorldTick").onclick = () => adminWorldAction("/api/admin/world/tick"); $("profileOverlay").onclick = e => { if (e.target === $("profileOverlay")) $("profileOverlay").classList.remove("open") }; addEventListener("keydown", e => { if (e.key === "Escape") { $("profileOverlay").classList.remove("open"); $("newspaperOverlay").classList.remove("open"); document.body.classList.remove("mobile-overview", "mobile-agents"); } });
-    function finishCanvasPointer(e) { const distance = Math.hypot(e.clientX - pointerDownX, e.clientY - pointerDownY); if (pointerTracking && distance < 5) handleWorldPick(e); if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId); dragging = false; pointerTracking = false; pointerType = ""; }
-    canvas.addEventListener("pointerdown", e => { pointerTracking = true; pointerType = e.pointerType || "mouse"; pointerX = e.clientX; pointerDownX = e.clientX; pointerDownY = e.clientY; if (pointerType === "mouse") { dragging = true; autoOrbit = false; updateAutoViewButton(); canvas.setPointerCapture(e.pointerId); } }); canvas.addEventListener("pointerup", finishCanvasPointer); canvas.addEventListener("pointercancel", () => { dragging = false; pointerTracking = false; pointerType = ""; }); canvas.addEventListener("pointermove", e => { if (!pointerTracking) return; const totalX = e.clientX - pointerDownX, totalY = e.clientY - pointerDownY; if (!dragging && pointerType !== "mouse") { if (Math.abs(totalY) > 8 && Math.abs(totalY) > Math.abs(totalX)) { pointerTracking = false; return; } if (Math.abs(totalX) > 8 && Math.abs(totalX) > Math.abs(totalY)) { dragging = true; autoOrbit = false; updateAutoViewButton(); pointerX = e.clientX; canvas.setPointerCapture(e.pointerId); } else { return; } } if (dragging) { turn += (e.clientX - pointerX) * .012; pointerX = e.clientX; } }); canvas.addEventListener("wheel", e => { if (!e.altKey) return; e.preventDefault(); setObserverZoom(zoom + e.deltaY * .0006); }, { passive: false });
+    function finishCanvasPointer(e) { const distance = Math.hypot(e.clientX - pointerDownX, e.clientY - pointerDownY); if (pointerTracking && distance < 7) handleWorldPick(e); if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId); dragging = false; pointerTracking = false; pointerType = ""; }
+    canvas.addEventListener("pointerdown", e => { pointerTracking = true; dragging = true; pointerType = e.pointerType || "mouse"; pointerX = e.clientX; pointerY = e.clientY; pointerDownX = e.clientX; pointerDownY = e.clientY; autoOrbit = false; updateAutoViewButton(); canvas.setPointerCapture(e.pointerId); }); canvas.addEventListener("pointerup", finishCanvasPointer); canvas.addEventListener("pointercancel", () => { dragging = false; pointerTracking = false; pointerType = ""; }); canvas.addEventListener("pointermove", e => { if (!pointerTracking || !dragging) return; panObserver(e.clientX - pointerX, e.clientY - pointerY); pointerX = e.clientX; pointerY = e.clientY; }); canvas.addEventListener("wheel", e => { e.preventDefault(); setObserverZoom(zoom + e.deltaY * .0008); }, { passive: false });
+    canvas.addEventListener("dblclick", handleWorldFocus);
     function animate(t) { requestAnimationFrame(animate); if (autoOrbit && !dragging) turn += .00035; root.rotation.y = turn; worldAgentGroup.children.forEach((actor, index) => { const move = actor.userData.move; if (move) { const pct = Math.min(1, (performance.now() - move.start) / move.duration); actor.position.lerpVectors(move.from, move.to, pct); actor.position.y += Math.sin(pct * Math.PI) * .55; if (pct >= 1) delete actor.userData.move; } else { actor.position.y = (actor.userData.baseY ?? actor.position.y) + Math.sin(t * .002 + index * .45) * .012; } }); bubbleGroup.children.forEach((item, index) => { if (item.type === "Sprite") item.position.y += Math.sin(t * .003 + (item.userData.bob || index)) * .0008; }); renderer.render(scene, camera); drawFallbackWorld(t); if ($("profileOverlay").classList.contains("open")) { profileRoot.rotation.y = -t * .00028; profileRenderer.render(profileScene, profileCamera); } } updateAutoViewButton(); animate(0); loadObserverState().then(() => { touchObserverSession({}); setTimeout(load, 300); }); pollWorldEvents(); setInterval(() => { renderObserverHud(); renderWorldRuntime(); }, 1000); setInterval(loadObserverState, 15000); setInterval(pollWorldEvents, 5000);
     const renderLifeCourseV2 = renderLifeCourse;
     renderLifeCourse = function (payload) {
