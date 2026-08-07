@@ -168,6 +168,9 @@ World Runtime 已开始绑定版本化环境配置：
 
 快照支持 admin 恢复和顺序分支切换。恢复要求 runtime 已暂停，默认先创建自动备份；当前版本只允许居民拓扑一致的快照恢复，人口增删分支将在阶段 3 人口流动机制中处理。
 
+Agent 涌现、群体模式识别、编辑 Agent 与制度反馈的后续演进统一维护在
+[ENVIRONMENT_REALISM_ROADMAP2.md](ENVIRONMENT_REALISM_ROADMAP2.md)。
+
 ## 前端结构
 
 `frontend/index.html` 是单文件应用，后端通过 `FileResponse` 返回页面，并挂载：

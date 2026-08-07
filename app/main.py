@@ -4131,21 +4131,29 @@ WORLD_UPDATE_HANDLERS = {
 
 def run_due_world_updates(conn, world_time, tick_id, day, slot, parent_event_id=None):
     ensure_world_runtime_tables(conn)
-    schedules = conn.execute(
+    schedule_rows = conn.execute(
         """
         SELECT * FROM world_update_schedules
         WHERE status = 'active'
         ORDER BY interval_seconds, id
         """
     ).fetchall()
+    schedules = []
+    seen_update_keys = set()
+    for schedule_row in schedule_rows:
+        schedule = dict(schedule_row)
+        update_key = schedule["update_key"]
+        if update_key in seen_update_keys:
+            continue
+        seen_update_keys.add(update_key)
+        schedules.append(schedule)
     event_cursor_row = conn.execute(
         "SELECT COALESCE(MAX(id), 0) AS value FROM world_event_stream"
     ).fetchone()
     input_event_cursor = int(event_cursor_row["value"] or 0)
     completed = []
     failed = []
-    for schedule_row in schedules:
-        schedule = dict(schedule_row)
+    for schedule in schedules:
         next_run_at = parse_world_datetime(schedule["next_run_at"])
         if next_run_at and next_run_at > world_time:
             continue
@@ -7330,6 +7338,9 @@ def _advance_world_tick_locked(reason="background"):
             )
             longitudinal_updates = process_longitudinal_runtime(conn, world_time)
             completed_at = get_world_now().isoformat()
+            action_limited = sum(
+                1 for item in results if item.get("action_success") is False
+            )
             conn.execute(
                 """
                 UPDATE world_ticks
@@ -7350,12 +7361,16 @@ def _advance_world_tick_locked(reason="background"):
                 conn,
                 "world_tick_complete",
                 "世界 tick 完成",
-                f"本次 tick 处理 {len(results)} 位 Agent，失败 {failed} 位。",
+                (
+                    f"本次 tick 处理 {len(results)} 位 Agent，运行失败 {failed} 位"
+                    f"，行动受限 {action_limited} 位。"
+                ),
                 tick_id=tick_id,
                 payload={
                     "started_event_id": start_event["id"],
                     "processed_agents": len(results),
                     "failed_agents": failed,
+                    "action_limited_agents": action_limited,
                     "multiscale_updates": {
                         "due_count": multiscale_updates["due_count"],
                         "completed_count": len(multiscale_updates["completed"]),
