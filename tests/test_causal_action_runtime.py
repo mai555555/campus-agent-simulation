@@ -99,6 +99,114 @@ class CausalActionRuntimeTest(unittest.TestCase):
         self.assertEqual(decision["mode"], "rule-unconfigured-v1")
         self.assertNotIn("失败", decision["reason"])
 
+    def test_wellbeing_priority_redirects_hungry_agent_to_consume(self):
+        self.conn.execute(
+            """
+            CREATE TABLE agent_body_states (
+                resident_id INTEGER PRIMARY KEY,
+                hunger REAL NOT NULL,
+                fatigue REAL NOT NULL,
+                sleep_debt REAL NOT NULL,
+                stress REAL NOT NULL,
+                attention REAL NOT NULL,
+                social_energy REAL NOT NULL,
+                health REAL NOT NULL,
+                weather_exposure REAL NOT NULL,
+                last_updated_at TEXT,
+                last_updated_tick INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'test',
+                version INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO agent_body_states
+            (resident_id, hunger, fatigue, sleep_debt, stress, attention,
+             social_energy, health, weather_exposure)
+            VALUES (1, 50, 30, 20, 20, 60, 60, 80, 0)
+            """
+        )
+        self.conn.execute(
+            """
+            UPDATE agent_body_states
+            SET hunger = 96, fatigue = 30, health = 80, attention = 60
+            WHERE resident_id = 1
+            """
+        )
+        self.conn.execute(
+            "UPDATE agent_profiles SET energy = 80, time_budget = 0 WHERE resident_id = 1"
+        )
+        parent = main.append_world_event(
+            self.conn,
+            "test_tick",
+            "测试 tick",
+            "开始测试饥饿恢复兜底",
+        )
+        tick = self.conn.execute(
+            """
+            INSERT INTO world_ticks
+            (tick_index, world_time, day, slot, reason, status)
+            VALUES (1, ?, 1, '08:00-16:00', 'test', 'running')
+            """,
+            (self.world_time.isoformat(),),
+        )
+        resident = dict(
+            self.conn.execute(
+                """
+                SELECT r.*, p.strategy
+                FROM residents r
+                JOIN agent_profiles p ON p.resident_id = r.id
+                WHERE r.id = 1
+                """
+            ).fetchone()
+        )
+        due_plan = {
+            "intent": "测试饥饿恢复",
+            "steps": [
+                {
+                    "time": "11:00",
+                    "action": "observe",
+                    "location": "图书馆",
+                    "goal": "观察图书馆",
+                }
+            ],
+        }
+        decision = {
+            "action": "observe",
+            "location": "图书馆",
+            "goal": "观察图书馆",
+            "reason": "测试原计划",
+            "plan_relation": "continue",
+            "mode": "test",
+        }
+
+        with patch.object(main, "get_current_agent_plan", return_value=due_plan), patch.object(
+            main, "build_autonomous_tick_decision", return_value=decision
+        ), patch.object(
+            main,
+            "apply_realism_constraints_to_decision",
+            side_effect=lambda conn, agent, item, perception, world_time: item,
+        ):
+            result = main.process_world_agent_tick(
+                self.conn,
+                resident,
+                self.world_time,
+                tick.lastrowid,
+                1,
+                "08:00-16:00",
+                parent_event_id=parent["id"],
+            )
+
+        body = self.conn.execute(
+            "SELECT hunger FROM agent_body_states WHERE resident_id = 1"
+        ).fetchone()
+        payload = main.load_json_text(result["event"]["payload"], {})
+        self.assertTrue(result["success"])
+        self.assertEqual(payload["action"], "consume")
+        self.assertLess(body["hunger"], 96)
+
     def test_news_classification_ignores_internal_llm_fallback_reason(self):
         payload = {
             "runtime_decision": {
